@@ -256,6 +256,20 @@ MainComponent::MainComponent()
     };
     playerBar.cb.add = [this] (PlayerBar::Tab tab)
     {
+        auto warn = [] (const juce::String& text)
+        {
+            juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon, "TC", text);
+        };
+        if (tab != PlayerBar::Tab::Seq && library.projectNames().isEmpty())
+        {
+            warn ("Плейлист и трек нельзя создать без секвенции. Сначала создайте секвенцию (вкладка Seq)."_ru);
+            return;
+        }
+        if (tab == PlayerBar::Tab::Tracks && playlist.name.isEmpty())
+        {
+            warn ("Трек нельзя создать без плейлиста. Сначала создайте плейлист (вкладка Playlist)."_ru);
+            return;
+        }
         if (tab == PlayerBar::Tab::Seq)
             askText ("Новая секвенция"_ru, "Название (например, группа):"_ru, "Новая секвенция"_ru,
                      [this] (juce::String n) { createProject (n); });
