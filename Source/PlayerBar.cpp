@@ -53,23 +53,18 @@ void PlayerBar::resized()
     r.removeFromRight (gap);
     plateRect = r;
 
-    auto iconRow = [] (juce::Rectangle<int> card)
+    // small icon buttons in the top-right corner of a plate, right to left
+    auto place = [] (juce::Rectangle<int> card, std::initializer_list<IconButton*> buttons)
     {
-        auto row = card.reduced (10, 0).removeFromBottom (36).withTrimmedBottom (8);
-        return row;
+        int x = card.getRight() - 8;
+        for (auto* b : buttons)
+        {
+            b->setBounds (x - 28, card.getY() + 7, 28, 22);
+            x -= 28 + 4;
+        }
     };
-
-    auto a = iconRow (seqRect);
-    seqSave.setBounds (a.removeFromLeft (38));
-    a.removeFromLeft (6);
-    seqNew.setBounds (a.removeFromLeft (38));
-
-    auto b = iconRow (plRect);
-    plSave.setBounds (b.removeFromLeft (38));
-    b.removeFromLeft (6);
-    plDelete.setBounds (b.removeFromLeft (38));
-    b.removeFromLeft (6);
-    plAdd.setBounds (b.removeFromLeft (38));
+    place (seqRect, { &seqNew, &seqSave });
+    place (plRect, { &plAdd, &plDelete, &plSave });
 }
 
 void PlayerBar::drawCard (juce::Graphics& g, juce::Rectangle<int> r, const juce::String& caption,
@@ -87,16 +82,7 @@ void PlayerBar::drawCard (juce::Graphics& g, juce::Rectangle<int> r, const juce:
 
     g.setColour (Pal::text);
     g.setFont (juce::FontOptions (18.0f, juce::Font::bold));
-    g.drawText (title, r.getX() + 14, r.getY() + 25, r.getWidth() - 48, 26, juce::Justification::left, true);
-
-    // chevron
-    juce::Path p;
-    const float cx = (float) r.getRight() - 20.0f, cy = (float) r.getY() + 38.0f;
-    p.startNewSubPath (cx - 4.5f, cy - 2.5f);
-    p.lineTo (cx, cy + 2.5f);
-    p.lineTo (cx + 4.5f, cy - 2.5f);
-    g.setColour (Pal::textDim);
-    g.strokePath (p, juce::PathStrokeType (1.8f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+    g.drawText (title, r.getX() + 14, r.getY() + 34, r.getWidth() - 28, 28, juce::Justification::left, true);
 }
 
 void PlayerBar::paint (juce::Graphics& g)
@@ -138,7 +124,7 @@ void PlayerBar::mouseMove (const juce::MouseEvent& e)
     // the cards react only above their icon rows
     auto p = e.getPosition();
     int h = hitTest (p);
-    if ((h == 1 && p.y > seqRect.getBottom() - 46) || (h == 2 && p.y > plRect.getBottom() - 46))
+    if ((h == 1 && p.y < seqRect.getY() + 32 && p.x > seqRect.getRight() - 140) || (h == 2 && p.y < plRect.getY() + 32 && p.x > plRect.getRight() - 140))
         h = 0;
     setHot (h);
 }
@@ -147,9 +133,9 @@ void PlayerBar::mouseDown (const juce::MouseEvent& e)
 {
     auto p = e.getPosition();
     const int h = hitTest (p);
-    if (h == 1 && p.y <= seqRect.getBottom() - 46 && cb.sequenceMenu)
+    if (h == 1 && cb.sequenceMenu)
         cb.sequenceMenu();
-    else if (h == 2 && p.y <= plRect.getBottom() - 46 && cb.playlistMenu)
+    else if (h == 2 && cb.playlistMenu)
         cb.playlistMenu();
     else if (h == 3 && cb.plateClick)
         cb.plateClick();

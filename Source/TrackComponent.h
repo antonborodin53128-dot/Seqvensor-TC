@@ -95,11 +95,12 @@ public:
             case Icon::Prev:
             case Icon::Next:
             {
+                // d = direction the triangle points to; the bar is on the same side
                 const float d = icon == Icon::Prev ? -1.0f : 1.0f;
                 juce::Path p;
-                p.addTriangle (c.x + d * s * 1.15f, c.y - s * 1.1f, c.x + d * s * 1.15f, c.y + s * 1.1f, c.x - d * s * 0.55f, c.y);
+                p.addTriangle (c.x + d * s * 0.8f, c.y, c.x - d * s * 0.9f, c.y - s * 1.1f, c.x - d * s * 0.9f, c.y + s * 1.1f);
                 g.fillPath (p);
-                g.fillRoundedRectangle (juce::Rectangle<float> (s * 0.4f, s * 2.2f).withCentre ({ c.x - d * s * 1.1f, c.y }), 1.5f);
+                g.fillRoundedRectangle (juce::Rectangle<float> (s * 0.4f, s * 2.2f).withCentre ({ c.x + d * s * 1.15f, c.y }), 1.5f);
                 break;
             }
             case Icon::Save:
