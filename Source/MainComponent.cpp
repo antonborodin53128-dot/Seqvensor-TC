@@ -1141,7 +1141,7 @@ void MainComponent::initialiseLibrary()
     enterProject (comp);
 }
 
-void MainComponent::enterProject (const juce::String& preferredComposition)
+void MainComponent::enterProject (juce::String preferredComposition)
 {
     const auto comps = library.sequenceNames();
     juce::String target = preferredComposition;
@@ -1154,7 +1154,7 @@ void MainComponent::enterProject (const juce::String& preferredComposition)
         engine.saveActiveSequence();   // creates the file
 }
 
-void MainComponent::switchProject (const juce::String& name)
+void MainComponent::switchProject (juce::String name)
 {
     saveEverything (false);
     library.setProject (name);
@@ -1308,7 +1308,7 @@ void MainComponent::onPlayerRowClicked (PlayerBar::Tab tab, int id)
     }
 }
 
-void MainComponent::loadPlaylistByName (const juce::String& name)
+void MainComponent::loadPlaylistByName (juce::String name)
 {
     savePlaylistNow();
     Playlist p;
@@ -1380,7 +1380,7 @@ void MainComponent::preloadNeighbours()
     engine.dropSequences (keep);
 }
 
-void MainComponent::switchToSequence (const juce::String& name, int indexInPlaylist)
+void MainComponent::switchToSequence (juce::String name, int indexInPlaylist)
 {
     auto seq = engine.obtainSequence (library.sequenceFile (name));
     pluginWindows.clear();

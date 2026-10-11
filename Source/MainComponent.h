@@ -61,19 +61,19 @@ private:
     void layoutTimelineParts();
     // sequences (songs) and playlists
     void initialiseLibrary();
-    void enterProject (const juce::String& preferredComposition);
-    void switchProject (const juce::String& name);
+    void enterProject (juce::String preferredComposition);
+    void switchProject (juce::String name);
     void createProject (const juce::String& wantedName);
     void renameProject();
     void deleteProject();
-    void switchToSequence (const juce::String& name, int indexInPlaylist);
+    void switchToSequence (juce::String name, int indexInPlaylist);
     void stepSong (int delta);
     void refreshPlayerBar();
     void preloadNeighbours();
     void showAddTrackMenu();
     void showDeleteMenu();
     void onPlayerRowClicked (PlayerBar::Tab tab, int id);
-    void loadPlaylistByName (const juce::String& name);
+    void loadPlaylistByName (juce::String name);
     void createPlaylist (const juce::String& wantedName);
     void deletePlaylistConfirm();
     void createSequence (const juce::String& wantedName, bool addToPlaylist);
