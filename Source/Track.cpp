@@ -161,29 +161,31 @@ bool Track::loadFile (const juce::File& file)
     transport.start();   // always "started": playback is gated by the track's own clock
     currentFile = file;
     hasFile = true;
-    transport.setPosition (startPositionSeconds());
+    transport.setPosition (0.0);
     return true;
 }
 
 void Track::setClipOffset (double seconds)
 {
-    clipOffset.store (seconds);
+    // the audio may start earlier than the grid only by the 4 count-in beats
+    clipOffset.store (juce::jmax (seconds, -4.0 * beatSeconds()));
     if (hasFile.load() && ! running.load())
-        transport.setPosition (startPositionSeconds());
+        transport.setPosition (0.0);
 }
 
-void Track::prepareStart()
+void Track::prepareStart (int countInBeats)
 {
     if (hasFile.load())
-        transport.setPosition (startPositionSeconds());
+        transport.setPosition (startPositionFor (countInBeats));
 }
 
 void Track::play()
 {
     if (! playerActive.load() || ! hasFile.load())
         return;
-    prepareStart();
-    startRequest.store (0);
+    const int countInBeats = metronomeOn.load() ? 4 : 0;
+    prepareStart (countInBeats);
+    startRequest.store (countInBeats);
 }
 
 void Track::haltTransport()
@@ -196,7 +198,7 @@ void Track::stopAndRewind()
 {
     haltTransport();
     if (hasFile.load())
-        transport.setPosition (startPositionSeconds());
+        transport.setPosition (0.0);
 }
 
 void Track::setLooping (bool shouldLoop)
@@ -284,7 +286,10 @@ void Track::renderTransport (int n)
         nextBeatIn = 0.0;
         countIn = req;
         musicStarted = (req == 0);
-        fileDelayLeft = juce::jmax (0, (int) std::lround (clipOffset.load() * sampleRate));
+        // the file starts at (count-in + offset) after the press; negative = already skipped by prepareStart
+        // without the metronome (no count-in) the song just starts at once, from its beginning
+        fileDelayLeft = req <= 0 ? 0
+                                 : juce::jmax (0, (int) std::lround (((double) req * beatSeconds() + clipOffset.load()) * sampleRate));
         clickPos = -1;
         running.store (true);
     }

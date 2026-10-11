@@ -65,7 +65,7 @@ public:
     void setClipOffset (double seconds);
     double getClipOffset() const { return clipOffset.load(); }
     void play();                           // this player only, no count-in
-    void prepareStart();                   // rewinds to the start position (before a start request)
+    void prepareStart (int countInBeats);  // seeks the file (before a start request)
     void requestStart (int countInBeats) { startRequest.store (countInBeats); }
     void haltTransport();                  // stops without rewinding (safe from any thread)
     void stopAndRewind();
@@ -93,7 +93,15 @@ public:
 private:
     void renderTransport (int n);
     void renderClick (float* l, float* r, int n);
-    double startPositionSeconds() const { return juce::jmax (0.0, -clipOffset.load()); }
+    double beatSeconds() const { return 60.0 / juce::jlimit (20.0, 400.0, bpmSource != nullptr ? bpmSource->load() : 120.0); }
+    // Position in the file where playback has to start: if the audio is shifted earlier than
+    // the count-in allows, the part that does not fit is skipped.
+    double startPositionFor (int countInBeats) const
+    {
+        if (countInBeats <= 0)
+            return 0.0;   // no metronome: the song simply plays from its very beginning
+        return juce::jmax (0.0, -((double) countInBeats * beatSeconds() + clipOffset.load()));
+    }
     void runChain (int n);
     void applyExtraDelay (int n);
 

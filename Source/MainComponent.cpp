@@ -748,6 +748,8 @@ void MainComponent::timerCallback()
     for (auto* t : trackComponents)
         t->updateLive();
     playAllButton.setActive (engine.isPlaying());
+    if (std::abs (bpmSlider.getValue() - engine.getBpm()) > 0.001 && ! bpmSlider.isMouseButtonDown())
+        bpmSlider.setValue (engine.getBpm(), juce::dontSendNotification);
 
     if (++slowCounter >= 15)   // twice a second
     {

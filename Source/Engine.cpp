@@ -177,14 +177,17 @@ void Engine::addPluginToTrack (const std::shared_ptr<Track>& track, int slotInde
 
 void Engine::playAll()
 {
-    bool anyMetronome = false;
-    for (auto& t : getTracks())
-    {
-        t->prepareStart();
+    // 4 count-in beats only if some metronome is on; otherwise every song just starts from its beginning
+    bool needCountIn = false;
+    auto all = getTracks();
+    for (auto& t : all)
         if (t->metronomeOn.load())
-            anyMetronome = true;
-    }
-    pendingStart.store (anyMetronome ? 4 : 0);
+            needCountIn = true;
+
+    const int countIn = needCountIn ? 4 : 0;
+    for (auto& t : all)
+        t->prepareStart (countIn);
+    pendingStart.store (countIn);
 }
 
 void Engine::stopAll()
