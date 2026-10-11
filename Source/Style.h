@@ -13,10 +13,12 @@ namespace Pal
     inline const juce::Colour hairline   { 0x1fffffff };
     inline const juce::Colour text       { 0xfff2f2f7 };
     inline const juce::Colour textDim    { 0xff98989f };
-    inline const juce::Colour accent     { 0xff0a84ff };
+    inline const juce::Colour accent     { 0xffff9f0a };
     inline const juce::Colour green      { 0xff30d158 };
     inline const juce::Colour red        { 0xffff453a };
     inline const juce::Colour orange     { 0xffff9f0a };
+    inline const juce::Colour violet     { 0xffbf5af2 };
+    inline const juce::Colour onAccent   { 0xff1c1c1e };   // text on top of the amber accent
     inline const juce::Colour yellow     { 0xffffd60a };
     inline const juce::Colour cyan       { 0xff64d2ff };
 
@@ -41,7 +43,7 @@ public:
         setColour (juce::TextButton::buttonColourId, Pal::surface);
         setColour (juce::TextButton::buttonOnColourId, Pal::accent);
         setColour (juce::TextButton::textColourOffId, Pal::text);
-        setColour (juce::TextButton::textColourOnId, juce::Colours::white);
+        setColour (juce::TextButton::textColourOnId, Pal::onAccent);
 
         setColour (juce::Label::textColourId, Pal::text);
         setColour (juce::Slider::textBoxTextColourId, Pal::text);
@@ -66,7 +68,7 @@ public:
         setColour (juce::PopupMenu::textColourId, Pal::text);
         setColour (juce::PopupMenu::headerTextColourId, Pal::textDim);
         setColour (juce::PopupMenu::highlightedBackgroundColourId, Pal::accent);
-        setColour (juce::PopupMenu::highlightedTextColourId, juce::Colours::white);
+        setColour (juce::PopupMenu::highlightedTextColourId, Pal::onAccent);
     }
 
     // ---- buttons
@@ -113,7 +115,7 @@ public:
             p.startNewSubPath (box.getX() + s * 0.26f, box.getCentreY());
             p.lineTo (box.getX() + s * 0.44f, box.getBottom() - s * 0.28f);
             p.lineTo (box.getRight() - s * 0.24f, box.getY() + s * 0.28f);
-            g.setColour (juce::Colours::white);
+            g.setColour (Pal::onAccent);
             g.strokePath (p, juce::PathStrokeType (2.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
         }
 
@@ -248,7 +250,7 @@ public:
 
         juce::Colour col = textColour != nullptr ? *textColour : findColour (juce::PopupMenu::textColourId);
         if (hot)
-            col = juce::Colours::white;
+            col = Pal::onAccent;
         if (! isActive)
             col = col.withMultipliedAlpha (0.4f);
         g.setColour (col);

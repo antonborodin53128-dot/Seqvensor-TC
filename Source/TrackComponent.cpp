@@ -22,7 +22,7 @@ TrackComponent::TrackComponent (Engine& engineToUse, std::shared_ptr<Track> trac
     outputButton.onClick = [this] { if (cb.outputMenu) cb.outputMenu (track, &outputButton); };
     addAndMakeVisible (outputButton);
 
-    metroButton.setColours (Pal::orange, Pal::surface, juce::Colour (0xffffd9a0), Pal::hairline, Pal::textDim);
+    metroButton.setColours (Pal::violet, Pal::surface, juce::Colour (0xffe3c4fa), Pal::hairline, Pal::textDim);
     metroButton.setToggleState (track->metronomeOn.load(), juce::dontSendNotification);
     metroButton.setTooltip ("Метроном на этой дорожке (в темпе проекта). Если он включён хотя бы на одной дорожке, "_ru
                             "общий Play начинается с 4 ударов отсчёта."_ru);
@@ -116,7 +116,7 @@ void TrackComponent::refreshAll()
         else
         {
             b.setButtonText (slot->description.name);
-            b.setColour (juce::TextButton::buttonColourId, slot->bypass.load() ? Pal::surfaceHi : Pal::accent.darker (0.2f));
+            b.setColour (juce::TextButton::buttonColourId, slot->bypass.load() ? Pal::surfaceHi : Pal::accent.withMultipliedBrightness (0.5f));
             b.setColour (juce::TextButton::textColourOffId, juce::Colours::white);
             b.setTooltip ("Открыть окно плагина: "_ru + slot->description.manufacturerName + " - " + slot->description.name);
         }

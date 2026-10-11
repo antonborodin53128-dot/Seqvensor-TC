@@ -296,7 +296,7 @@ void PlayheadOverlay::paint (juce::Graphics& g)
     auto box = juce::Rectangle<float> ((float) x + 6.0f, 4.0f, 92.0f, 20.0f);
     g.setColour (Pal::accent);
     g.fillRoundedRectangle (box, 7.0f);
-    g.setColour (juce::Colours::white);
+    g.setColour (Pal::onAccent);
     g.setFont (juce::FontOptions (12.5f, juce::Font::bold));
     g.drawText (label, box.toNearestInt(), juce::Justification::centred);
 }
