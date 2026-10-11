@@ -49,7 +49,6 @@ public:
 
     juce::AudioDeviceManager deviceManager;
     juce::AudioPluginFormatManager pluginFormats;
-    juce::AudioFormatManager audioFormats;
     juce::KnownPluginList knownPlugins;
     TcPlayHead playHead;
 
@@ -72,18 +71,23 @@ public:
                            std::function<void (bool ok, const juce::String& error)> done,
                            const juce::String& savedStateBase64 = {}, bool bypassed = false);
 
-    // Global transport. One clock (seconds, 0 = first beat, < 0 = count-in) drives the metronome
-    // and every player. The metronome is independent of the players: it keeps clicking when a
-    // player is stopped. A player that is started joins at the current clock time.
-    void playAll();                                     // start / resume (all players)
-    void playTrack (const std::shared_ptr<Track>& t);   // this player only (joins a running clock)
+    // Global transport. One clock (seconds, 0 = bar 1 beat 1, < 0 = count-in) drives the
+    // metronome and the audio clips of every track.
+    void playAll();                                     // start / resume
     void pauseAll();                                    // freezes the clock, Play continues from here
     void stopAll();                                     // stops everything and rewinds
     void seek (double clockSeconds);                    // move the song position
     bool isPlaying() const;
     bool isPaused() const { return paused.load(); }
-    bool isGridMode() const { return gridMode.load(); }  // true: audio offsets and the count-in are in use
     double getClockSeconds() const { return clockNow.load(); }
+    double getBeatSeconds() const { return 60.0 / getBpm(); }
+
+    // Audio clips (message thread). The file is decoded on a background thread.
+    void addClipFromFile (const std::shared_ptr<Track>& track, const juce::File& file, double startSeconds,
+                          std::function<void (std::shared_ptr<Clip> clip, const juce::String& error)> done = {});
+    void removeClip (const std::shared_ptr<Track>& track, int clipId);
+    void clipsChanged();                                // recomputes the end of the song
+    int takeClipId() { return nextClipId++; }
 
     double getSampleRate() const { return currentSampleRate; }
     int getBlockSize() const { return currentBlockSize; }
@@ -118,12 +122,11 @@ private:
     std::set<juce::String> enabledPlugins;
     bool allPluginsEnabled = true;
     int nextTrackId = 1;
-    void startTransport (const std::vector<std::shared_ptr<Track>>& toPlay);
-    void armTrack (Track& t, double clockTime, bool grid);
+    int nextClipId = 1;
+    std::atomic<double> songEnd { 0.0 };
 
     std::atomic<bool> clockRunning { false };
     std::atomic<bool> paused { false };
-    std::atomic<bool> gridMode { false };
     std::atomic<double> clockNow { 0.0 };       // clock time at the end of the last audio block
     std::atomic<int> command { 0 };             // 1 = (re)start the clock at commandClock
     std::atomic<double> commandClock { 0.0 };
@@ -134,7 +137,6 @@ private:
 
     mutable juce::CriticalSection tracksLock;
     std::vector<std::shared_ptr<Track>> tracks;
-    juce::TimeSliceThread readThread { "TC file reader" };
     juce::AudioProcessLoadMeasurer loadMeasure;
 
     double currentSampleRate = 48000.0;

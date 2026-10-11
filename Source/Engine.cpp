@@ -2,7 +2,6 @@
 
 Engine::Engine()
 {
-    audioFormats.registerBasicFormats();
     pluginFormats.addFormat (std::make_unique<juce::VST3PluginFormat>());
     order.reserve (256);
 }
@@ -21,8 +20,6 @@ juce::File Engine::getDataDirectory() const
 
 void Engine::initialise()
 {
-    readThread.startThread (juce::Thread::Priority::normal);
-
     // saved plugin list
     auto listFile = getDataDirectory().getChildFile ("plugins.xml");
     if (auto xml = juce::XmlDocument::parse (listFile))
@@ -41,7 +38,7 @@ void Engine::initialise()
 
 void Engine::shutdown()
 {
-    if (! readThread.isThreadRunning() && ! running && tracks.empty())
+    if (! running && tracks.empty())
         return;
 
     saveProject();
@@ -56,7 +53,6 @@ void Engine::shutdown()
         const juce::ScopedLock sl (tracksLock);
         tracks.clear();
     }
-    readThread.stopThread (2000);
 }
 
 void Engine::savePluginList() const
@@ -69,7 +65,7 @@ void Engine::savePluginList() const
 
 std::shared_ptr<Track> Engine::addTrack (const juce::String& name, int forcedId)
 {
-    auto track = std::make_shared<Track> (name, audioFormats, readThread);
+    auto track = std::make_shared<Track> (name);
     track->id = forcedId > 0 ? forcedId : nextTrackId;
     nextTrackId = juce::jmax (nextTrackId, track->id + 1);
     track->setTempoSource (&playHead.bpm);
@@ -116,6 +112,7 @@ void Engine::removeTrack (const std::shared_ptr<Track>& track)
             if (t->busId.load() == track->id)
                 t->busId = -1;
     }
+    clipsChanged();
     if (onTracksChanged)
         onTracksChanged();
 }
@@ -175,66 +172,34 @@ void Engine::addPluginToTrack (const std::shared_ptr<Track>& track, int slotInde
 
 // ---------------------------------------------------------------- transport
 
-void Engine::armTrack (Track& t, double clockTime, bool grid)
+void Engine::playAll()
 {
-    if (! t.isPlayerActive() || ! t.hasAudio())
-        return;
+    if (clockRunning.load() || command.load() == 1)
+        return;   // already playing
 
-    // without the grid (no metronome anywhere) the song simply plays from its beginning
-    const double offset = grid ? t.getClipOffset() : 0.0;
-    const double fileAtStart = clockTime - offset;
-    if (fileAtStart >= 0.0)
-        t.armPlayback (clockTime, fileAtStart);   // already running: join in sync
-    else
-        t.armPlayback (offset, 0.0);              // the file starts later on the clock
-}
-
-void Engine::startTransport (const std::vector<std::shared_ptr<Track>>& toPlay)
-{
-    const bool live = clockRunning.load() || command.load() == 1;
     double start = 0.0;
-    bool grid = gridMode.load();
-
-    if (live)
-    {
-        start = command.load() == 1 ? commandClock.load() : clockNow.load() + 0.2;   // join the running clock
-    }
-    else if (paused.load())
+    if (paused.load())
     {
         start = clockNow.load();   // resume where we paused
     }
     else
     {
         bool anyMetronome = false;
+        double earliest = 0.0;
         for (auto& t : getTracks())
-            if (t->metronomeOn.load())
-                anyMetronome = true;
+        {
+            anyMetronome = anyMetronome || t->metronomeOn.load();
+            earliest = juce::jmin (earliest, t->getEarliestStart());
+        }
 
-        const int countIn = anyMetronome ? 4 : 0;
-        grid = countIn > 0;
-        gridMode.store (grid);
-        start = -(double) countIn * 60.0 / juce::jlimit (20.0, 400.0, getBpm());
+        // metronome on: 4 count-in beats. Otherwise start where the first clip starts (at most 4 beats before bar 1).
+        const double bar = 4.0 * getBeatSeconds();
+        start = anyMetronome ? -bar : juce::jmax (-bar, earliest);
     }
 
-    for (auto& t : toPlay)
-        armTrack (*t, start, grid);
-
-    if (! live)
-    {
-        paused.store (false);
-        commandClock.store (start);
-        command.store (1);
-    }
-}
-
-void Engine::playAll()
-{
-    startTransport (getTracks());
-}
-
-void Engine::playTrack (const std::shared_ptr<Track>& t)
-{
-    startTransport ({ t });
+    paused.store (false);
+    commandClock.store (start);
+    command.store (1);
 }
 
 void Engine::pauseAll()
@@ -245,8 +210,6 @@ void Engine::pauseAll()
     command.store (0);
     clockRunning.store (false);
     paused.store (true);
-    for (auto& t : getTracks())
-        t->stopPlayer();
 }
 
 void Engine::stopAll()
@@ -255,20 +218,15 @@ void Engine::stopAll()
     clockRunning.store (false);
     paused.store (false);
     clockNow.store (0.0);
-    for (auto& t : getTracks())
-        t->stopPlayer();
 }
 
 void Engine::seek (double clockSecondsTarget)
 {
-    const double t = juce::jmax (0.0, clockSecondsTarget);
+    // from 4 beats before bar 1 (the count-in) to a little after the end of the song
+    const double t = juce::jlimit (-4.0 * getBeatSeconds(), juce::jmax (60.0, songEnd.load() + 30.0), clockSecondsTarget);
 
     if (clockRunning.load() || command.load() == 1)
     {
-        const bool grid = gridMode.load();
-        for (auto& tr : getTracks())
-            if (tr->isPlaying())
-                armTrack (*tr, t, grid);
         commandClock.store (t);
         command.store (1);
     }
@@ -426,24 +384,12 @@ void Engine::audioDeviceIOCallbackWithContext (const float* const* inputChannelD
         done += n;
     }
 
-    // the music has ended by itself: stop the clock (and with it the metronome)
-    if (clockRunning.load())
+    // the last clip has ended: stop the clock (and with it the metronome) and rewind
+    const double end = songEnd.load();
+    if (clockRunning.load() && end > 0.0 && clockSeconds > end + 0.3)
     {
-        bool anyActive = false, anyEnded = false;
-        for (auto& t : tracks)
-        {
-            if (t->isPlaying())
-                anyActive = true;
-            if (t->hasEndedNaturally())
-                anyEnded = true;
-        }
-        if (anyEnded && ! anyActive)
-        {
-            clockRunning.store (false);
-            clockNow.store (0.0);
-            for (auto& t : tracks)
-                t->clearEnded();
-        }
+        clockRunning.store (false);
+        clockNow.store (0.0);
     }
 
     playHead.playing.store (clockRunning.load());
@@ -523,6 +469,55 @@ std::vector<juce::PluginDescription> Engine::getEnabledEffects() const
     return result;
 }
 
+// ---------------------------------------------------------------- clips
+
+void Engine::clipsChanged()
+{
+    double end = 0.0;
+    for (auto& t : getTracks())
+        end = juce::jmax (end, t->getEndSeconds());
+    songEnd.store (end);
+}
+
+void Engine::addClipFromFile (const std::shared_ptr<Track>& track, const juce::File& file, double startSeconds,
+                              std::function<void (std::shared_ptr<Clip>, const juce::String&)> done)
+{
+    track->loadingClips++;
+    std::weak_ptr<Track> weak = track;
+
+    juce::Thread::launch ([this, weak, file, startSeconds, done]
+    {
+        juce::String error;
+        auto data = ClipData::load (file, error);
+
+        juce::MessageManager::callAsync ([this, weak, data, error, startSeconds, done]
+        {
+            auto t = weak.lock();
+            if (t == nullptr)
+                return;
+            t->loadingClips--;
+
+            std::shared_ptr<Clip> clip;
+            if (data != nullptr)
+            {
+                // a playback track has no live input: the default input would only add noise
+                if (! t->inputChosenByUser)
+                    t->inputL = -1;
+                clip = t->addClip (data, startSeconds, takeClipId());
+                clipsChanged();
+            }
+            if (done)
+                done (clip, error);
+        });
+    });
+}
+
+void Engine::removeClip (const std::shared_ptr<Track>& track, int clipId)
+{
+    track->removeClip (clipId);
+    clipsChanged();
+}
+
 // ---------------------------------------------------------------- project file
 
 void Engine::saveProject()
@@ -545,24 +540,21 @@ void Engine::saveProject()
         te->setAttribute ("rec", t->recArmed.load());
         te->setAttribute ("comp", t->compensate.load());
         te->setAttribute ("metro", t->metronomeOn.load());
-        te->setAttribute ("offset", t->getClipOffset());
-        te->setAttribute ("loop", t->isLooping());
-        if (t->getFile() != juce::File())
-            te->setAttribute ("file", t->getFile().getFullPathName());
+        te->setAttribute ("inputSet", t->inputChosenByUser);
+
+        for (auto& c : t->getClips())
+        {
+            auto* ce = te->createNewChildElement ("CLIP");
+            ce->setAttribute ("file", c->data->file.getFullPathName());
+            ce->setAttribute ("start", c->start.load());
+            ce->setAttribute ("loop", c->loop.load());
+        }
 
         for (int i = 0; i < Track::numSlots; ++i)
         {
             auto* slot = t->getSlot (i);
             if (slot == nullptr)
                 continue;
-
-            if (slot->builtinPlayer)
-            {
-                auto* pe = te->createNewChildElement ("PLAYER");
-                pe->setAttribute ("slot", i);
-                pe->setAttribute ("bypass", slot->bypass.load());
-                continue;
-            }
 
             if (slot->plugin == nullptr)
                 continue;
@@ -595,8 +587,6 @@ void Engine::loadProject()
     {
         auto track = addTrack (te->getStringAttribute ("name", "Дорожка"_ru), te->getIntAttribute ("id", -1));
 
-        const bool oldPlayer = te->getStringAttribute ("kind") == "player";   // projects from v1
-
         track->inputL = te->getIntAttribute ("inL", -1);
         track->inputR = te->getIntAttribute ("inR", -1);
         track->busId = te->getIntAttribute ("bus", -1);
@@ -605,30 +595,35 @@ void Engine::loadProject()
         track->muted = te->getBoolAttribute ("mute", false);
         track->recArmed = te->getBoolAttribute ("rec", false);
         track->compensate = te->getBoolAttribute ("comp", false);
+        track->inputChosenByUser = te->getBoolAttribute ("inputSet", true);
         if (xml->getIntAttribute ("version", 1) >= 3)
             track->metronomeOn = te->getBoolAttribute ("metro", false);
-        track->setClipOffset (te->getDoubleAttribute ("offset", 0.0));
-        track->setLooping (te->getBoolAttribute ("loop", false));
 
-        if (oldPlayer)
-            track->setPlayerSlot (0);
+        for (auto* ce : te->getChildWithTagNameIterator ("CLIP"))
+        {
+            juce::File f (ce->getStringAttribute ("file"));
+            if (! f.existsAsFile())
+                continue;
+            addClipFromFile (track, f, ce->getDoubleAttribute ("start", 0.0),
+                             [this, loop = ce->getBoolAttribute ("loop", false)] (std::shared_ptr<Clip> clip, const juce::String&)
+                             {
+                                 if (clip != nullptr)
+                                     clip->loop = loop;
+                                 clipsChanged();
+                                 if (onTracksChanged) onTracksChanged();
+                             });
+        }
 
+        // projects from the first versions: a built-in player with a file and an offset
         for (auto* pe : te->getChildWithTagNameIterator ("PLAYER"))
         {
-            track->setPlayerSlot (pe->getIntAttribute ("slot", 0));
-            if (auto* s = track->getSlot (pe->getIntAttribute ("slot", 0)))
-                s->bypass = pe->getBoolAttribute ("bypass", false);
-            track->refreshLatency();
-        }
-
-        if (te->hasAttribute ("file"))
-        {
+            juce::ignoreUnused (pe);
             juce::File f (te->getStringAttribute ("file"));
             if (f.existsAsFile())
-                track->loadFile (f);
+                addClipFromFile (track, f, te->getDoubleAttribute ("offset", 0.0));
         }
 
-        int fallbackSlot = oldPlayer ? 1 : 0;
+        int fallbackSlot = 0;
         for (auto* pe : te->getChildWithTagNameIterator ("PLUGIN"))
         {
             const int slot = pe->hasAttribute ("slot") ? pe->getIntAttribute ("slot") : fallbackSlot++;

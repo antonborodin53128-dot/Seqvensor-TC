@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Engine.h"
+#include "Timeline.h"
 
 // Toggle button used for Mute / Record: bright red when on, pale red when off.
 class StateButton : public juce::Button
@@ -194,7 +195,7 @@ private:
     float peak = 0.0f;
 };
 
-// One vertical mixer channel strip.
+// One timeline row: channel controls on the left, the audio lane on the right.
 class TrackComponent : public juce::Component
 {
 public:
@@ -207,15 +208,18 @@ public:
         std::function<void (std::shared_ptr<Track>, juce::Component*)> outputMenu;
     };
 
-    static constexpr int stripWidth = 158;
+    static constexpr int headerWidth = 440;
+    static constexpr int rowHeight = 132;
 
-    TrackComponent (Engine& engineToUse, std::shared_ptr<Track> trackToUse, Callbacks callbacks);
+    TrackComponent (Engine& engineToUse, std::shared_ptr<Track> trackToUse, TimelineView& view,
+                    Callbacks callbacks, LaneComponent::Callbacks laneCallbacks);
 
     void paint (juce::Graphics&) override;
     void resized() override;
 
     void refreshAll();   // button captions from the track state
-    void updateLive();   // meters, player state (timer)
+    void updateLive();   // meters (timer)
+    void repaintLane() { lane.repaint(); }
 
     std::shared_ptr<Track> getTrack() const { return track; }
 
@@ -226,29 +230,24 @@ private:
 
     juce::Label nameLabel;
     IconButton removeButton { IconButton::Icon::Close };
-    juce::TextButton inputButton;
+    juce::TextButton inputButton, outputButton;
+    StateButton metroButton { "Метроном"_ru, StateButton::Style::Text };
 
     juce::TextButton slotButtons[Track::numSlots];
     IconButton slotArrows[Track::numSlots] { IconButton (IconButton::Icon::Arrow), IconButton (IconButton::Icon::Arrow),
                                              IconButton (IconButton::Icon::Arrow), IconButton (IconButton::Icon::Arrow),
                                              IconButton (IconButton::Icon::Arrow) };
-    IconButton slotPlay[Track::numSlots] { IconButton (IconButton::Icon::Play), IconButton (IconButton::Icon::Play),
-                                           IconButton (IconButton::Icon::Play), IconButton (IconButton::Icon::Play),
-                                           IconButton (IconButton::Icon::Play) };
-    IconButton slotStop[Track::numSlots] { IconButton (IconButton::Icon::Stop), IconButton (IconButton::Icon::Stop),
-                                           IconButton (IconButton::Icon::Stop), IconButton (IconButton::Icon::Stop),
-                                           IconButton (IconButton::Icon::Stop) };
     bool slotUsed[Track::numSlots] {};
-    bool slotIsPlayer[Track::numSlots] {};
 
-    StateButton metroButton { "Метроном"_ru, StateButton::Style::Text };
     StateButton muteButton { "MUTE", StateButton::Style::Text };
+    StateButton recButton { "REC", StateButton::Style::Dot };
+    juce::ToggleButton compButton { "Комп."_ru };
+
     PeakReadout readout;
     juce::Slider fader;
     LevelMeter meter;
-    StateButton recButton { "REC", StateButton::Style::Dot };
-    juce::TextButton outputButton;
-    juce::ToggleButton compButton { "Комп."_ru };
+
+    LaneComponent lane;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (TrackComponent)
 };

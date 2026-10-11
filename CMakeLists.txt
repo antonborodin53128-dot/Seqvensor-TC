@@ -25,7 +25,9 @@ target_sources(TC PRIVATE
     Source/Track.cpp
     Source/MainComponent.cpp
     Source/TrackComponent.cpp
-    Source/PlayerWindow.cpp)
+    Source/Timeline.cpp
+    Source/Clip.cpp
+    Source/TempoDetect.cpp)
 
 target_compile_definitions(TC PRIVATE
     JUCE_APPLICATION_NAME_STRING="TC"

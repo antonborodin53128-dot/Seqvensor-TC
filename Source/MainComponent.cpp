@@ -1,4 +1,5 @@
 #include "MainComponent.h"
+#include "TempoDetect.h"
 
 // ---------------------------------------------------------------- plugin window
 
@@ -184,7 +185,7 @@ MainComponent::MainComponent()
     bpmSlider.setValue (engine.getBpm(), juce::dontSendNotification);
     bpmSlider.setTextBoxStyle (juce::Slider::TextBoxLeft, false, 86, 32);
     bpmSlider.setTextValueSuffix (" BPM");
-    bpmSlider.setTooltip ("Темп проекта. Его получают плагины (дилей и др.) и метроном плеера."_ru);
+    bpmSlider.setTooltip ("Темп проекта. Его получают плагины (дилей и др.) и метроном."_ru);
     bpmSlider.onValueChange = [this] { engine.setBpm (bpmSlider.getValue()); };
     addAndMakeVisible (bpmSlider);
 
@@ -200,11 +201,10 @@ MainComponent::MainComponent()
     analysisButton.onClick = [this] { showAnalysisSettings(); };
     addAndMakeVisible (analysisButton);
 
-    playAllButton.setTooltip ("Играть все плееры одновременно. Если метроном включён хотя бы на одной дорожке - "_ru
-                              "сначала 4 удара отсчёта, музыка начинается на 5-м."_ru);
+    playAllButton.setTooltip ("Играть. Если метроном включён хотя бы на одной дорожке - сначала 4 удара отсчёта (такт перед первым)."_ru);
     playAllButton.onClick = [this] { engine.playAll(); };
     addAndMakeVisible (playAllButton);
-    pauseAllButton.setTooltip ("Пауза: все плееры и метроном замирают, Play продолжит с этого места"_ru);
+    pauseAllButton.setTooltip ("Пауза: всё замирает, Play продолжит с этого места"_ru);
     pauseAllButton.onClick = [this] { engine.pauseAll(); };
     addAndMakeVisible (pauseAllButton);
     stopAllButton.setTooltip ("Стоп: остановить всё и вернуться в начало"_ru);
@@ -222,20 +222,30 @@ MainComponent::MainComponent()
     trackList.addAndMakeVisible (addTrackButton);
 
     viewport.setViewedComponent (&trackList, false);
-    viewport.setScrollBarsShown (true, true);
+    viewport.setScrollBarsShown (true, false);
+    viewport.setScrollBarThickness (10);
     addAndMakeVisible (viewport);
 
-    emptyHint.setText ("Нажмите \"+\", чтобы добавить дорожку."_ru, juce::dontSendNotification);
+    ruler.onSeek = [this] (double t) { seekTimeline (t); };
+    ruler.onZoom = [this] (float d) { zoomTimeline (d); };
+    addAndMakeVisible (ruler);
+    addAndMakeVisible (playhead);
+
+    statusLabel.setColour (juce::Label::textColourId, juce::Colours::lightgrey);
+    statusLabel.setFont (juce::FontOptions (12.0f));
+    addAndMakeVisible (statusLabel);
+
+    emptyHint.setText ("Добавьте дорожку, затем перетащите на неё аудиофайл (или правая кнопка по дорожке)."_ru, juce::dontSendNotification);
     emptyHint.setJustificationType (juce::Justification::centred);
     emptyHint.setColour (juce::Label::textColourId, juce::Colours::grey);
     addAndMakeVisible (emptyHint);
 
-    setSize (1000, 700);
+    setSize (1280, 720);
 
     engine.loadProject();
     bpmSlider.setValue (engine.getBpm(), juce::dontSendNotification);
     rebuildTracks();
-    startTimerHz (30);
+    startTimerHz (60);
 }
 
 MainComponent::~MainComponent()
@@ -245,7 +255,6 @@ MainComponent::~MainComponent()
     engine.knownPlugins.removeChangeListener (this);
     engine.onTracksChanged = nullptr;
     pluginWindows.clear();
-    playerWindows.clear();
     trackComponents.clear();
     engine.shutdown();
     juce::LookAndFeel::setDefaultLookAndFeel (nullptr);
@@ -286,25 +295,41 @@ void MainComponent::resized()
     transportRow.removeFromLeft (4);
     stopAllButton.setBounds (transportRow.removeFromLeft (46));
 
-    viewport.setBounds (area.reduced (6, 6));
-    emptyHint.setBounds (area.reduced (40, 20));
+    area.removeFromTop (28);   // ruler row (placed in layoutTimelineParts)
+    viewport.setBounds (area.reduced (6, 0).withTrimmedBottom (6));
+    emptyHint.setBounds (area.reduced (40, 20).withTrimmedLeft (TrackComponent::headerWidth));
     layoutTracks();
+}
+
+void MainComponent::layoutTimelineParts()
+{
+    const int rulerH = 28;
+    const int visibleW = viewport.getMaximumVisibleWidth();
+    const int laneX = viewport.getX() + TrackComponent::headerWidth;
+    const int laneW = juce::jmax (100, visibleW - TrackComponent::headerWidth);
+    const int top = viewport.getY() - rulerH;
+
+    statusLabel.setBounds (viewport.getX() + 10, top, TrackComponent::headerWidth - 20, rulerH);
+    ruler.setBounds (laneX, top, laneW, rulerH);
+    playhead.setBounds (laneX, top, laneW, rulerH + viewport.getHeight());
+    timelineDirty = true;
 }
 
 void MainComponent::layoutTracks()
 {
-    const int gap = 6;
-    const int h = juce::jmax (560, viewport.getMaximumVisibleHeight());
-    int x = 0;
+    const int w = juce::jmax (TrackComponent::headerWidth + 100, viewport.getMaximumVisibleWidth());
+    int y = 0;
     for (auto* t : trackComponents)
     {
-        t->setBounds (x, 0, TrackComponent::stripWidth, h);
-        x += TrackComponent::stripWidth + gap;
+        t->setBounds (0, y, w, TrackComponent::rowHeight);
+        y += TrackComponent::rowHeight;
     }
-    addTrackButton.setBounds (x, 0, 56, h);
-    x += 56;
-    trackList.setSize (juce::jmax (x, viewport.getMaximumVisibleWidth()), h);
+
+    addTrackButton.setBounds (8, y + 8, TrackComponent::headerWidth - 20, 34);
+    y += 50;
+    trackList.setSize (w, juce::jmax (y, viewport.getHeight()));
     emptyHint.setVisible (trackComponents.isEmpty());
+    layoutTimelineParts();
 }
 
 // ---------------------------------------------------------------- tracks
@@ -319,7 +344,6 @@ void MainComponent::rebuildTracks()
         for (int i = 0; i < Track::numSlots; ++i)
             if (auto* s = t->getSlot (i))
                 closeEditorsFor (s->plugin.get());
-        closePlayerWindowsFor (t.get());
 
         // deleting a component from its own button callback is unsafe, so defer
         juce::Component::SafePointer<MainComponent> safe (this);
@@ -332,24 +356,30 @@ void MainComponent::rebuildTracks()
     cb.inputMenu = [this] (std::shared_ptr<Track> t, juce::Component* c) { showInputMenu (t, c); };
     cb.slotClick = [this] (std::shared_ptr<Track> t, int i, juce::Component* c)
     {
-        auto* slot = t->getSlot (i);
-        if (slot == nullptr)
-            showSlotMenu (t, i, c);            // empty slot: choose what to put there
-        else if (slot->builtinPlayer)
-            openPlayerWindow (t);
+        if (t->getSlot (i) == nullptr)
+            showSlotMenu (t, i, c);            // empty slot: choose a plugin
         else
             openPluginEditor (t, i);
     };
     cb.slotMenu = [this] (std::shared_ptr<Track> t, int i, juce::Component* c) { showSlotMenu (t, i, c); };
     cb.outputMenu = [this] (std::shared_ptr<Track> t, juce::Component* c) { showOutputMenu (t, c); };
 
+    LaneComponent::Callbacks lane;
+    lane.seek = [this] (double t) { seekTimeline (t); };
+    lane.zoom = [this] (float d) { zoomTimeline (d); };
+    lane.clipMenu = [this] (std::shared_ptr<Track> t, std::shared_ptr<Clip> c, juce::Point<int> p) { showClipMenu (t, c, p); };
+    lane.laneMenu = [this] (std::shared_ptr<Track> t, double time, juce::Point<int> p) { showLaneMenu (t, time, p); };
+    lane.filesDropped = [this] (std::shared_ptr<Track> t, const juce::StringArray& f, double time) { addAudioFiles (t, f, time); };
+    lane.changed = [this] { repaintTimeline(); };
+
     for (auto& t : engine.getTracks())
     {
-        auto* tc = new TrackComponent (engine, t, cb);
+        auto* tc = new TrackComponent (engine, t, timelineView, cb, lane);
         trackComponents.add (tc);
         trackList.addAndMakeVisible (tc);
     }
     layoutTracks();
+    timelineDirty = true;
 }
 
 void MainComponent::refreshStrips()
@@ -366,31 +396,178 @@ void MainComponent::addTrack()
     refreshStrips();
 }
 
-void MainComponent::openPlayerWindow (const std::shared_ptr<Track>& track)
-{
-    for (auto* w : playerWindows)
-        if (w->getTrack() == track.get())
-        {
-            w->toFront (true);
-            return;
-        }
+// ---------------------------------------------------------------- timeline
 
-    juce::Component::SafePointer<MainComponent> safe (this);
-    playerWindows.add (new PlayerWindow (engine, track, [safe] (PlayerWindow* w)
-    {
-        juce::MessageManager::callAsync ([safe, w]
-        {
-            if (safe != nullptr)
-                safe->playerWindows.removeObject (w, true);
-        });
-    }));
+void MainComponent::repaintTimeline()
+{
+    ruler.repaint();
+    playhead.repaint();
+    for (auto* t : trackComponents)
+        t->repaintLane();
 }
 
-void MainComponent::closePlayerWindowsFor (const Track* track)
+void MainComponent::zoomTimeline (float wheelDelta)
 {
-    for (int i = playerWindows.size(); --i >= 0;)
-        if (playerWindows[i]->getTrack() == track)
-            playerWindows.remove (i);
+    if (wheelDelta == 0.0f)
+        return;
+    timelineView.span = juce::jlimit (2.0, 600.0, timelineView.span * (wheelDelta > 0.0f ? 0.8 : 1.25));   // wheel up = zoom in
+    repaintTimeline();
+}
+
+void MainComponent::seekTimeline (double clockSeconds)
+{
+    engine.seek (clockSeconds);
+    timelineView.clock = engine.getClockSeconds();
+    if (engine.isPlaying())
+        timelineView.clock = clockSeconds;
+    repaintTimeline();
+}
+
+void MainComponent::chooseAudioFor (const std::shared_ptr<Track>& track, double time)
+{
+    chooser = std::make_unique<juce::FileChooser> ("Выберите аудиофайлы"_ru, juce::File(),
+                                                   "*.wav;*.aif;*.aiff;*.flac;*.mp3;*.ogg");
+    juce::Component::SafePointer<MainComponent> safe (this);
+    chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles
+                              | juce::FileBrowserComponent::canSelectMultipleItems,
+                          [safe, track, time] (const juce::FileChooser& fc)
+                          {
+                              if (safe == nullptr)
+                                  return;
+                              juce::StringArray files;
+                              for (auto& f : fc.getResults())
+                                  files.add (f.getFullPathName());
+                              if (! files.isEmpty())
+                                  safe->addAudioFiles (track, files, time);
+                          });
+}
+
+void MainComponent::addAudioFiles (const std::shared_ptr<Track>& track, const juce::StringArray& files, double time)
+{
+    juce::Component::SafePointer<MainComponent> safe (this);
+    for (auto& path : files)
+        engine.addClipFromFile (track, juce::File (path), time,
+                                [safe, path] (std::shared_ptr<Clip> clip, const juce::String& error)
+                                {
+                                    if (safe == nullptr)
+                                        return;
+                                    if (clip == nullptr)
+                                        juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, "TC",
+                                                                                error + ":\n"_ru + path);
+                                    safe->refreshStrips();
+                                    safe->repaintTimeline();
+                                });
+    refreshStrips();
+    repaintTimeline();
+}
+
+void MainComponent::showLaneMenu (const std::shared_ptr<Track>& track, double time, juce::Point<int> screenPos)
+{
+    juce::PopupMenu m;
+    m.addItem (1, "Добавить аудио сюда..."_ru);
+    m.addSeparator();
+    m.addItem (2, "Привязка к сетке"_ru, true, timelineView.snap);
+
+    juce::Component::SafePointer<MainComponent> safe (this);
+    m.showMenuAsync (juce::PopupMenu::Options().withTargetScreenArea (juce::Rectangle<int> (screenPos.x, screenPos.y, 1, 1)),
+                     [safe, track, time] (int r)
+                     {
+                         if (safe == nullptr)
+                             return;
+                         if (r == 1)
+                             safe->chooseAudioFor (track, time);
+                         else if (r == 2)
+                             safe->timelineView.snap = ! safe->timelineView.snap;
+                     });
+}
+
+void MainComponent::showClipMenu (const std::shared_ptr<Track>& track, const std::shared_ptr<Clip>& clip, juce::Point<int> screenPos)
+{
+    const int total = (int) clip->data->lengthSeconds();
+    juce::PopupMenu m;
+    m.addItem (100, clip->data->name + "   ("_ru + juce::String (total / 60) + ":" + juce::String (total % 60).paddedLeft ('0', 2) + ")", false);
+    m.addSeparator();
+    m.addItem (1, "Определить темп (только показать)"_ru);
+    m.addItem (2, "Поставить на такт 1"_ru);
+    m.addItem (3, "Поставить на такт раньше (в отсчёт)"_ru);
+    m.addSeparator();
+    m.addItem (4, "Повтор"_ru, true, clip->loop.load());
+    m.addItem (5, "Привязка к сетке"_ru, true, timelineView.snap);
+    m.addItem (6, "Заменить файл..."_ru);
+    m.addSeparator();
+    m.addItem (7, "Удалить"_ru);
+
+    juce::Component::SafePointer<MainComponent> safe (this);
+    m.showMenuAsync (juce::PopupMenu::Options().withTargetScreenArea (juce::Rectangle<int> (screenPos.x, screenPos.y, 1, 1)),
+                     [safe, track, clip] (int r)
+                     {
+                         if (safe == nullptr || r <= 0)
+                             return;
+
+                         auto& eng = safe->engine;
+                         switch (r)
+                         {
+                             case 1: safe->detectClipTempo (clip); break;
+                             case 2: clip->start.store (0.0); eng.clipsChanged(); break;
+                             case 3: clip->start.store (-4.0 * eng.getBeatSeconds()); eng.clipsChanged(); break;
+                             case 4: clip->loop = ! clip->loop.load(); eng.clipsChanged(); break;
+                             case 5: safe->timelineView.snap = ! safe->timelineView.snap; break;
+                             case 6:
+                             {
+                                 safe->chooser = std::make_unique<juce::FileChooser> ("Выберите аудиофайл"_ru, juce::File(),
+                                                                                      "*.wav;*.aif;*.aiff;*.flac;*.mp3;*.ogg");
+                                 safe->chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
+                                                             [safe, track, clip] (const juce::FileChooser& fc)
+                                                             {
+                                                                 if (safe == nullptr || fc.getResult() == juce::File())
+                                                                     return;
+                                                                 const double start = clip->start.load();
+                                                                 const bool loop = clip->loop.load();
+                                                                 safe->engine.addClipFromFile (track, fc.getResult(), start,
+                                                                     [safe, track, clip, loop] (std::shared_ptr<Clip> fresh, const juce::String&)
+                                                                     {
+                                                                         if (safe == nullptr || fresh == nullptr)
+                                                                             return;
+                                                                         fresh->loop = loop;
+                                                                         safe->engine.removeClip (track, clip->id);
+                                                                         safe->repaintTimeline();
+                                                                     });
+                                                             });
+                                 break;
+                             }
+                             case 7: eng.removeClip (track, clip->id); break;
+                             default: break;
+                         }
+                         safe->repaintTimeline();
+                     });
+}
+
+void MainComponent::detectClipTempo (const std::shared_ptr<Clip>& clip)
+{
+    statusLabel.setText ("Определяю темп..."_ru, juce::dontSendNotification);
+    juce::Component::SafePointer<MainComponent> safe (this);
+    auto data = clip->data;
+
+    juce::Thread::launch ([safe, data]
+    {
+        std::vector<float> mono;
+        data->getMono (mono, (int) (data->sampleRate * 150.0));
+        const double bpm = detectTempo (mono, data->sampleRate);
+
+        juce::MessageManager::callAsync ([safe, bpm]
+        {
+            if (safe == nullptr)
+                return;
+            if (bpm > 0.0)
+            {
+                safe->statusLabel.setText ("Темп файла: "_ru + juce::String (bpm, 2) + " (темп проекта не изменён)"_ru,
+                                           juce::dontSendNotification);
+            }
+            else
+                safe->statusLabel.setText ("Темп определить не удалось"_ru, juce::dontSendNotification);
+            safe->repaintTimeline();
+        });
+    });
 }
 
 // ---------------------------------------------------------------- strip menus
@@ -436,6 +613,7 @@ void MainComponent::showInputMenu (const std::shared_ptr<Track>& track, juce::Co
                             if (safe == nullptr || result <= 0 || result == 9999)
                                 return;
 
+                            track->inputChosenByUser = true;
                             if (result >= 10000)
                             {
                                 track->busId = result - 10000;
@@ -496,7 +674,6 @@ void MainComponent::showSlotMenu (const std::shared_ptr<Track>& track, int slotI
 {
     auto* slot = track->getSlot (slotIndex);
     const auto effects = engine.getEnabledEffects();
-    const bool hasPlayer = track->findPlayerSlot() >= 0;
 
     auto addPluginItems = [&effects] (juce::PopupMenu& m)
     {
@@ -512,29 +689,17 @@ void MainComponent::showSlotMenu (const std::shared_ptr<Track>& track, int slotI
     juce::PopupMenu menu;
     if (slot != nullptr)
     {
-        if (slot->builtinPlayer)
-            menu.addItem (2, "Открыть окно плеера"_ru);
-        else
-            menu.addItem (1, "Открыть окно плагина"_ru);
+        menu.addItem (1, "Открыть окно плагина"_ru);
         menu.addItem (3, "Обход (bypass)"_ru, true, slot->bypass.load());
         menu.addItem (4, "Убрать из слота"_ru);
         menu.addSeparator();
 
         juce::PopupMenu replace;
-        if (! hasPlayer)
-            replace.addItem (5, "TC Плеер (файл + метроном)"_ru);
-        if (! hasPlayer)
-            replace.addSeparator();
         addPluginItems (replace);
         menu.addSubMenu ("Заменить на"_ru, replace);
     }
     else
     {
-        if (! hasPlayer)
-        {
-            menu.addItem (5, "TC Плеер (файл + метроном)"_ru);
-            menu.addSeparator();
-        }
         addPluginItems (menu);
     }
 
@@ -555,10 +720,6 @@ void MainComponent::showSlotMenu (const std::shared_ptr<Track>& track, int slotI
                             {
                                 safe->openPluginEditor (track, slotIndex);
                             }
-                            else if (result == 2)
-                            {
-                                safe->openPlayerWindow (track);
-                            }
                             else if (result == 3)
                             {
                                 if (auto* s = track->getSlot (slotIndex))
@@ -570,26 +731,12 @@ void MainComponent::showSlotMenu (const std::shared_ptr<Track>& track, int slotI
                             }
                             else if (result == 4)
                             {
-                                if (auto* s = track->getSlot (slotIndex))
-                                    if (s->builtinPlayer)
-                                        safe->closePlayerWindowsFor (track.get());
                                 closeSlotEditor();
                                 track->clearSlot (slotIndex);
                                 safe->refreshStrips();
-                            }
-                            else if (result == 5)
-                            {
-                                closeSlotEditor();
-                                track->clearSlot (slotIndex);
-                                track->setPlayerSlot (slotIndex);
-                                safe->refreshStrips();
-                                safe->openPlayerWindow (track);
                             }
                             else if (result >= 1000 && result - 1000 < (int) effects.size())
                             {
-                                if (auto* s = track->getSlot (slotIndex))
-                                    if (s->builtinPlayer)
-                                        safe->closePlayerWindowsFor (track.get());
                                 closeSlotEditor();
                                 track->clearSlot (slotIndex);
                                 safe->loadPluginIntoSlot (track, slotIndex, effects[(size_t) (result - 1000)]);
@@ -658,6 +805,7 @@ void MainComponent::showMainMenu()
     menu.addSeparator();
     menu.addItem (4, "Добавить дорожку"_ru);
     menu.addItem (5, "Поверх всех окон"_ru, true, pinned);
+    menu.addItem (7, "Привязка клипов к сетке"_ru, true, timelineView.snap);
     menu.addItem (6, "Сохранить проект"_ru);
 
     juce::Component::SafePointer<MainComponent> safe (this);
@@ -674,6 +822,7 @@ void MainComponent::showMainMenu()
                                 case 4: safe->addTrack(); break;
                                 case 5: safe->setPinned (! safe->pinned); break;
                                 case 6: safe->engine.saveProject(); break;
+                                case 7: safe->timelineView.snap = ! safe->timelineView.snap; break;
                                 default: break;
                             }
                         });
@@ -709,7 +858,8 @@ void MainComponent::showAnalysisSettings()
     juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon, "Темп и тональность"_ru,
                                             "Здесь будет выбор каналов-источников для автоматического определения "_ru
                                             "темпа и тональности. Эта функция появится в следующей версии.\n\n"_ru
-                                            "Пока темп задаётся вручную или кнопкой Tap, и передаётся всем плагинам и метроному."_ru);
+                                            "Пока темп задаётся вручную или кнопкой Tap; правая кнопка по клипу - "_ru
+                                            "Определить темп (только показывает значение)."_ru);
 }
 
 void MainComponent::setPinned (bool shouldPin)
@@ -752,6 +902,16 @@ void MainComponent::timerCallback()
 {
     for (auto* t : trackComponents)
         t->updateLive();
+
+    timelineView.clock = engine.getClockSeconds();
+    if (timelineDirty || timelineView.clock != lastClock || timelineView.span != lastSpan || engine.getBpm() != lastBpm)
+    {
+        lastClock = timelineView.clock;
+        lastSpan = timelineView.span;
+        lastBpm = engine.getBpm();
+        timelineDirty = false;
+        repaintTimeline();
+    }
     playAllButton.setActive (engine.isPlaying());
     pauseAllButton.setActive (engine.isPaused());
     if (std::abs (bpmSlider.getValue() - engine.getBpm()) > 0.001 && ! bpmSlider.isMouseButtonDown())

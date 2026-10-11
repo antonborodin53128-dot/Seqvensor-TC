@@ -1,12 +1,14 @@
 #include "TrackComponent.h"
 
-TrackComponent::TrackComponent (Engine& engineToUse, std::shared_ptr<Track> trackToUse, Callbacks callbacks)
-    : engine (engineToUse), track (std::move (trackToUse)), cb (std::move (callbacks))
+TrackComponent::TrackComponent (Engine& engineToUse, std::shared_ptr<Track> trackToUse, TimelineView& view,
+                                Callbacks callbacks, LaneComponent::Callbacks laneCallbacks)
+    : engine (engineToUse), track (std::move (trackToUse)), cb (std::move (callbacks)),
+      lane (engineToUse, track, view, std::move (laneCallbacks))
 {
     nameLabel.setText (track->name, juce::dontSendNotification);
     nameLabel.setEditable (false, true, false);
-    nameLabel.setJustificationType (juce::Justification::centred);
-    nameLabel.setFont (juce::FontOptions (20.0f, juce::Font::bold));
+    nameLabel.setJustificationType (juce::Justification::centredLeft);
+    nameLabel.setFont (juce::FontOptions (19.0f, juce::Font::bold));
     nameLabel.setMinimumHorizontalScale (0.6f);
     nameLabel.onTextChange = [this] { track->name = nameLabel.getText(); };
     addAndMakeVisible (nameLabel);
@@ -17,24 +19,8 @@ TrackComponent::TrackComponent (Engine& engineToUse, std::shared_ptr<Track> trac
 
     inputButton.onClick = [this] { if (cb.inputMenu) cb.inputMenu (track, &inputButton); };
     addAndMakeVisible (inputButton);
-
-    for (int i = 0; i < Track::numSlots; ++i)
-    {
-        slotButtons[i].onClick = [this, i] { if (cb.slotClick) cb.slotClick (track, i, &slotButtons[i]); };
-        addAndMakeVisible (slotButtons[i]);
-
-        slotArrows[i].setTooltip ("Меню слота: обход, заменить, убрать"_ru);
-        slotArrows[i].onClick = [this, i] { if (cb.slotMenu) cb.slotMenu (track, i, &slotArrows[i]); };
-        addChildComponent (slotArrows[i]);
-
-        slotPlay[i].setTooltip ("Играть этот плеер (подключится ко времени общего плеера)"_ru);
-        slotPlay[i].onClick = [this] { engine.playTrack (track); };
-        addChildComponent (slotPlay[i]);
-
-        slotStop[i].setTooltip ("Остановить этот плеер (метроном продолжает идти)"_ru);
-        slotStop[i].onClick = [this] { track->stopPlayer(); };
-        addChildComponent (slotStop[i]);
-    }
+    outputButton.onClick = [this] { if (cb.outputMenu) cb.outputMenu (track, &outputButton); };
+    addAndMakeVisible (outputButton);
 
     metroButton.setColours (juce::Colour (0xff2fb5a2), juce::Colour (0xff24403d), juce::Colour (0xffa6efe4),
                             juce::Colour (0xff35615c), juce::Colour (0xff8cbab4));
@@ -44,9 +30,30 @@ TrackComponent::TrackComponent (Engine& engineToUse, std::shared_ptr<Track> trac
     metroButton.onClick = [this] { track->metronomeOn = metroButton.getToggleState(); };
     addAndMakeVisible (metroButton);
 
+    for (int i = 0; i < Track::numSlots; ++i)
+    {
+        slotButtons[i].onClick = [this, i] { if (cb.slotClick) cb.slotClick (track, i, &slotButtons[i]); };
+        addAndMakeVisible (slotButtons[i]);
+
+        slotArrows[i].setTooltip ("Меню слота: обход, заменить, убрать"_ru);
+        slotArrows[i].onClick = [this, i] { if (cb.slotMenu) cb.slotMenu (track, i, &slotArrows[i]); };
+        addChildComponent (slotArrows[i]);
+    }
+
     muteButton.setToggleState (track->muted.load(), juce::dontSendNotification);
     muteButton.onClick = [this] { track->muted = muteButton.getToggleState(); };
     addAndMakeVisible (muteButton);
+
+    recButton.setToggleState (track->recArmed.load(), juce::dontSendNotification);
+    recButton.setTooltip ("Готовность к записи дорожки"_ru);
+    recButton.onClick = [this] { track->recArmed = recButton.getToggleState(); };
+    addAndMakeVisible (recButton);
+
+    compButton.setToggleState (track->compensate.load(), juce::dontSendNotification);
+    compButton.setTooltip ("Выровнять эту дорожку по задержке самой медленной цепочки. "_ru
+                           "Выключено - дорожка идёт без дополнительной задержки."_ru);
+    compButton.onClick = [this] { track->compensate = compButton.getToggleState(); };
+    addAndMakeVisible (compButton);
 
     addAndMakeVisible (readout);
 
@@ -65,19 +72,7 @@ TrackComponent::TrackComponent (Engine& engineToUse, std::shared_ptr<Track> trac
     addAndMakeVisible (fader);
     addAndMakeVisible (meter);
 
-    recButton.setToggleState (track->recArmed.load(), juce::dontSendNotification);
-    recButton.setTooltip ("Готовность к записи дорожки"_ru);
-    recButton.onClick = [this] { track->recArmed = recButton.getToggleState(); };
-    addAndMakeVisible (recButton);
-
-    outputButton.onClick = [this] { if (cb.outputMenu) cb.outputMenu (track, &outputButton); };
-    addAndMakeVisible (outputButton);
-
-    compButton.setToggleState (track->compensate.load(), juce::dontSendNotification);
-    compButton.setTooltip ("Выровнять эту дорожку по задержке самой медленной цепочки. "_ru
-                           "Выключено - дорожка идёт без дополнительной задержки."_ru);
-    compButton.onClick = [this] { track->compensate = compButton.getToggleState(); };
-    addAndMakeVisible (compButton);
+    addAndMakeVisible (lane);
 
     refreshAll();
 }
@@ -87,14 +82,11 @@ void TrackComponent::refreshAll()
     nameLabel.setText (track->name, juce::dontSendNotification);
 
     // input
-    const bool playerOn = track->isPlayerActive();
     const int il = track->inputL.load();
     const int ir = track->inputR.load();
     const int bus = track->busId.load();
     juce::String input;
-    if (playerOn)
-        input = "Вход: TC Плеер"_ru;
-    else if (bus >= 0)
+    if (bus >= 0)
     {
         auto src = engine.findTrack (bus);
         input = "Bus: "_ru + (src != nullptr ? src->name : juce::String ("?"));
@@ -106,7 +98,6 @@ void TrackComponent::refreshAll()
     else
         input = "Вход: "_ru + juce::String (il + 1);
     inputButton.setButtonText (input);
-    inputButton.setEnabled (! playerOn);
     inputButton.setColour (juce::TextButton::buttonColourId, bus >= 0 ? juce::Colour (0xff6a4fa3) : juce::Colour (0xff2c3138));
 
     // slots
@@ -115,7 +106,6 @@ void TrackComponent::refreshAll()
         auto& b = slotButtons[i];
         auto* slot = track->getSlot (i);
         slotUsed[i] = slot != nullptr;
-        slotIsPlayer[i] = slot != nullptr && slot->builtinPlayer;
 
         if (slot == nullptr)
         {
@@ -126,18 +116,12 @@ void TrackComponent::refreshAll()
         }
         else
         {
-            const juce::String n = slot->builtinPlayer ? "TC Плеер"_ru : slot->description.name;
-            b.setButtonText (n);
-            juce::Colour base = slot->builtinPlayer ? juce::Colour (0xff3a5fcd) : juce::Colour (0xff2b6f66);
-            b.setColour (juce::TextButton::buttonColourId, slot->bypass.load() ? juce::Colour (0xff3a3d42) : base);
+            b.setButtonText (slot->description.name);
+            b.setColour (juce::TextButton::buttonColourId, slot->bypass.load() ? juce::Colour (0xff3a3d42) : juce::Colour (0xff2b6f66));
             b.setColour (juce::TextButton::textColourOffId, juce::Colours::white);
-            b.setTooltip (slot->builtinPlayer ? "Открыть окно плеера"_ru
-                                              : "Открыть окно плагина: "_ru + slot->description.manufacturerName + " - " + n);
+            b.setTooltip ("Открыть окно плагина: "_ru + slot->description.manufacturerName + " - " + slot->description.name);
         }
-
         slotArrows[i].setVisible (slot != nullptr);
-        slotPlay[i].setVisible (slotIsPlayer[i]);
-        slotStop[i].setVisible (slotIsPlayer[i]);
     }
 
     // output
@@ -151,64 +135,62 @@ void TrackComponent::refreshAll()
 
 void TrackComponent::paint (juce::Graphics& g)
 {
-    auto r = getLocalBounds().toFloat().reduced (1.0f);
+    auto r = juce::Rectangle<float> (0.0f, 1.0f, (float) headerWidth - 4.0f, (float) getHeight() - 2.0f);
     g.setColour (juce::Colour (0xff20242a));
-    g.fillRoundedRectangle (r, 8.0f);
+    g.fillRoundedRectangle (r, 6.0f);
     g.setColour (juce::Colour (0xff2fb5a2));
-    g.fillRoundedRectangle (r.withHeight (4.0f), 2.0f);
+    g.fillRoundedRectangle (r.withWidth (4.0f), 2.0f);
 }
 
 void TrackComponent::resized()
 {
-    auto area = getLocalBounds().reduced (8, 8);
-    area.removeFromTop (4);
+    auto area = getLocalBounds();
+    lane.setBounds (area.withTrimmedLeft (headerWidth));
 
-    auto nameRow = area.removeFromTop (34);
-    removeButton.setBounds (nameRow.removeFromRight (22).withSizeKeepingCentre (22, 22));
+    auto h = juce::Rectangle<int> (0, 0, headerWidth - 4, getHeight()).reduced (10, 8);
+
+    // column A: name, input, output, metronome
+    auto colA = h.removeFromLeft (132);
+    h.removeFromLeft (8);
+    auto nameRow = colA.removeFromTop (28);
+    removeButton.setBounds (nameRow.removeFromRight (20).withSizeKeepingCentre (20, 20));
     nameLabel.setBounds (nameRow);
+    colA.removeFromTop (4);
+    inputButton.setBounds (colA.removeFromTop (26));
+    colA.removeFromTop (4);
+    outputButton.setBounds (colA.removeFromTop (26));
+    colA.removeFromTop (4);
+    metroButton.setBounds (colA.removeFromTop (26));
 
-    area.removeFromTop (4);
-    inputButton.setBounds (area.removeFromTop (28));
-    area.removeFromTop (6);
-
+    // column B: five plugin slots
+    auto colB = h.removeFromLeft (122);
+    h.removeFromLeft (8);
     for (int i = 0; i < Track::numSlots; ++i)
     {
-        auto row = area.removeFromTop (26);
+        auto row = colB.removeFromTop (20);
         if (slotUsed[i])
-            slotArrows[i].setBounds (row.removeFromRight (20));
-        if (slotIsPlayer[i])
-        {
-            slotStop[i].setBounds (row.removeFromRight (24));
+            slotArrows[i].setBounds (row.removeFromRight (18));
+        if (slotUsed[i])
             row.removeFromRight (2);
-            slotPlay[i].setBounds (row.removeFromRight (24));
-            row.removeFromRight (2);
-        }
-        else
-            row.removeFromRight (slotUsed[i] ? 2 : 0);
         slotButtons[i].setBounds (row);
-        area.removeFromTop (3);
+        colB.removeFromTop (4);
     }
 
-    area.removeFromTop (3);
-    metroButton.setBounds (area.removeFromTop (24));
+    // column C: mute, rec, compensation
+    auto colC = h.removeFromLeft (60);
+    h.removeFromLeft (8);
+    muteButton.setBounds (colC.removeFromTop (30));
+    colC.removeFromTop (4);
+    recButton.setBounds (colC.removeFromTop (30));
+    colC.removeFromTop (4);
+    compButton.setBounds (colC.removeFromTop (22));
 
-    area.removeFromTop (6);
-    muteButton.setBounds (area.removeFromTop (30));
-    area.removeFromTop (4);
-
-    auto bottom = area.removeFromBottom (22);
-    compButton.setBounds (bottom);
-    area.removeFromBottom (4);
-    outputButton.setBounds (area.removeFromBottom (28));
-    area.removeFromBottom (4);
-    recButton.setBounds (area.removeFromBottom (30));
-    area.removeFromBottom (4);
-
-    readout.setBounds (area.removeFromTop (22));
-    area.removeFromTop (3);
-    fader.setBounds (area.removeFromLeft (40));
-    area.removeFromLeft (4);
-    meter.setBounds (area);
+    // column D: numeric peak, fader and meter
+    readout.setBounds (h.removeFromTop (20));
+    h.removeFromTop (3);
+    fader.setBounds (h.removeFromLeft (30));
+    h.removeFromLeft (3);
+    meter.setBounds (h);
 }
 
 void TrackComponent::updateLive()
@@ -220,17 +202,6 @@ void TrackComponent::updateLive()
 
     const double sr = juce::jmax (1.0, engine.getSampleRate());
     const double ms = track->getCachedLatencySamples() * 1000.0 / sr;
-    compButton.setButtonText ("Комп. "_ru + juce::String (ms, 1) + " мс"_ru);
-
-    for (int i = 0; i < Track::numSlots; ++i)
-    {
-        const bool isPlayer = track->getSlot (i) != nullptr && track->getSlot (i)->builtinPlayer;
-        if (isPlayer != slotIsPlayer[i] || (track->getSlot (i) != nullptr) != slotUsed[i])
-        {
-            refreshAll();
-            break;
-        }
-        if (isPlayer)
-            slotPlay[i].setActive (track->isPlaying());
-    }
+    compButton.setTooltip ("Задержка цепочки: "_ru + juce::String (ms, 1) + " мс. Выровнять эту дорожку по задержке "_ru
+                           "самой медленной цепочки (выключено - без дополнительной задержки)."_ru);
 }

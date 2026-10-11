@@ -2,7 +2,7 @@
 
 #include "Engine.h"
 #include "TrackComponent.h"
-#include "PlayerWindow.h"
+#include "Timeline.h"
 
 class PluginWindow : public juce::DocumentWindow
 {
@@ -43,8 +43,15 @@ private:
     void loadPluginIntoSlot (const std::shared_ptr<Track>& track, int slotIndex, const juce::PluginDescription& desc);
     void openPluginEditor (const std::shared_ptr<Track>& track, int slotIndex);
     void closeEditorsFor (juce::AudioPluginInstance* plugin);
-    void openPlayerWindow (const std::shared_ptr<Track>& track);
-    void closePlayerWindowsFor (const Track* track);
+    void showClipMenu (const std::shared_ptr<Track>& track, const std::shared_ptr<Clip>& clip, juce::Point<int> screenPos);
+    void showLaneMenu (const std::shared_ptr<Track>& track, double time, juce::Point<int> screenPos);
+    void chooseAudioFor (const std::shared_ptr<Track>& track, double time);
+    void addAudioFiles (const std::shared_ptr<Track>& track, const juce::StringArray& files, double time);
+    void detectClipTempo (const std::shared_ptr<Clip>& clip);
+    void zoomTimeline (float wheelDelta);
+    void seekTimeline (double clockSeconds);
+    void repaintTimeline();
+    void layoutTimelineParts();
     void addTrack();
     void tapTempo();
     void setPinned (bool pinned);
@@ -57,6 +64,10 @@ private:
 
     juce::LookAndFeel_V4 lookAndFeel;   // must outlive every child component
     Engine engine;
+    TimelineView timelineView;
+    RulerComponent ruler { engine, timelineView };
+    PlayheadOverlay playhead { engine, timelineView };
+    juce::Label statusLabel;
     juce::TooltipWindow tooltipWindow { this, 600 };
 
     // top bar
@@ -73,17 +84,18 @@ private:
     juce::Viewport viewport;
     juce::Component trackList;
     juce::OwnedArray<TrackComponent> trackComponents;
-    juce::TextButton addTrackButton { "+" };
+    juce::TextButton addTrackButton { "+ Добавить дорожку"_ru };
     juce::Label emptyHint;
 
     juce::OwnedArray<PluginWindow> pluginWindows;
-    juce::OwnedArray<PlayerWindow> playerWindows;
     std::unique_ptr<juce::FileChooser> chooser;
     std::unique_ptr<juce::PropertiesFile> pluginScanProps;
     juce::Array<juce::int64> tapTimes;
     bool pinned = true;
     int autosaveCounter = 0;
     int slowCounter = 0;
+    double lastClock = -1.0e9, lastSpan = 0.0, lastBpm = 0.0;
+    bool timelineDirty = true;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainComponent)
 };

@@ -1,15 +1,11 @@
 #include "Track.h"
 #include "Text.h"
 
-Track::Track (juce::String trackName, juce::AudioFormatManager& formats, juce::TimeSliceThread& thread)
-    : name (std::move (trackName)), formatManager (formats), readThread (thread)
+Track::Track (juce::String trackName) : name (std::move (trackName))
 {
 }
 
-Track::~Track()
-{
-    transport.setSource (nullptr);
-}
+Track::~Track() = default;
 
 // ---------------------------------------------------------------- chain
 
@@ -22,30 +18,6 @@ void Track::setPlugin (int index, std::unique_ptr<juce::AudioPluginInstance> plu
     auto slot = std::make_unique<Slot>();
     slot->description = description;
     slot->plugin = std::move (plugin);
-
-    std::unique_ptr<Slot> old;
-    {
-        const juce::ScopedLock sl (chainLock);
-        old = std::move (slots[(size_t) index]);
-        slots[(size_t) index] = std::move (slot);
-    }
-
-    if (old != nullptr && old->plugin != nullptr)
-    {
-        old->plugin->releaseResources();
-        old->plugin->setPlayHead (nullptr);
-    }
-    refreshLatency();
-}
-
-void Track::setPlayerSlot (int index)
-{
-    if (! juce::isPositiveAndBelow (index, numSlots) || findPlayerSlot() >= 0)
-        return;
-
-    auto slot = std::make_unique<Slot>();
-    slot->builtinPlayer = true;
-    slot->description.name = "TC Плеер"_ru;
 
     std::unique_ptr<Slot> old;
     {
@@ -76,10 +48,6 @@ void Track::clearSlot (int index)
     if (old == nullptr)
         return;
 
-    if (old->builtinPlayer)
-    {
-        stopPlayer();
-    }
     if (old->plugin != nullptr)
     {
         old->plugin->releaseResources();
@@ -102,14 +70,6 @@ Track::Slot* Track::getSlot (int index) const
     return juce::isPositiveAndBelow (index, numSlots) ? slots[(size_t) index].get() : nullptr;
 }
 
-int Track::findPlayerSlot() const
-{
-    for (int i = 0; i < numSlots; ++i)
-        if (slots[(size_t) i] != nullptr && slots[(size_t) i]->builtinPlayer)
-            return i;
-    return -1;
-}
-
 int Track::findFreeSlot() const
 {
     for (int i = 0; i < numSlots; ++i)
@@ -127,72 +87,52 @@ int Track::computeLatencySamples() const
     return total;
 }
 
-void Track::refreshLatency()
+// ---------------------------------------------------------------- clips
+
+std::shared_ptr<Clip> Track::addClip (std::shared_ptr<ClipData> data, double startSeconds, int clipId)
 {
-    cachedLatency.store (computeLatencySamples());
+    auto clip = std::make_shared<Clip>();
+    clip->id = clipId;
+    clip->data = std::move (data);
+    clip->start.store (startSeconds);
 
-    bool active = false;
-    for (auto& s : slots)
-        if (s != nullptr && s->builtinPlayer && ! s->bypass.load())
-            active = true;
-
-    playerActive.store (active);
+    {
+        const juce::SpinLock::ScopedLockType sl (clipLock);
+        clips.push_back (clip);
+    }
+    return clip;
 }
 
-// ---------------------------------------------------------------- player
-
-bool Track::loadFile (const juce::File& file)
+void Track::removeClip (int clipId)
 {
-    std::unique_ptr<juce::AudioFormatReader> reader (formatManager.createReaderFor (file));
-    if (reader == nullptr)
-        return false;
-
-    stopPlayer();
-    hasFile = false;
-    transport.setSource (nullptr);
-    readerSource.reset();
-
-    fileChannels = (int) reader->numChannels;
-    const double fileRate = reader->sampleRate;
-
-    readerSource = std::make_unique<juce::AudioFormatReaderSource> (reader.release(), true);
-    readerSource->setLooping (looping);
-    transport.setSource (readerSource.get(), 32768, &readThread, fileRate);
-    transport.start();   // always "started": playback is gated by the track's own clock
-    currentFile = file;
-    hasFile = true;
-    transport.setPosition (0.0);
-    return true;
+    std::shared_ptr<Clip> removed;
+    {
+        const juce::SpinLock::ScopedLockType sl (clipLock);
+        for (size_t i = 0; i < clips.size(); ++i)
+            if (clips[i]->id == clipId)
+            {
+                removed = clips[i];
+                clips.erase (clips.begin() + (long) i);
+                break;
+            }
+    }
 }
 
-void Track::setClipOffset (double seconds)
+double Track::getEndSeconds() const
 {
-    // the audio may start earlier than the grid only by the 4 count-in beats
-    clipOffset.store (juce::jmax (seconds, -4.0 * beatSeconds()));
+    double end = 0.0;
+    for (auto& c : clips)
+        if (! c->loop.load())
+            end = juce::jmax (end, c->end());
+    return end;
 }
 
-void Track::armPlayback (double startClockSeconds, double filePositionSeconds)
+double Track::getEarliestStart() const
 {
-    if (! hasFile.load())
-        return;
-
-    playerState.store (0);
-    transport.setPosition (juce::jmax (0.0, filePositionSeconds));
-    pullStartClock.store (startClockSeconds);
-    endedNaturally.store (false);
-    playerState.store (1);
-}
-
-void Track::stopPlayer()
-{
-    playerState.store (0);
-}
-
-void Track::setLooping (bool shouldLoop)
-{
-    looping = shouldLoop;
-    if (readerSource != nullptr)
-        readerSource->setLooping (shouldLoop);
+    double first = 0.0;
+    for (auto& c : clips)
+        first = juce::jmin (first, c->start.load());
+    return first;
 }
 
 // ---------------------------------------------------------------- audio
@@ -212,8 +152,6 @@ void Track::prepare (double newSampleRate, int maxBlockSize, juce::AudioPlayHead
     delayBuf.setSize (2, maxDelay, false, true, false);
     delayWritePos = 0;
 
-    transport.prepareToPlay (maxBlock, sampleRate);
-
     const juce::ScopedLock sl (chainLock);
     for (auto& s : slots)
     {
@@ -228,7 +166,6 @@ void Track::prepare (double newSampleRate, int maxBlockSize, juce::AudioPlayHead
 
 void Track::release()
 {
-    transport.releaseResources();
     const juce::ScopedLock sl (chainLock);
     for (auto& s : slots)
         if (s != nullptr && s->plugin != nullptr)
@@ -260,12 +197,77 @@ void Track::renderClick (float* l, float* r, int n)
     }
 }
 
-// Renders this track's metronome clicks (into clickBuf) from the engine's global clock events
-// and, when the built-in player is armed/playing, the audio file (into stereoBuf).
-void Track::renderTransport (int n, const ChunkClock& clock)
+static inline float cubicSample (const float* x, int idx, float f, int count)
+{
+    auto at = [x, count] (int i) { return x[juce::jlimit (0, count - 1, i)]; };
+    const float y0 = at (idx - 1), y1 = at (idx), y2 = at (idx + 1), y3 = at (idx + 2);
+    const float c1 = 0.5f * (y2 - y0);
+    const float c2 = y0 - 2.5f * y1 + 2.0f * y2 - 0.5f * y3;
+    const float c3 = 0.5f * (y3 - y0) + 1.5f * (y1 - y2);
+    return ((c3 * f + c2) * f + c1) * f + y1;
+}
+
+// Adds the audio clips that lie under the clock into stereoBuf (sample accurate, any clock jump is fine).
+void Track::renderClips (int n, const ChunkClock& clock)
+{
+    if (! clock.running)
+        return;
+
+    const juce::SpinLock::ScopedTryLockType lock (clipLock);
+    if (! lock.isLocked())
+        return;
+
+    auto* l = stereoBuf.getWritePointer (0);
+    auto* r = stereoBuf.getWritePointer (1);
+
+    for (auto& c : clips)
+    {
+        const ClipData& d = *c->data;
+        const double start = c->start.load();
+        const double len = d.lengthSeconds();
+        const bool loop = c->loop.load();
+        const double t0 = clock.startSeconds;
+
+        const int i0 = juce::jmax (0, (int) std::ceil ((start - t0) * sampleRate));
+        const int i1 = loop ? n : juce::jmin (n, (int) std::ceil ((start + len - t0) * sampleRate));
+        if (i0 >= i1 || len <= 0.0)
+            continue;
+
+        const float* L = d.audio.getReadPointer (0);
+        const float* R = d.audio.getNumChannels() > 1 ? d.audio.getReadPointer (1) : L;
+        const double ratio = d.sampleRate / sampleRate;
+        double pos = (t0 + (double) i0 / sampleRate - start) * d.sampleRate;
+        const double total = (double) d.numSamples;
+
+        for (int i = i0; i < i1; ++i)
+        {
+            if (loop && pos >= total)
+                pos = std::fmod (pos, total);
+
+            const int idx = (int) pos;
+            if (idx >= 0 && idx < d.numSamples)
+            {
+                if (ratio == 1.0)
+                {
+                    l[i] += L[idx];
+                    r[i] += R[idx];
+                }
+                else
+                {
+                    const float f = (float) (pos - idx);
+                    l[i] += cubicSample (L, idx, f, d.numSamples);
+                    r[i] += cubicSample (R, idx, f, d.numSamples);
+                }
+            }
+            pos += ratio;
+        }
+    }
+}
+
+// Metronome clicks of this track, from the engine's global clock events.
+void Track::renderClicks (int n, const ChunkClock& clock)
 {
     clickBuf.clear (0, n);
-
     auto* cl = clickBuf.getWritePointer (0);
     auto* cr = clickBuf.getWritePointer (1);
 
@@ -286,36 +288,6 @@ void Track::renderTransport (int n, const ChunkClock& clock)
     {
         clickPos = -1;
     }
-
-    const int state = playerState.load();
-    if (! clock.running || state == 0 || ! playerActive.load() || ! hasFile.load())
-        return;
-
-    int from = 0;
-    if (state == 1)
-    {
-        const double startAt = pullStartClock.load();
-        const double chunkEnd = clock.startSeconds + (double) n / sampleRate;
-        if (startAt >= chunkEnd)
-            return;   // not yet: wait for the clock to reach the start point
-
-        from = juce::jlimit (0, n - 1, (int) std::lround ((startAt - clock.startSeconds) * sampleRate));
-        playerState.store (2);
-    }
-
-    auto* l = stereoBuf.getWritePointer (0);
-    auto* r = stereoBuf.getWritePointer (1);
-    const int len = n - from;
-    juce::AudioSourceChannelInfo info (&stereoBuf, from, len);
-    transport.getNextAudioBlock (info);
-    if (fileChannels == 1)
-        juce::FloatVectorOperations::copy (r + from, l + from, len);
-
-    if (transport.hasStreamFinished())
-    {
-        playerState.store (0);
-        endedNaturally.store (true);
-    }
 }
 
 void Track::processChunk (const float* const* inputs, int numInputs,
@@ -325,12 +297,7 @@ void Track::processChunk (const float* const* inputs, int numInputs,
     auto* l = stereoBuf.getWritePointer (0);
     auto* r = stereoBuf.getWritePointer (1);
 
-    const bool player = playerActive.load();
-    if (player)
-    {
-        stereoBuf.clear (0, n);
-    }
-    else if (busSource != nullptr && busSource != this && busSource->busOut.getNumSamples() >= n)
+    if (busSource != nullptr && busSource != this && busSource->busOut.getNumSamples() >= n)
     {
         juce::FloatVectorOperations::copy (l, busSource->busOut.getReadPointer (0), n);
         juce::FloatVectorOperations::copy (r, busSource->busOut.getReadPointer (1), n);
@@ -355,7 +322,8 @@ void Track::processChunk (const float* const* inputs, int numInputs,
             juce::FloatVectorOperations::clear (r, n);
     }
 
-    renderTransport (n, clock);
+    renderClips (n, clock);      // audio clips from the timeline are added to the source
+    renderClicks (n, clock);
     runChain (n);
     applyExtraDelay (n);
 

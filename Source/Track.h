@@ -1,7 +1,8 @@
 #pragma once
 
+#include "Clip.h"
+
 #include <juce_audio_basics/juce_audio_basics.h>
-#include <juce_audio_formats/juce_audio_formats.h>
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_audio_utils/juce_audio_utils.h>
 
@@ -21,8 +22,8 @@ struct ChunkClock
     bool eventAccent[maxEvents] {};
 };
 
-// One mixer channel: source (device input, another track = bus, or the built-in player)
-// -> up to 5 slots (VST3 plugins / built-in player) -> gain -> output pair.
+// One mixer channel / timeline row: source (device input, another track = bus) + audio clips
+// -> up to 5 plugin slots -> fader -> output pair.
 // Every track has its own chain, so plugin latency of one track never delays another one
 // unless "compensate" is switched on for that track.
 class Track
@@ -32,13 +33,12 @@ public:
 
     struct Slot
     {
-        std::unique_ptr<juce::AudioPluginInstance> plugin;   // null for the built-in player
+        std::unique_ptr<juce::AudioPluginInstance> plugin;
         juce::PluginDescription description;
         std::atomic<bool> bypass { false };
-        bool builtinPlayer = false;
     };
 
-    Track (juce::String trackName, juce::AudioFormatManager& formats, juce::TimeSliceThread& readThread);
+    explicit Track (juce::String trackName);
     ~Track();
 
     int id = 0;
@@ -55,40 +55,25 @@ public:
     std::atomic<bool> compensate { false };
     std::atomic<bool> metronomeOn { false };
     std::atomic<float> peakL { 0.0f }, peakR { 0.0f };
+    std::atomic<int> loadingClips { 0 };
+    bool inputChosenByUser = false;
 
     // Chain editing: message thread only.
     void setPlugin (int index, std::unique_ptr<juce::AudioPluginInstance> plugin, const juce::PluginDescription& description);
-    void setPlayerSlot (int index);
     void clearSlot (int index);
     Slot* getSlot (int index) const;
-    int findPlayerSlot() const;
     int findFreeSlot() const;
     int getNumPlugins() const;
     int computeLatencySamples() const;
     int getCachedLatencySamples() const { return cachedLatency.load(); }
-    void refreshLatency();                 // also refreshes the "player active" flag
-    bool isPlayerActive() const { return playerActive.load(); }
+    void refreshLatency() { cachedLatency.store (computeLatencySamples()); }
 
-    // Built-in player: message thread only. The engine's global clock is the time base:
-    // the file is placed on the clock and started at a given clock time (see Engine).
-    bool loadFile (const juce::File& file);
-    juce::File getFile() const { return currentFile; }
-    // Seeks the file to `filePositionSeconds` and starts pulling it when the clock reaches `startClockSeconds`.
-    void armPlayback (double startClockSeconds, double filePositionSeconds);
-    void stopPlayer();                     // silences the player only; the metronome is independent
-    bool isPlaying() const { return playerState.load() != 0; }
-    bool hasEndedNaturally() const { return endedNaturally.load(); }
-    void clearEnded() { endedNaturally.store (false); }
-    bool hasAudio() const { return hasFile.load(); }
-    double getLengthSeconds() const { return transport.getLengthInSeconds(); }
-    double getPositionSeconds() const { return transport.getCurrentPosition(); }
-    void setLooping (bool shouldLoop);
-    bool isLooping() const { return looping; }
-
-    // Audio shift against the metronome grid (seconds, > 0 = later, < 0 = earlier, at most 4 beats).
-    void setClipOffset (double seconds);
-    double getClipOffset() const { return clipOffset.load(); }
-    double beatSeconds() const { return 60.0 / juce::jlimit (20.0, 400.0, bpmSource != nullptr ? bpmSource->load() : 120.0); }
+    // Timeline clips: message thread only (the audio thread reads them under clipLock).
+    std::shared_ptr<Clip> addClip (std::shared_ptr<ClipData> data, double startSeconds, int clipId);
+    void removeClip (int clipId);
+    const std::vector<std::shared_ptr<Clip>>& getClips() const { return clips; }
+    double getEndSeconds() const;          // end of the last non-looping clip
+    double getEarliestStart() const;       // start of the first clip (0 if none)
 
     // Audio thread.
     void prepare (double sampleRate, int maxBlockSize, juce::AudioPlayHead* playHead);
@@ -104,28 +89,17 @@ public:
     juce::CriticalSection chainLock;
 
 private:
-    void renderTransport (int n, const ChunkClock& clock);
+    void renderClips (int n, const ChunkClock& clock);
+    void renderClicks (int n, const ChunkClock& clock);
     void renderClick (float* l, float* r, int n);
     void runChain (int n);
     void applyExtraDelay (int n);
 
-    juce::AudioFormatManager& formatManager;
-    juce::TimeSliceThread& readThread;
-
     std::array<std::unique_ptr<Slot>, numSlots> slots;
 
-    // player
-    juce::File currentFile;
-    std::unique_ptr<juce::AudioFormatReaderSource> readerSource;
-    juce::AudioTransportSource transport;
-    int fileChannels = 0;
-    bool looping = false;
-    std::atomic<bool> hasFile { false };
-    std::atomic<bool> playerActive { false };
-    std::atomic<int> playerState { 0 };            // 0 stopped, 1 armed (waiting for the clock), 2 playing
-    std::atomic<double> pullStartClock { 0.0 };
-    std::atomic<bool> endedNaturally { false };
-    std::atomic<double> clipOffset { 0.0 };
+    std::vector<std::shared_ptr<Clip>> clips;
+    juce::SpinLock clipLock;
+
     int clickPos = -1;
     bool clickAccent = false;
     const std::atomic<double>* bpmSource = nullptr;
