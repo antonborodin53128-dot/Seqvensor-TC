@@ -71,15 +71,15 @@ private:
 
     juce::Label nameLabel;
     juce::ComboBox inLCombo, inRCombo, outCombo;
-    juce::TextButton fileButton { "Выбрать файл…" };
-    juce::TextButton playButton { "▶" }, stopButton { "■" };
-    juce::ToggleButton loopButton { "Повтор" };
+    juce::TextButton fileButton { "Выбрать файл…"_ru };
+    juce::TextButton playButton { "▶"_ru }, stopButton { "■"_ru };
+    juce::ToggleButton loopButton { "Повтор"_ru };
     juce::Slider positionSlider;
     juce::Slider gainSlider;
     juce::ToggleButton muteButton { "Mute" };
-    juce::ToggleButton compButton { "Компенсировать задержку" };
-    juce::TextButton removeButton { "✕" };
-    juce::TextButton addPluginButton { "+ эффект" };
+    juce::ToggleButton compButton { "Компенсировать задержку"_ru };
+    juce::TextButton removeButton { "✕"_ru };
+    juce::TextButton addPluginButton { "+ эффект"_ru };
     juce::Label latencyLabel;
     LevelMeter meter;
 

@@ -74,7 +74,7 @@ TrackComponent::TrackComponent (Engine& engineToUse, std::shared_ptr<Track> trac
     gainSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 64, 22);
     gainSlider.setRange (-60.0, 12.0, 0.1);
     gainSlider.setSkewFactorFromMidPoint (-12.0);
-    gainSlider.setTextValueSuffix (" дБ");
+    gainSlider.setTextValueSuffix (" дБ"_ru);
     gainSlider.setDoubleClickReturnValue (true, 0.0);
     gainSlider.setValue (juce::Decibels::gainToDecibels (track->gainLinear.load(), -60.0f), juce::dontSendNotification);
     gainSlider.onValueChange = [this]
@@ -88,7 +88,7 @@ TrackComponent::TrackComponent (Engine& engineToUse, std::shared_ptr<Track> trac
     addAndMakeVisible (muteButton);
 
     compButton.setToggleState (track->compensate.load(), juce::dontSendNotification);
-    compButton.setTooltip ("Выровнять эту дорожку по задержке самой «медленной» цепочки. Выключено = дорожка идёт без дополнительной задержки.");
+    compButton.setTooltip ("Выровнять эту дорожку по задержке самой «медленной» цепочки. Выключено = дорожка идёт без дополнительной задержки."_ru);
     compButton.onClick = [this] { track->compensate = compButton.getToggleState(); };
     addAndMakeVisible (compButton);
 
@@ -117,11 +117,11 @@ void TrackComponent::refreshChannelLists()
 
         inLCombo.clear (juce::dontSendNotification);
         inRCombo.clear (juce::dontSendNotification);
-        inLCombo.addItem ("Вход: —", 1);
-        inRCombo.addItem ("R: моно", 1);
+        inLCombo.addItem ("Вход: —"_ru, 1);
+        inRCombo.addItem ("R: моно"_ru, 1);
         for (int i = 0; i < ins.size(); ++i)
         {
-            inLCombo.addItem ("Вход: " + ins[i], i + 2);
+            inLCombo.addItem ("Вход: "_ru + ins[i], i + 2);
             inRCombo.addItem ("R: " + ins[i], i + 2);
         }
         inLCombo.setSelectedId (track->inputL.load() + 2, juce::dontSendNotification);
@@ -133,7 +133,7 @@ void TrackComponent::refreshChannelLists()
     const int pairs = juce::jmax (1, (outs.size() + 1) / 2);
     for (int p = 0; p < pairs; ++p)
     {
-        juce::String label = "Выход: ";
+        juce::String label = "Выход: "_ru;
         if (p * 2 < outs.size())
             label += outs[p * 2];
         if (p * 2 + 1 < outs.size())
@@ -157,12 +157,12 @@ void TrackComponent::rebuildPluginButtons()
             continue;
 
         auto* b = pluginButtons.add (new juce::TextButton (slot->description.name));
-        b->setTooltip (slot->description.manufacturerName + " — " + slot->description.name);
+        b->setTooltip (slot->description.manufacturerName + " — "_ru + slot->description.name);
         b->setColour (juce::TextButton::buttonColourId, slot->bypass.load() ? juce::Colour (0xff3a3d42) : juce::Colour (0xff2b6f66));
         b->onClick = [this, i] { if (cb.openEditor) cb.openEditor (track, i); };
         addAndMakeVisible (b);
 
-        auto* m = pluginMenuButtons.add (new juce::TextButton ("⋯"));
+        auto* m = pluginMenuButtons.add (new juce::TextButton ("⋯"_ru));
         m->onClick = [this, i, m] { if (cb.pluginMenu) cb.pluginMenu (track, i, m); };
         addAndMakeVisible (m);
     }
@@ -250,7 +250,7 @@ void TrackComponent::updateLive()
 
     const double sr = juce::jmax (1.0, engine.getSampleRate());
     const double ms = track->getCachedLatencySamples() * 1000.0 / sr;
-    latencyLabel.setText (juce::String::formatted ("задержка цепочки: %.1f мс", ms), juce::dontSendNotification);
+    latencyLabel.setText (juce::String::formatted ("задержка цепочки: %.1f мс"_ru, ms), juce::dontSendNotification);
 
     if (track->kind == Track::Kind::Player)
     {
@@ -259,8 +259,8 @@ void TrackComponent::updateLive()
         if (! draggingPosition)
             positionSlider.setValue (track->getPositionSeconds(), juce::dontSendNotification);
 
-        playButton.setButtonText (track->isPlaying() ? "❚❚" : "▶");
+        playButton.setButtonText (track->isPlaying() ? "❚❚"_ru : "▶"_ru);
         const auto f = track->getFile();
-        fileButton.setButtonText (f != juce::File() ? f.getFileName() : "Выбрать файл…");
+        fileButton.setButtonText (f != juce::File() ? f.getFileName() : "Выбрать файл…"_ru);
     }
 }

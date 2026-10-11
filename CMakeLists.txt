@@ -41,6 +41,9 @@ target_compile_definitions(TC PRIVATE
     JUCE_MODAL_LOOPS_PERMITTED=1
     JUCE_STRICT_REFCOUNTEDPOINTER=1)
 
+# Source files are UTF-8 (Russian UI text).
+target_compile_options(TC PRIVATE "$<$<CXX_COMPILER_ID:MSVC>:/utf-8>")
+
 target_link_libraries(TC PRIVATE
     juce::juce_audio_basics
     juce::juce_audio_devices

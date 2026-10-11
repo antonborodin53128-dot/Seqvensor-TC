@@ -76,10 +76,10 @@ MainComponent::MainComponent()
     addAndMakeVisible (tapButton);
 
     keyValue.setFont (juce::FontOptions (22.0f, juce::Font::bold));
-    keyValue.setTooltip ("Автоматическое определение тональности появится в следующей версии.");
+    keyValue.setTooltip ("Автоматическое определение тональности появится в следующей версии."_ru);
     addAndMakeVisible (keyValue);
 
-    analysisButton.setTooltip ("Настройки определения темпа и тональности (каналы-источники)");
+    analysisButton.setTooltip ("Настройки определения темпа и тональности (каналы-источники)"_ru);
     analysisButton.onClick = [this] { showAnalysisSettings(); };
     addAndMakeVisible (analysisButton);
 
@@ -92,8 +92,8 @@ MainComponent::MainComponent()
     viewport.setScrollBarsShown (true, false);
     addAndMakeVisible (viewport);
 
-    emptyHint.setText ("Добавьте дорожку: живой вход для голоса или плейбэк из файла. Затем нажмите «+ эффект» и выберите VST3-плагин "
-                       "(если список пуст, сначала откройте «Плагины» и просканируйте).",
+    emptyHint.setText ("Добавьте дорожку: живой вход для голоса или плейбэк из файла. Затем нажмите «+ эффект» и выберите VST3-плагин "_ru
+                       "(если список пуст, сначала откройте «Плагины» и просканируйте)."_ru,
                        juce::dontSendNotification);
     emptyHint.setJustificationType (juce::Justification::centred);
     emptyHint.setColour (juce::Label::textColourId, juce::Colours::grey);
@@ -225,7 +225,7 @@ void MainComponent::addLiveTrack()
         if (t->kind == Track::Kind::Live)
             ++liveCount;
 
-    auto track = engine.addTrack (Track::Kind::Live, "Вокал " + juce::String (liveCount + 1));
+    auto track = engine.addTrack (Track::Kind::Live, "Вокал "_ru + juce::String (liveCount + 1));
     track->inputL = liveCount;   // successive tracks default to successive inputs
     rebuildTracks();
 }
@@ -237,14 +237,14 @@ void MainComponent::addPlayerTrack()
         if (t->kind == Track::Kind::Player)
             ++count;
 
-    auto track = engine.addTrack (Track::Kind::Player, "Плейбэк " + juce::String (count + 1));
+    auto track = engine.addTrack (Track::Kind::Player, "Плейбэк "_ru + juce::String (count + 1));
     rebuildTracks();
     pickPlayerFile (track);
 }
 
 void MainComponent::pickPlayerFile (const std::shared_ptr<Track>& track)
 {
-    chooser = std::make_unique<juce::FileChooser> ("Выберите аудиофайл", juce::File(),
+    chooser = std::make_unique<juce::FileChooser> ("Выберите аудиофайл"_ru, juce::File(),
                                                    "*.wav;*.aif;*.aiff;*.flac;*.mp3;*.ogg");
     juce::Component::SafePointer<MainComponent> safe (this);
     chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
@@ -257,7 +257,7 @@ void MainComponent::pickPlayerFile (const std::shared_ptr<Track>& track)
                                   return;
                               if (! track->loadFile (file))
                                   juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, "TC",
-                                                                          "Не удалось открыть файл:\n" + file.getFullPathName());
+                                                                          "Не удалось открыть файл:\n"_ru + file.getFullPathName());
                               else
                                   track->name = file.getFileNameWithoutExtension();
                               safe->rebuildTracks();
@@ -281,7 +281,7 @@ void MainComponent::showPluginMenu (const std::shared_ptr<Track>& track, juce::C
     juce::PopupMenu menu;
     if (effects.empty())
     {
-        menu.addItem (1000000, "Плагинов нет — откройте «Плагины» и просканируйте", false);
+        menu.addItem (1000000, "Плагинов нет — откройте «Плагины» и просканируйте"_ru, false);
     }
     else
     {
@@ -303,7 +303,7 @@ void MainComponent::showPluginMenu (const std::shared_ptr<Track>& track, juce::C
                                     return;
                                 if (! ok)
                                     juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, "TC",
-                                                                            "Не удалось загрузить плагин «" + desc.name + "»:\n" + error);
+                                                                            "Не удалось загрузить плагин «"_ru + desc.name + "»:\n"_ru + error);
                                 safe->rebuildTracks();
                             });
                         });
@@ -316,10 +316,10 @@ void MainComponent::showSlotMenu (const std::shared_ptr<Track>& track, int slotI
         return;
 
     juce::PopupMenu menu;
-    menu.addItem (1, "Открыть окно плагина");
-    menu.addItem (2, "Обход (bypass)", true, slot->bypass.load());
+    menu.addItem (1, "Открыть окно плагина"_ru);
+    menu.addItem (2, "Обход (bypass)"_ru, true, slot->bypass.load());
     menu.addSeparator();
-    menu.addItem (3, "Удалить из цепочки");
+    menu.addItem (3, "Удалить из цепочки"_ru);
 
     juce::Component::SafePointer<MainComponent> safe (this);
     menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (anchor),
@@ -392,7 +392,7 @@ void MainComponent::showAudioSettings()
 
     juce::DialogWindow::LaunchOptions o;
     o.content.setOwned (selector);
-    o.dialogTitle = "Аудио (драйвер, устройство, каналы, буфер)";
+    o.dialogTitle = "Аудио (драйвер, устройство, каналы, буфер)"_ru;
     o.dialogBackgroundColour = juce::Colour (0xff20242a);
     o.escapeKeyTriggersCloseButton = true;
     o.useNativeTitleBar = true;
@@ -409,7 +409,7 @@ void MainComponent::showPluginManager()
 
     juce::DialogWindow::LaunchOptions o;
     o.content.setOwned (list);
-    o.dialogTitle = "Плагины VST3";
+    o.dialogTitle = "Плагины VST3"_ru;
     o.dialogBackgroundColour = juce::Colour (0xff20242a);
     o.escapeKeyTriggersCloseButton = true;
     o.useNativeTitleBar = true;
@@ -419,10 +419,10 @@ void MainComponent::showPluginManager()
 
 void MainComponent::showAnalysisSettings()
 {
-    juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon, "Темп и тональность",
-                                            "Здесь будет выбор каналов-источников для автоматического определения "
-                                            "темпа и тональности. Эта функция появится в следующей версии.\n\n"
-                                            "Пока темп задаётся вручную или кнопкой Tap, и передаётся всем плагинам.");
+    juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon, "Темп и тональность"_ru,
+                                            "Здесь будет выбор каналов-источников для автоматического определения "_ru
+                                            "темпа и тональности. Эта функция появится в следующей версии.\n\n"_ru
+                                            "Пока темп задаётся вручную или кнопкой Tap, и передаётся всем плагинам."_ru);
 }
 
 void MainComponent::setPinned (bool pinned)
@@ -476,7 +476,7 @@ void MainComponent::timerCallback()
     if (++slowCounter >= 15)   // twice a second
     {
         slowCounter = 0;
-        statusLabel.setText (juce::String::formatted ("CPU %d%%   |   %d Гц, блок %d   |   ",
+        statusLabel.setText (juce::String::formatted ("CPU %d%%   |   %d Гц, блок %d   |   "_ru,
                                                       (int) std::round (engine.getCpuLoad() * 100.0f),
                                                       (int) engine.getSampleRate(), engine.getBlockSize())
                                  + engine.describeDeviceLatency(),

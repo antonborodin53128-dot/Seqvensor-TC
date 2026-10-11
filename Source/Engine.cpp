@@ -152,10 +152,10 @@ juce::String Engine::describeDeviceLatency() const
             const double in = device->getInputLatencyInSamples() * 1000.0 / rate;
             const double out = device->getOutputLatencyInSamples() * 1000.0 / rate;
             const double buf = device->getCurrentBufferSizeSamples() * 1000.0 / rate;
-            return juce::String::formatted ("буфер %.1f мс, вход %.1f мс, выход %.1f мс", buf, in, out);
+            return juce::String::formatted ("буфер %.1f мс, вход %.1f мс, выход %.1f мс"_ru, buf, in, out);
         }
     }
-    return "устройство не запущено";
+    return "устройство не запущено"_ru;
 }
 
 void Engine::audioDeviceAboutToStart (juce::AudioIODevice* device)
@@ -273,7 +273,7 @@ void Engine::loadProject()
     for (auto* te : xml->getChildWithTagNameIterator ("TRACK"))
     {
         const auto kind = te->getStringAttribute ("kind") == "player" ? Track::Kind::Player : Track::Kind::Live;
-        auto track = addTrack (kind, te->getStringAttribute ("name", "Дорожка"));
+        auto track = addTrack (kind, te->getStringAttribute ("name", "Дорожка"_ru));
 
         track->inputL = te->getIntAttribute ("inL", 0);
         track->inputR = te->getIntAttribute ("inR", -1);

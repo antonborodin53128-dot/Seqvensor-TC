@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Track.h"
+#include "Text.h"
 
 #include <functional>
 

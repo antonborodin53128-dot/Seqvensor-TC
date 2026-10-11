@@ -52,23 +52,23 @@ private:
 
     // header
     juce::Label titleLabel { {}, "TC" };
-    juce::TextButton audioButton { "Аудио" }, pluginsButton { "Плагины" };
-    juce::ToggleButton pinButton { "Поверх всех окон" };
+    juce::TextButton audioButton { "Аудио"_ru }, pluginsButton { "Плагины"_ru };
+    juce::ToggleButton pinButton { "Поверх всех окон"_ru };
     juce::Label statusLabel;
 
     // project panel
-    juce::Label bpmCaption { {}, "ТЕМП" }, keyCaption { {}, "ТОНАЛЬНОСТЬ" };
+    juce::Label bpmCaption { {}, "ТЕМП"_ru }, keyCaption { {}, "ТОНАЛЬНОСТЬ"_ru };
     juce::Slider bpmSlider;
     juce::TextButton tapButton { "Tap" };
-    juce::Label keyValue { {}, "—" };
-    juce::TextButton analysisButton { "⚙" };
+    juce::Label keyValue { {}, "—"_ru };
+    juce::TextButton analysisButton { "⚙"_ru };
 
     // tracks
     juce::Viewport viewport;
     juce::Component trackList;
     juce::OwnedArray<TrackComponent> trackComponents;
-    juce::TextButton addLiveButton { "+ Живой вход (вокал, инструмент)" };
-    juce::TextButton addPlayerButton { "+ Плейбэк (файл)" };
+    juce::TextButton addLiveButton { "+ Живой вход (вокал, инструмент)"_ru };
+    juce::TextButton addPlayerButton { "+ Плейбэк (файл)"_ru };
     juce::Label emptyHint;
 
     juce::OwnedArray<PluginWindow> pluginWindows;
