@@ -407,7 +407,8 @@ void MainComponent::addTrack()
 {
     const int count = (int) engine.getTracks().size();
     auto track = engine.addTrack ("Дорожка "_ru + juce::String (count + 1));
-    track->inputL = count;   // successive tracks default to successive inputs
+    track->inputL = -1;      // new tracks have no input until one is chosen
+    track->inputR = -1;
     refreshStrips();
 }
 
