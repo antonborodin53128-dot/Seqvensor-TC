@@ -13,19 +13,25 @@ public:
         setClickingTogglesState (true);
     }
 
+    void setColours (juce::Colour on, juce::Colour off, juce::Colour onEdge, juce::Colour offEdge, juce::Colour offText)
+    {
+        onColour = on; offColour = off; onEdgeColour = onEdge; offEdgeColour = offEdge; offTextColour = offText;
+        repaint();
+    }
+
     void paintButton (juce::Graphics& g, bool over, bool) override
     {
         const bool on = getToggleState();
         auto r = getLocalBounds().toFloat().reduced (1.0f);
 
-        g.setColour (on ? juce::Colour (0xffff2b38) : juce::Colour (0xff4d2a2e));
+        g.setColour (on ? onColour : offColour);
         g.fillRoundedRectangle (r, 5.0f);
-        g.setColour (on ? juce::Colour (0xffffa0a6) : (over ? juce::Colour (0xff8a4a50) : juce::Colour (0xff6a3a40)));
+        g.setColour (on ? onEdgeColour : (over ? offEdgeColour.brighter (0.3f) : offEdgeColour));
         g.drawRoundedRectangle (r, 5.0f, 1.0f);
 
         if (style == Style::Text)
         {
-            g.setColour (on ? juce::Colours::white : juce::Colour (0xffc58a90));
+            g.setColour (on ? juce::Colours::white : offTextColour);
             g.setFont (juce::FontOptions (15.0f, juce::Font::bold));
             g.drawText (getButtonText(), getLocalBounds(), juce::Justification::centred);
         }
@@ -40,22 +46,26 @@ public:
 
 private:
     Style style;
+    juce::Colour onColour { 0xffff2b38 }, offColour { 0xff4d2a2e }, onEdgeColour { 0xffffa0a6 },
+                 offEdgeColour { 0xff6a3a40 }, offTextColour { 0xffc58a90 };
 };
 
 // Small drawn icon button (no font glyphs, so nothing can turn into "hieroglyphs").
 class IconButton : public juce::Button
 {
 public:
-    enum class Icon { Play, Pause, Stop, Close, Gear, Menu };
+    enum class Icon { Play, Pause, Stop, Close, Gear, Menu, Arrow };
 
     explicit IconButton (Icon i) : juce::Button ({}), icon (i) {}
 
     void setIcon (Icon i) { icon = i; repaint(); }
+    void setActive (bool a) { if (a != active) { active = a; repaint(); } }
 
     void paintButton (juce::Graphics& g, bool over, bool down) override
     {
         auto r = getLocalBounds().toFloat().reduced (1.0f);
-        g.setColour (down ? juce::Colour (0xff4a5059) : over ? juce::Colour (0xff3a4048) : juce::Colour (0xff2c3138));
+        g.setColour (active ? juce::Colour (0xff1f8f5f)
+                            : down ? juce::Colour (0xff4a5059) : over ? juce::Colour (0xff3a4048) : juce::Colour (0xff2c3138));
         g.fillRoundedRectangle (r, 5.0f);
 
         g.setColour (juce::Colour (0xffe6e9ed));
@@ -82,6 +92,13 @@ public:
                 g.drawLine (c.x - s, c.y - s, c.x + s, c.y + s, 2.0f);
                 g.drawLine (c.x - s, c.y + s, c.x + s, c.y - s, 2.0f);
                 break;
+            case Icon::Arrow:
+            {
+                juce::Path p;
+                p.addTriangle (c.x - s * 0.9f, c.y - s * 0.45f, c.x + s * 0.9f, c.y - s * 0.45f, c.x, c.y + s * 0.6f);
+                g.fillPath (p);
+                break;
+            }
             case Icon::Menu:
                 for (int i = -1; i <= 1; ++i)
                     g.fillRoundedRectangle (c.x - s * 1.3f, c.y + (float) i * s * 0.9f - 1.0f, s * 2.6f, 2.4f, 1.0f);
@@ -103,6 +120,7 @@ public:
 
 private:
     Icon icon;
+    bool active = false;
 };
 
 // Vertical stereo level meter.
@@ -184,9 +202,9 @@ public:
     {
         std::function<void (std::shared_ptr<Track>)> remove;
         std::function<void (std::shared_ptr<Track>, juce::Component*)> inputMenu;
-        std::function<void (std::shared_ptr<Track>, int, juce::Component*)> slotMenu;
+        std::function<void (std::shared_ptr<Track>, int, juce::Component*)> slotClick;   // name of a slot
+        std::function<void (std::shared_ptr<Track>, int, juce::Component*)> slotMenu;    // arrow of a slot
         std::function<void (std::shared_ptr<Track>, juce::Component*)> outputMenu;
-        std::function<void (std::shared_ptr<Track>)> pickFile;
     };
 
     static constexpr int stripWidth = 158;
@@ -197,7 +215,7 @@ public:
     void resized() override;
 
     void refreshAll();   // button captions from the track state
-    void updateLive();   // meters, player position (timer)
+    void updateLive();   // meters, player state (timer)
 
     std::shared_ptr<Track> getTrack() const { return track; }
 
@@ -209,15 +227,21 @@ private:
     juce::Label nameLabel;
     IconButton removeButton { IconButton::Icon::Close };
     juce::TextButton inputButton;
+
     juce::TextButton slotButtons[Track::numSlots];
+    IconButton slotArrows[Track::numSlots] { IconButton (IconButton::Icon::Arrow), IconButton (IconButton::Icon::Arrow),
+                                             IconButton (IconButton::Icon::Arrow), IconButton (IconButton::Icon::Arrow),
+                                             IconButton (IconButton::Icon::Arrow) };
+    IconButton slotPlay[Track::numSlots] { IconButton (IconButton::Icon::Play), IconButton (IconButton::Icon::Play),
+                                           IconButton (IconButton::Icon::Play), IconButton (IconButton::Icon::Play),
+                                           IconButton (IconButton::Icon::Play) };
+    IconButton slotStop[Track::numSlots] { IconButton (IconButton::Icon::Stop), IconButton (IconButton::Icon::Stop),
+                                           IconButton (IconButton::Icon::Stop), IconButton (IconButton::Icon::Stop),
+                                           IconButton (IconButton::Icon::Stop) };
+    bool slotUsed[Track::numSlots] {};
+    bool slotIsPlayer[Track::numSlots] {};
 
-    // built-in player panel (visible only when the player is in one of the slots)
-    juce::TextButton fileButton;
-    IconButton playButton { IconButton::Icon::Play }, stopButton { IconButton::Icon::Stop };
-    juce::ToggleButton metroButton { "Метроном"_ru };
-    juce::ToggleButton loopButton { "Повтор"_ru };
-    juce::Slider positionSlider;
-
+    StateButton metroButton { "Метроном"_ru, StateButton::Style::Text };
     StateButton muteButton { "MUTE", StateButton::Style::Text };
     PeakReadout readout;
     juce::Slider fader;
@@ -225,9 +249,6 @@ private:
     StateButton recButton { "REC", StateButton::Style::Dot };
     juce::TextButton outputButton;
     juce::ToggleButton compButton { "Комп."_ru };
-
-    bool showPlayer = false;
-    bool draggingPosition = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (TrackComponent)
 };

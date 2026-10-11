@@ -24,7 +24,8 @@ target_sources(TC PRIVATE
     Source/Engine.cpp
     Source/Track.cpp
     Source/MainComponent.cpp
-    Source/TrackComponent.cpp)
+    Source/TrackComponent.cpp
+    Source/PlayerWindow.cpp)
 
 target_compile_definitions(TC PRIVATE
     JUCE_APPLICATION_NAME_STRING="TC"

@@ -173,6 +173,38 @@ void Engine::addPluginToTrack (const std::shared_ptr<Track>& track, int slotInde
         });
 }
 
+// ---------------------------------------------------------------- transport
+
+void Engine::playAll()
+{
+    bool anyMetronome = false;
+    for (auto& t : getTracks())
+    {
+        t->prepareStart();
+        if (t->metronomeOn.load())
+            anyMetronome = true;
+    }
+    pendingStart.store (anyMetronome ? 4 : 0);
+}
+
+void Engine::stopAll()
+{
+    pendingStart.store (-1);
+    for (auto& t : getTracks())
+        t->stopAndRewind();
+}
+
+bool Engine::isPlaying() const
+{
+    if (pendingStart.load() >= 0)
+        return true;
+    const juce::ScopedLock sl (tracksLock);
+    for (auto& t : tracks)
+        if (t->isPlaying())
+            return true;
+    return false;
+}
+
 // ---------------------------------------------------------------- audio
 
 juce::String Engine::describeDeviceLatency() const
@@ -241,6 +273,12 @@ void Engine::audioDeviceIOCallbackWithContext (const float* const* inputChannelD
 
     updateCompensation();
 
+    // all tracks get the start request in the same callback, so their clocks stay aligned
+    const int startBeats = pendingStart.exchange (-1);
+    if (startBeats >= 0)
+        for (auto& t : tracks)
+            t->requestStart (startBeats);
+
     // tracks that read another track (bus) go last so they get the fresh block
     order.clear();
     for (auto& t : tracks)
@@ -269,10 +307,26 @@ void Engine::audioDeviceIOCallbackWithContext (const float* const* inputChannelD
         done += n;
     }
 
-    bool anyPlaying = false;
+    bool anyPlaying = false, anyPlayerTrack = false, anyPlayerRunning = false;
     for (auto& t : tracks)
+    {
         if (t->isPlaying())
             anyPlaying = true;
+        if (t->isPlayerActive() && t->hasAudio())
+        {
+            anyPlayerTrack = true;
+            if (t->isPlaying())
+                anyPlayerRunning = true;
+        }
+    }
+
+    // all the music has ended: stop the clocks (metronome) of the other tracks too
+    if (anyPlaying && anyPlayerTrack && ! anyPlayerRunning)
+    {
+        for (auto& t : tracks)
+            t->haltTransport();
+        anyPlaying = false;
+    }
 
     playHead.playing.store (anyPlaying);
     playHead.advance (numSamples);
@@ -356,7 +410,7 @@ std::vector<juce::PluginDescription> Engine::getEnabledEffects() const
 void Engine::saveProject()
 {
     juce::XmlElement root ("TC_PROJECT");
-    root.setAttribute ("version", 2);
+    root.setAttribute ("version", 3);
     root.setAttribute ("bpm", getBpm());
 
     for (auto& t : getTracks())
@@ -373,6 +427,7 @@ void Engine::saveProject()
         te->setAttribute ("rec", t->recArmed.load());
         te->setAttribute ("comp", t->compensate.load());
         te->setAttribute ("metro", t->metronomeOn.load());
+        te->setAttribute ("offset", t->getClipOffset());
         te->setAttribute ("loop", t->isLooping());
         if (t->getFile() != juce::File())
             te->setAttribute ("file", t->getFile().getFullPathName());
@@ -432,7 +487,9 @@ void Engine::loadProject()
         track->muted = te->getBoolAttribute ("mute", false);
         track->recArmed = te->getBoolAttribute ("rec", false);
         track->compensate = te->getBoolAttribute ("comp", false);
-        track->metronomeOn = te->getBoolAttribute ("metro", true);
+        if (xml->getIntAttribute ("version", 1) >= 3)
+            track->metronomeOn = te->getBoolAttribute ("metro", false);
+        track->setClipOffset (te->getDoubleAttribute ("offset", 0.0));
         track->setLooping (te->getBoolAttribute ("loop", false));
 
         if (oldPlayer)

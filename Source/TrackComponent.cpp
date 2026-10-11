@@ -20,40 +20,29 @@ TrackComponent::TrackComponent (Engine& engineToUse, std::shared_ptr<Track> trac
 
     for (int i = 0; i < Track::numSlots; ++i)
     {
-        slotButtons[i].onClick = [this, i] { if (cb.slotMenu) cb.slotMenu (track, i, &slotButtons[i]); };
+        slotButtons[i].onClick = [this, i] { if (cb.slotClick) cb.slotClick (track, i, &slotButtons[i]); };
         addAndMakeVisible (slotButtons[i]);
+
+        slotArrows[i].setTooltip ("Меню слота: обход, заменить, убрать"_ru);
+        slotArrows[i].onClick = [this, i] { if (cb.slotMenu) cb.slotMenu (track, i, &slotArrows[i]); };
+        addChildComponent (slotArrows[i]);
+
+        slotPlay[i].setTooltip ("Играть этот плеер"_ru);
+        slotPlay[i].onClick = [this] { track->play(); };
+        addChildComponent (slotPlay[i]);
+
+        slotStop[i].setTooltip ("Остановить этот плеер"_ru);
+        slotStop[i].onClick = [this] { track->stopAndRewind(); };
+        addChildComponent (slotStop[i]);
     }
 
-    // player panel
-    fileButton.onClick = [this] { if (cb.pickFile) cb.pickFile (track); };
-    playButton.onClick = [this]
-    {
-        if (track->isPlaying())
-            track->pause();
-        else
-            track->play();
-    };
-    stopButton.onClick = [this] { track->stopAndRewind(); };
+    metroButton.setColours (juce::Colour (0xff2fb5a2), juce::Colour (0xff24403d), juce::Colour (0xffa6efe4),
+                            juce::Colour (0xff35615c), juce::Colour (0xff8cbab4));
     metroButton.setToggleState (track->metronomeOn.load(), juce::dontSendNotification);
+    metroButton.setTooltip ("Метроном на этой дорожке (в темпе проекта). Если он включён хотя бы на одной дорожке, "_ru
+                            "общий Play начинается с 4 ударов отсчёта."_ru);
     metroButton.onClick = [this] { track->metronomeOn = metroButton.getToggleState(); };
-    loopButton.setToggleState (track->isLooping(), juce::dontSendNotification);
-    loopButton.onClick = [this] { track->setLooping (loopButton.getToggleState()); };
-
-    positionSlider.setSliderStyle (juce::Slider::LinearHorizontal);
-    positionSlider.setTextBoxStyle (juce::Slider::NoTextBox, true, 0, 0);
-    positionSlider.setRange (0.0, 1.0, 0.0);
-    positionSlider.onDragStart = [this] { draggingPosition = true; };
-    positionSlider.onDragEnd = [this] { draggingPosition = false; };
-    positionSlider.onValueChange = [this]
-    {
-        if (draggingPosition)
-            track->setPositionSeconds (positionSlider.getValue());
-    };
-
-    for (juce::Component* c : { (juce::Component*) &fileButton, (juce::Component*) &playButton,
-                                (juce::Component*) &stopButton, (juce::Component*) &metroButton,
-                                (juce::Component*) &loopButton, (juce::Component*) &positionSlider })
-        addChildComponent (c);
+    addAndMakeVisible (metroButton);
 
     muteButton.setToggleState (track->muted.load(), juce::dontSendNotification);
     muteButton.onClick = [this] { track->muted = muteButton.getToggleState(); };
@@ -98,12 +87,12 @@ void TrackComponent::refreshAll()
     nameLabel.setText (track->name, juce::dontSendNotification);
 
     // input
-    showPlayer = track->isPlayerActive();
+    const bool playerOn = track->isPlayerActive();
     const int il = track->inputL.load();
     const int ir = track->inputR.load();
     const int bus = track->busId.load();
     juce::String input;
-    if (showPlayer)
+    if (playerOn)
         input = "Вход: TC Плеер"_ru;
     else if (bus >= 0)
     {
@@ -117,7 +106,7 @@ void TrackComponent::refreshAll()
     else
         input = "Вход: "_ru + juce::String (il + 1);
     inputButton.setButtonText (input);
-    inputButton.setEnabled (! showPlayer);
+    inputButton.setEnabled (! playerOn);
     inputButton.setColour (juce::TextButton::buttonColourId, bus >= 0 ? juce::Colour (0xff6a4fa3) : juce::Colour (0xff2c3138));
 
     // slots
@@ -125,6 +114,9 @@ void TrackComponent::refreshAll()
     {
         auto& b = slotButtons[i];
         auto* slot = track->getSlot (i);
+        slotUsed[i] = slot != nullptr;
+        slotIsPlayer[i] = slot != nullptr && slot->builtinPlayer;
+
         if (slot == nullptr)
         {
             b.setButtonText (juce::String (i + 1) + ". -"_ru);
@@ -139,22 +131,19 @@ void TrackComponent::refreshAll()
             juce::Colour base = slot->builtinPlayer ? juce::Colour (0xff3a5fcd) : juce::Colour (0xff2b6f66);
             b.setColour (juce::TextButton::buttonColourId, slot->bypass.load() ? juce::Colour (0xff3a3d42) : base);
             b.setColour (juce::TextButton::textColourOffId, juce::Colours::white);
-            b.setTooltip (slot->builtinPlayer ? n : slot->description.manufacturerName + " - " + n);
+            b.setTooltip (slot->builtinPlayer ? "Открыть окно плеера"_ru
+                                              : "Открыть окно плагина: "_ru + slot->description.manufacturerName + " - " + n);
         }
+
+        slotArrows[i].setVisible (slot != nullptr);
+        slotPlay[i].setVisible (slotIsPlayer[i]);
+        slotStop[i].setVisible (slotIsPlayer[i]);
     }
 
     // output
     const int pair = track->outputPair.load();
     outputButton.setButtonText (pair < 0 ? "Выход: нет"_ru
                                          : "Выход: "_ru + juce::String (pair * 2 + 1) + "-" + juce::String (pair * 2 + 2));
-
-    for (juce::Component* c : { (juce::Component*) &fileButton, (juce::Component*) &playButton,
-                                (juce::Component*) &stopButton, (juce::Component*) &metroButton,
-                                (juce::Component*) &loopButton, (juce::Component*) &positionSlider })
-        c->setVisible (showPlayer);
-
-    const auto f = track->getFile();
-    fileButton.setButtonText (f != juce::File() ? f.getFileName() : "Выбрать файл..."_ru);
 
     resized();
     repaint();
@@ -184,25 +173,24 @@ void TrackComponent::resized()
 
     for (int i = 0; i < Track::numSlots; ++i)
     {
-        slotButtons[i].setBounds (area.removeFromTop (26));
+        auto row = area.removeFromTop (26);
+        if (slotUsed[i])
+            slotArrows[i].setBounds (row.removeFromRight (20));
+        if (slotIsPlayer[i])
+        {
+            slotStop[i].setBounds (row.removeFromRight (24));
+            row.removeFromRight (2);
+            slotPlay[i].setBounds (row.removeFromRight (24));
+            row.removeFromRight (2);
+        }
+        else
+            row.removeFromRight (slotUsed[i] ? 2 : 0);
+        slotButtons[i].setBounds (row);
         area.removeFromTop (3);
     }
 
-    if (showPlayer)
-    {
-        area.removeFromTop (3);
-        fileButton.setBounds (area.removeFromTop (24));
-        area.removeFromTop (3);
-        auto row = area.removeFromTop (26);
-        playButton.setBounds (row.removeFromLeft (36));
-        row.removeFromLeft (4);
-        stopButton.setBounds (row.removeFromLeft (36));
-        row.removeFromLeft (4);
-        loopButton.setBounds (row);
-        area.removeFromTop (2);
-        metroButton.setBounds (area.removeFromTop (22));
-        positionSlider.setBounds (area.removeFromTop (18));
-    }
+    area.removeFromTop (3);
+    metroButton.setBounds (area.removeFromTop (24));
 
     area.removeFromTop (6);
     muteButton.setBounds (area.removeFromTop (30));
@@ -234,16 +222,15 @@ void TrackComponent::updateLive()
     const double ms = track->getCachedLatencySamples() * 1000.0 / sr;
     compButton.setButtonText ("Комп. "_ru + juce::String (ms, 1) + " мс"_ru);
 
-    if (track->isPlayerActive() != showPlayer)
-        refreshAll();
-
-    if (showPlayer)
+    for (int i = 0; i < Track::numSlots; ++i)
     {
-        const double len = track->getLengthSeconds();
-        positionSlider.setRange (0.0, juce::jmax (0.001, len), 0.0);
-        if (! draggingPosition)
-            positionSlider.setValue (track->getPositionSeconds(), juce::dontSendNotification);
-
-        playButton.setIcon (track->isPlaying() ? IconButton::Icon::Pause : IconButton::Icon::Play);
+        const bool isPlayer = track->getSlot (i) != nullptr && track->getSlot (i)->builtinPlayer;
+        if (isPlayer != slotIsPlayer[i] || (track->getSlot (i) != nullptr) != slotUsed[i])
+        {
+            refreshAll();
+            break;
+        }
+        if (isPlayer)
+            slotPlay[i].setActive (track->isPlaying());
     }
 }

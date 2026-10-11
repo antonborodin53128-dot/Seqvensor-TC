@@ -2,6 +2,7 @@
 
 #include "Engine.h"
 #include "TrackComponent.h"
+#include "PlayerWindow.h"
 
 class PluginWindow : public juce::DocumentWindow
 {
@@ -42,7 +43,8 @@ private:
     void loadPluginIntoSlot (const std::shared_ptr<Track>& track, int slotIndex, const juce::PluginDescription& desc);
     void openPluginEditor (const std::shared_ptr<Track>& track, int slotIndex);
     void closeEditorsFor (juce::AudioPluginInstance* plugin);
-    void pickPlayerFile (const std::shared_ptr<Track>& track);
+    void openPlayerWindow (const std::shared_ptr<Track>& track);
+    void closePlayerWindowsFor (const Track* track);
     void addTrack();
     void tapTempo();
     void setPinned (bool pinned);
@@ -64,6 +66,7 @@ private:
     juce::Label keyLabel { {}, "Тон: -"_ru };
     IconButton analysisButton { IconButton::Icon::Gear };
     juce::Label cpuLabel;
+    IconButton playAllButton { IconButton::Icon::Play }, stopAllButton { IconButton::Icon::Stop };
 
     // tracks
     juce::Viewport viewport;
@@ -73,6 +76,7 @@ private:
     juce::Label emptyHint;
 
     juce::OwnedArray<PluginWindow> pluginWindows;
+    juce::OwnedArray<PlayerWindow> playerWindows;
     std::unique_ptr<juce::FileChooser> chooser;
     std::unique_ptr<juce::PropertiesFile> pluginScanProps;
     juce::Array<juce::int64> tapTimes;

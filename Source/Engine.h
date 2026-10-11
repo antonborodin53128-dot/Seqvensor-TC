@@ -72,6 +72,12 @@ public:
                            std::function<void (bool ok, const juce::String& error)> done,
                            const juce::String& savedStateBase64 = {}, bool bypassed = false);
 
+    // Global transport: starts every player at once. If the metronome is on for at least
+    // one track, 4 count-in beats are played first and the music starts on beat 5.
+    void playAll();
+    void stopAll();
+    bool isPlaying() const;
+
     double getSampleRate() const { return currentSampleRate; }
     int getBlockSize() const { return currentBlockSize; }
     float getCpuLoad() const { return (float) loadMeasure.getLoadAsProportion(); }
@@ -105,6 +111,7 @@ private:
     std::set<juce::String> enabledPlugins;
     bool allPluginsEnabled = true;
     int nextTrackId = 1;
+    std::atomic<int> pendingStart { -1 };
     std::vector<Track*> order;
 
     mutable juce::CriticalSection tracksLock;

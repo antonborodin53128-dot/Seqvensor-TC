@@ -200,6 +200,14 @@ MainComponent::MainComponent()
     analysisButton.onClick = [this] { showAnalysisSettings(); };
     addAndMakeVisible (analysisButton);
 
+    playAllButton.setTooltip ("Играть все плееры одновременно. Если метроном включён хотя бы на одной дорожке - "_ru
+                              "сначала 4 удара отсчёта, музыка начинается на 5-м."_ru);
+    playAllButton.onClick = [this] { engine.playAll(); };
+    addAndMakeVisible (playAllButton);
+    stopAllButton.setTooltip ("Остановить все плееры"_ru);
+    stopAllButton.onClick = [this] { engine.stopAll(); };
+    addAndMakeVisible (stopAllButton);
+
     cpuLabel.setJustificationType (juce::Justification::centredRight);
     cpuLabel.setFont (juce::FontOptions (16.0f, juce::Font::bold));
     cpuLabel.setColour (juce::Label::textColourId, juce::Colours::lightgrey);
@@ -234,6 +242,7 @@ MainComponent::~MainComponent()
     engine.knownPlugins.removeChangeListener (this);
     engine.onTracksChanged = nullptr;
     pluginWindows.clear();
+    playerWindows.clear();
     trackComponents.clear();
     engine.shutdown();
     juce::LookAndFeel::setDefaultLookAndFeel (nullptr);
@@ -243,13 +252,14 @@ void MainComponent::paint (juce::Graphics& g)
 {
     g.fillAll (juce::Colour (0xff181b1f));
     g.setColour (juce::Colour (0xff20242a));
-    g.fillRect (getLocalBounds().removeFromTop (52));
+    g.fillRect (getLocalBounds().removeFromTop (96));
 }
 
 void MainComponent::resized()
 {
     auto area = getLocalBounds();
-    auto bar = area.removeFromTop (52).reduced (12, 8);
+    auto fullBar = area.removeFromTop (96);
+    auto bar = fullBar.removeFromTop (52).reduced (12, 8);
 
     menuButton.setBounds (bar.removeFromLeft (40));
     cpuLabel.setBounds (bar.removeFromRight (110));
@@ -264,6 +274,12 @@ void MainComponent::resized()
     keyLabel.setBounds (group.removeFromLeft (130));
     group.removeFromLeft (8);
     analysisButton.setBounds (group.removeFromLeft (38));
+
+    // global transport under the tempo
+    auto transportRow = juce::Rectangle<int> (96, 34).withCentre ({ getWidth() / 2, fullBar.getY() + 20 });
+    playAllButton.setBounds (transportRow.removeFromLeft (46));
+    transportRow.removeFromLeft (4);
+    stopAllButton.setBounds (transportRow.removeFromLeft (46));
 
     viewport.setBounds (area.reduced (6, 6));
     emptyHint.setBounds (area.reduced (40, 20));
@@ -298,6 +314,7 @@ void MainComponent::rebuildTracks()
         for (int i = 0; i < Track::numSlots; ++i)
             if (auto* s = t->getSlot (i))
                 closeEditorsFor (s->plugin.get());
+        closePlayerWindowsFor (t.get());
 
         // deleting a component from its own button callback is unsafe, so defer
         juce::Component::SafePointer<MainComponent> safe (this);
@@ -308,9 +325,18 @@ void MainComponent::rebuildTracks()
         });
     };
     cb.inputMenu = [this] (std::shared_ptr<Track> t, juce::Component* c) { showInputMenu (t, c); };
+    cb.slotClick = [this] (std::shared_ptr<Track> t, int i, juce::Component* c)
+    {
+        auto* slot = t->getSlot (i);
+        if (slot == nullptr)
+            showSlotMenu (t, i, c);            // empty slot: choose what to put there
+        else if (slot->builtinPlayer)
+            openPlayerWindow (t);
+        else
+            openPluginEditor (t, i);
+    };
     cb.slotMenu = [this] (std::shared_ptr<Track> t, int i, juce::Component* c) { showSlotMenu (t, i, c); };
     cb.outputMenu = [this] (std::shared_ptr<Track> t, juce::Component* c) { showOutputMenu (t, c); };
-    cb.pickFile = [this] (std::shared_ptr<Track> t) { pickPlayerFile (t); };
 
     for (auto& t : engine.getTracks())
     {
@@ -335,24 +361,31 @@ void MainComponent::addTrack()
     refreshStrips();
 }
 
-void MainComponent::pickPlayerFile (const std::shared_ptr<Track>& track)
+void MainComponent::openPlayerWindow (const std::shared_ptr<Track>& track)
 {
-    chooser = std::make_unique<juce::FileChooser> ("Выберите аудиофайл"_ru, juce::File(),
-                                                   "*.wav;*.aif;*.aiff;*.flac;*.mp3;*.ogg");
+    for (auto* w : playerWindows)
+        if (w->getTrack() == track.get())
+        {
+            w->toFront (true);
+            return;
+        }
+
     juce::Component::SafePointer<MainComponent> safe (this);
-    chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
-                          [safe, track] (const juce::FileChooser& fc)
-                          {
-                              if (safe == nullptr)
-                                  return;
-                              const auto file = fc.getResult();
-                              if (file == juce::File())
-                                  return;
-                              if (! track->loadFile (file))
-                                  juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, "TC",
-                                                                          "Не удалось открыть файл:\n"_ru + file.getFullPathName());
-                              safe->refreshStrips();
-                          });
+    playerWindows.add (new PlayerWindow (engine, track, [safe] (PlayerWindow* w)
+    {
+        juce::MessageManager::callAsync ([safe, w]
+        {
+            if (safe != nullptr)
+                safe->playerWindows.removeObject (w, true);
+        });
+    }));
+}
+
+void MainComponent::closePlayerWindowsFor (const Track* track)
+{
+    for (int i = playerWindows.size(); --i >= 0;)
+        if (playerWindows[i]->getTrack() == track)
+            playerWindows.remove (i);
 }
 
 // ---------------------------------------------------------------- strip menus
@@ -475,7 +508,7 @@ void MainComponent::showSlotMenu (const std::shared_ptr<Track>& track, int slotI
     if (slot != nullptr)
     {
         if (slot->builtinPlayer)
-            menu.addItem (2, "Выбрать файл..."_ru);
+            menu.addItem (2, "Открыть окно плеера"_ru);
         else
             menu.addItem (1, "Открыть окно плагина"_ru);
         menu.addItem (3, "Обход (bypass)"_ru, true, slot->bypass.load());
@@ -519,7 +552,7 @@ void MainComponent::showSlotMenu (const std::shared_ptr<Track>& track, int slotI
                             }
                             else if (result == 2)
                             {
-                                safe->pickPlayerFile (track);
+                                safe->openPlayerWindow (track);
                             }
                             else if (result == 3)
                             {
@@ -532,6 +565,9 @@ void MainComponent::showSlotMenu (const std::shared_ptr<Track>& track, int slotI
                             }
                             else if (result == 4)
                             {
+                                if (auto* s = track->getSlot (slotIndex))
+                                    if (s->builtinPlayer)
+                                        safe->closePlayerWindowsFor (track.get());
                                 closeSlotEditor();
                                 track->clearSlot (slotIndex);
                                 safe->refreshStrips();
@@ -542,9 +578,13 @@ void MainComponent::showSlotMenu (const std::shared_ptr<Track>& track, int slotI
                                 track->clearSlot (slotIndex);
                                 track->setPlayerSlot (slotIndex);
                                 safe->refreshStrips();
+                                safe->openPlayerWindow (track);
                             }
                             else if (result >= 1000 && result - 1000 < (int) effects.size())
                             {
+                                if (auto* s = track->getSlot (slotIndex))
+                                    if (s->builtinPlayer)
+                                        safe->closePlayerWindowsFor (track.get());
                                 closeSlotEditor();
                                 track->clearSlot (slotIndex);
                                 safe->loadPluginIntoSlot (track, slotIndex, effects[(size_t) (result - 1000)]);
@@ -707,6 +747,7 @@ void MainComponent::timerCallback()
 {
     for (auto* t : trackComponents)
         t->updateLive();
+    playAllButton.setActive (engine.isPlaying());
 
     if (++slowCounter >= 15)   // twice a second
     {

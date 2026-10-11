@@ -78,8 +78,7 @@ void Track::clearSlot (int index)
 
     if (old->builtinPlayer)
     {
-        running = false;
-        startRequest = false;
+        haltTransport();
     }
     if (old->plugin != nullptr)
     {
@@ -138,11 +137,6 @@ void Track::refreshLatency()
             active = true;
 
     playerActive.store (active);
-    if (! active)
-    {
-        running = false;
-        startRequest = false;
-    }
 }
 
 // ---------------------------------------------------------------- player
@@ -153,8 +147,7 @@ bool Track::loadFile (const juce::File& file)
     if (reader == nullptr)
         return false;
 
-    running = false;
-    startRequest = false;
+    haltTransport();
     hasFile = false;
     transport.setSource (nullptr);
     readerSource.reset();
@@ -168,32 +161,42 @@ bool Track::loadFile (const juce::File& file)
     transport.start();   // always "started": playback is gated by the track's own clock
     currentFile = file;
     hasFile = true;
+    transport.setPosition (startPositionSeconds());
     return true;
+}
+
+void Track::setClipOffset (double seconds)
+{
+    clipOffset.store (seconds);
+    if (hasFile.load() && ! running.load())
+        transport.setPosition (startPositionSeconds());
+}
+
+void Track::prepareStart()
+{
+    if (hasFile.load())
+        transport.setPosition (startPositionSeconds());
 }
 
 void Track::play()
 {
-    if (! playerActive.load())
+    if (! playerActive.load() || ! hasFile.load())
         return;
-
-    if (hasFile.load() && (transport.hasStreamFinished()
-                           || transport.getCurrentPosition() >= transport.getLengthInSeconds() - 0.01))
-        transport.setPosition (0.0);
-
-    startRequest = true;
+    prepareStart();
+    startRequest.store (0);
 }
 
-void Track::pause()
+void Track::haltTransport()
 {
-    startRequest = false;
-    running = false;
+    startRequest.store (-1);
+    running.store (false);
 }
 
 void Track::stopAndRewind()
 {
-    startRequest = false;
-    running = false;
-    transport.setPosition (0.0);
+    haltTransport();
+    if (hasFile.load())
+        transport.setPosition (startPositionSeconds());
 }
 
 void Track::setLooping (bool shouldLoop)
@@ -212,6 +215,7 @@ void Track::prepare (double newSampleRate, int maxBlockSize, juce::AudioPlayHead
 
     stereoBuf.setSize (2, maxBlock, false, true, false);
     busOut.setSize (2, maxBlock, false, true, false);
+    clickBuf.setSize (2, maxBlock, false, true, false);
     pluginBuf.setSize (16, maxBlock, false, true, false);
     midi.ensureSize (2048);
 
@@ -267,17 +271,22 @@ void Track::renderClick (float* l, float* r, int n)
     }
 }
 
-void Track::renderPlayer (int n)
+// Runs the track's own clock: count-in, metronome clicks (into clickBuf) and, when the
+// built-in player is active, the audio file (into stereoBuf), shifted by clipOffset.
+void Track::renderTransport (int n)
 {
-    stereoBuf.clear (0, n);
+    clickBuf.clear (0, n);
 
-    if (startRequest.exchange (false))
+    const int req = startRequest.exchange (-1);
+    if (req >= 0)
     {
         beatIndex = 0;
         nextBeatIn = 0.0;
-        musicStarted = false;
+        countIn = req;
+        musicStarted = (req == 0);
+        fileDelayLeft = juce::jmax (0, (int) std::lround (clipOffset.load() * sampleRate));
         clickPos = -1;
-        running = true;
+        running.store (true);
     }
 
     if (! running.load())
@@ -285,19 +294,21 @@ void Track::renderPlayer (int n)
 
     auto* l = stereoBuf.getWritePointer (0);
     auto* r = stereoBuf.getWritePointer (1);
+    auto* cl = clickBuf.getWritePointer (0);
+    auto* cr = clickBuf.getWritePointer (1);
 
     const double bpm = juce::jlimit (20.0, 400.0, bpmSource != nullptr ? bpmSource->load() : 120.0);
     const double beatSamples = sampleRate * 60.0 / bpm;
     const bool metro = metronomeOn.load();
-    const bool file = hasFile.load();
+    const bool player = playerActive.load() && hasFile.load();
 
     int pos = 0;
     while (pos < n)
     {
         if (nextBeatIn <= 0.0)
         {
-            if (beatIndex == countInBeats)
-                musicStarted = true;   // 4 clicks have passed: the music starts on the 5th beat
+            if (! musicStarted && beatIndex == countIn)
+                musicStarted = true;   // the count-in is over: the music starts on this beat
 
             if (metro)
             {
@@ -310,22 +321,28 @@ void Track::renderPlayer (int n)
 
         const int seg = juce::jmin (n - pos, juce::jmax (1, (int) std::ceil (nextBeatIn)));
 
-        if (musicStarted && file)
+        if (musicStarted && player)
         {
-            juce::AudioSourceChannelInfo info (&stereoBuf, pos, seg);
-            transport.getNextAudioBlock (info);
-            if (fileChannels == 1)
-                juce::FloatVectorOperations::copy (r + pos, l + pos, seg);
+            const int skip = juce::jmin (seg, fileDelayLeft);
+            fileDelayLeft -= skip;
+            const int len = seg - skip;
+            if (len > 0)
+            {
+                juce::AudioSourceChannelInfo info (&stereoBuf, pos + skip, len);
+                transport.getNextAudioBlock (info);
+                if (fileChannels == 1)
+                    juce::FloatVectorOperations::copy (r + pos + skip, l + pos + skip, len);
+            }
         }
 
-        renderClick (l + pos, r + pos, seg);
+        renderClick (cl + pos, cr + pos, seg);
 
         nextBeatIn -= (double) seg;
         pos += seg;
     }
 
-    if (musicStarted && file && transport.hasStreamFinished())
-        running = false;
+    if (musicStarted && player && fileDelayLeft == 0 && transport.hasStreamFinished())
+        running.store (false);
 }
 
 void Track::processChunk (const float* const* inputs, int numInputs,
@@ -335,9 +352,10 @@ void Track::processChunk (const float* const* inputs, int numInputs,
     auto* l = stereoBuf.getWritePointer (0);
     auto* r = stereoBuf.getWritePointer (1);
 
-    if (playerActive.load())
+    const bool player = playerActive.load();
+    if (player)
     {
-        renderPlayer (n);
+        stereoBuf.clear (0, n);
     }
     else if (busSource != nullptr && busSource != this && busSource->busOut.getNumSamples() >= n)
     {
@@ -364,8 +382,15 @@ void Track::processChunk (const float* const* inputs, int numInputs,
             juce::FloatVectorOperations::clear (r, n);
     }
 
+    renderTransport (n);
     runChain (n);
     applyExtraDelay (n);
+
+    if (running.load() || startRequest.load() >= 0)
+    {
+        juce::FloatVectorOperations::add (l, clickBuf.getReadPointer (0), n);
+        juce::FloatVectorOperations::add (r, clickBuf.getReadPointer (1), n);
+    }
 
     // fader; the signal for other tracks (bus) is taken after the fader, before mute
     const float g = gainLinear.load();

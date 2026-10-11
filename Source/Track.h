@@ -42,7 +42,7 @@ public:
     std::atomic<bool> muted { false };
     std::atomic<bool> recArmed { false };
     std::atomic<bool> compensate { false };
-    std::atomic<bool> metronomeOn { true };
+    std::atomic<bool> metronomeOn { false };
     std::atomic<float> peakL { 0.0f }, peakR { 0.0f };
 
     // Chain editing: message thread only.
@@ -61,10 +61,16 @@ public:
     // Built-in player (+ metronome): message thread only.
     bool loadFile (const juce::File& file);
     juce::File getFile() const { return currentFile; }
-    void play();                           // 4 count-in clicks, music starts on beat 5
-    void pause();
+    // Audio shift against the metronome grid (seconds, > 0 = later, < 0 = earlier).
+    void setClipOffset (double seconds);
+    double getClipOffset() const { return clipOffset.load(); }
+    void play();                           // this player only, no count-in
+    void prepareStart();                   // rewinds to the start position (before a start request)
+    void requestStart (int countInBeats) { startRequest.store (countInBeats); }
+    void haltTransport();                  // stops without rewinding (safe from any thread)
     void stopAndRewind();
     bool isPlaying() const { return running.load(); }
+    bool hasAudio() const { return hasFile.load(); }
     double getLengthSeconds() const { return transport.getLengthInSeconds(); }
     double getPositionSeconds() const { return transport.getCurrentPosition(); }
     void setPositionSeconds (double seconds) { transport.setPosition (seconds); }
@@ -85,8 +91,9 @@ public:
     juce::CriticalSection chainLock;
 
 private:
-    void renderPlayer (int n);
+    void renderTransport (int n);
     void renderClick (float* l, float* r, int n);
+    double startPositionSeconds() const { return juce::jmax (0.0, -clipOffset.load()); }
     void runChain (int n);
     void applyExtraDelay (int n);
 
@@ -96,7 +103,6 @@ private:
     std::array<std::unique_ptr<Slot>, numSlots> slots;
 
     // player
-    static constexpr int countInBeats = 4;
     juce::File currentFile;
     std::unique_ptr<juce::AudioFormatReaderSource> readerSource;
     juce::AudioTransportSource transport;
@@ -105,7 +111,10 @@ private:
     std::atomic<bool> hasFile { false };
     std::atomic<bool> playerActive { false };
     std::atomic<bool> running { false };
-    std::atomic<bool> startRequest { false };
+    std::atomic<int> startRequest { -1 };   // >= 0: start with that many count-in beats
+    std::atomic<double> clipOffset { 0.0 };
+    int countIn = 0;
+    int fileDelayLeft = 0;
     int beatIndex = 0;
     double nextBeatIn = 0.0;
     bool musicStarted = false;
@@ -118,6 +127,7 @@ private:
     int maxBlock = 512;
     juce::AudioBuffer<float> stereoBuf;
     juce::AudioBuffer<float> busOut;
+    juce::AudioBuffer<float> clickBuf;
     juce::AudioBuffer<float> pluginBuf;
     juce::MidiBuffer midi;
     juce::AudioBuffer<float> delayBuf;
