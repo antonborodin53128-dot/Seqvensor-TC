@@ -20,6 +20,140 @@ PluginWindow::PluginWindow (juce::AudioPluginInstance& pluginToShow, std::functi
     setVisible (true);
 }
 
+// ---------------------------------------------------------------- plugin chooser (tick the plugins you want)
+
+namespace
+{
+    class PluginChooserComponent : public juce::Component,
+                                   private juce::ChangeListener
+    {
+    public:
+        PluginChooserComponent (Engine& e, std::function<void()> scanRequested)
+            : engine (e), onScan (std::move (scanRequested))
+        {
+            hint.setText ("Отметьте плагины, которые нужны в меню слотов дорожек."_ru, juce::dontSendNotification);
+            hint.setColour (juce::Label::textColourId, juce::Colours::lightgrey);
+            addAndMakeVisible (hint);
+
+            scanButton.setButtonText ("Сканировать VST3..."_ru);
+            scanButton.onClick = [this] { if (onScan) onScan(); };
+            addAndMakeVisible (scanButton);
+
+            allButton.setButtonText ("Выбрать все"_ru);
+            allButton.onClick = [this] { engine.setAllPluginsEnabled (true); rebuild(); };
+            addAndMakeVisible (allButton);
+
+            noneButton.setButtonText ("Снять все"_ru);
+            noneButton.onClick = [this] { engine.setAllPluginsEnabled (false); rebuild(); };
+            addAndMakeVisible (noneButton);
+
+            viewport.setViewedComponent (&content, false);
+            viewport.setScrollBarsShown (true, false);
+            addAndMakeVisible (viewport);
+
+            engine.knownPlugins.addChangeListener (this);
+            rebuild();
+        }
+
+        ~PluginChooserComponent() override { engine.knownPlugins.removeChangeListener (this); }
+
+        void resized() override
+        {
+            auto r = getLocalBounds().reduced (10);
+            auto top = r.removeFromTop (30);
+            scanButton.setBounds (top.removeFromRight (170));
+            top.removeFromRight (6);
+            noneButton.setBounds (top.removeFromRight (110));
+            top.removeFromRight (6);
+            allButton.setBounds (top.removeFromRight (120));
+            hint.setBounds (top);
+            r.removeFromTop (6);
+            viewport.setBounds (r);
+            layoutRows();
+        }
+
+    private:
+        void changeListenerCallback (juce::ChangeBroadcaster*) override { rebuild(); }
+
+        void rebuild()
+        {
+            rows.clear();
+            descriptions.clear();
+
+            std::vector<juce::PluginDescription> list;
+            for (auto& d : engine.knownPlugins.getTypes())
+                if (! d.isInstrument)
+                    list.push_back (d);
+            std::sort (list.begin(), list.end(), [] (const juce::PluginDescription& a, const juce::PluginDescription& b)
+            {
+                return a.name.compareIgnoreCase (b.name) < 0;
+            });
+
+            for (auto& d : list)
+            {
+                auto* b = rows.add (new juce::ToggleButton (d.name + "   (" + d.manufacturerName + ")"));
+                b->setToggleState (engine.isPluginEnabled (d), juce::dontSendNotification);
+                const auto copy = d;
+                b->onClick = [this, b, copy] { engine.setPluginEnabled (copy, b->getToggleState()); };
+                content.addAndMakeVisible (b);
+            }
+
+            hint.setText (rows.isEmpty()
+                              ? "Список пуст. Нажмите \"Сканировать VST3\"."_ru
+                              : "Отметьте плагины, которые нужны в меню слотов дорожек."_ru,
+                          juce::dontSendNotification);
+            layoutRows();
+        }
+
+        void layoutRows()
+        {
+            const int w = juce::jmax (100, viewport.getMaximumVisibleWidth());
+            int y = 0;
+            for (auto* b : rows)
+            {
+                b->setBounds (0, y, w, 26);
+                y += 28;
+            }
+            content.setSize (w, juce::jmax (y, 10));
+        }
+
+        Engine& engine;
+        std::function<void()> onScan;
+        juce::Label hint;
+        juce::TextButton scanButton, allButton, noneButton;
+        juce::Viewport viewport;
+        juce::Component content;
+        juce::OwnedArray<juce::ToggleButton> rows;
+        std::vector<juce::PluginDescription> descriptions;
+    };
+
+    void launchDialog (juce::Component* content, const juce::String& title, bool resizable)
+    {
+        juce::DialogWindow::LaunchOptions o;
+        o.content.setOwned (content);
+        o.dialogTitle = title;
+        o.dialogBackgroundColour = juce::Colour (0xff20242a);
+        o.escapeKeyTriggersCloseButton = true;
+        o.useNativeTitleBar = true;
+        o.resizable = resizable;
+        o.launchAsync();
+    }
+
+    juce::StringArray activeChannelNames (juce::AudioIODevice* device, bool input)
+    {
+        juce::StringArray result;
+        if (device == nullptr)
+            return result;
+
+        const auto all = input ? device->getInputChannelNames() : device->getOutputChannelNames();
+        const auto active = input ? device->getActiveInputChannels() : device->getActiveOutputChannels();
+        for (int i = 0; i < all.size(); ++i)
+            if (active[i])
+                result.add (all[i]);
+        return result;
+    }
+}
+
 // ---------------------------------------------------------------- main component
 
 MainComponent::MainComponent()
@@ -40,66 +174,52 @@ MainComponent::MainComponent()
     engine.deviceManager.addChangeListener (this);
     engine.knownPlugins.addChangeListener (this);
 
-    titleLabel.setFont (juce::FontOptions (26.0f, juce::Font::bold));
-    titleLabel.setColour (juce::Label::textColourId, juce::Colour (0xff2fb5a2));
-    addAndMakeVisible (titleLabel);
-
-    audioButton.onClick = [this] { showAudioSettings(); };
-    pluginsButton.onClick = [this] { showPluginManager(); };
-    addAndMakeVisible (audioButton);
-    addAndMakeVisible (pluginsButton);
-
-    pinButton.setToggleState (true, juce::dontSendNotification);
-    pinButton.onClick = [this] { setPinned (pinButton.getToggleState()); };
-    addAndMakeVisible (pinButton);
-
-    statusLabel.setJustificationType (juce::Justification::centredRight);
-    statusLabel.setColour (juce::Label::textColourId, juce::Colours::lightgrey);
-    addAndMakeVisible (statusLabel);
-
-    for (auto* l : { &bpmCaption, &keyCaption })
-    {
-        l->setFont (juce::FontOptions (11.0f, juce::Font::bold));
-        l->setColour (juce::Label::textColourId, juce::Colours::grey);
-        addAndMakeVisible (l);
-    }
+    menuButton.setTooltip ("Меню: драйвер, плагины, настройки"_ru);
+    menuButton.onClick = [this] { showMainMenu(); };
+    addAndMakeVisible (menuButton);
 
     bpmSlider.setSliderStyle (juce::Slider::IncDecButtons);
     bpmSlider.setIncDecButtonsMode (juce::Slider::incDecButtonsDraggable_Vertical);
     bpmSlider.setRange (20.0, 400.0, 0.1);
     bpmSlider.setValue (engine.getBpm(), juce::dontSendNotification);
-    bpmSlider.setTextBoxStyle (juce::Slider::TextBoxLeft, false, 80, 32);
+    bpmSlider.setTextBoxStyle (juce::Slider::TextBoxLeft, false, 86, 32);
+    bpmSlider.setTextValueSuffix (" BPM");
+    bpmSlider.setTooltip ("Темп проекта. Его получают плагины (дилей и др.) и метроном плеера."_ru);
     bpmSlider.onValueChange = [this] { engine.setBpm (bpmSlider.getValue()); };
     addAndMakeVisible (bpmSlider);
 
     tapButton.onClick = [this] { tapTempo(); };
     addAndMakeVisible (tapButton);
 
-    keyValue.setFont (juce::FontOptions (22.0f, juce::Font::bold));
-    keyValue.setTooltip ("Автоматическое определение тональности появится в следующей версии."_ru);
-    addAndMakeVisible (keyValue);
+    keyLabel.setFont (juce::FontOptions (20.0f, juce::Font::bold));
+    keyLabel.setJustificationType (juce::Justification::centred);
+    keyLabel.setTooltip ("Автоматическое определение тональности появится в следующей версии."_ru);
+    addAndMakeVisible (keyLabel);
 
     analysisButton.setTooltip ("Настройки определения темпа и тональности (каналы-источники)"_ru);
     analysisButton.onClick = [this] { showAnalysisSettings(); };
     addAndMakeVisible (analysisButton);
 
-    addLiveButton.onClick = [this] { addLiveTrack(); };
-    addPlayerButton.onClick = [this] { addPlayerTrack(); };
-    addAndMakeVisible (addLiveButton);
-    addAndMakeVisible (addPlayerButton);
+    cpuLabel.setJustificationType (juce::Justification::centredRight);
+    cpuLabel.setFont (juce::FontOptions (16.0f, juce::Font::bold));
+    cpuLabel.setColour (juce::Label::textColourId, juce::Colours::lightgrey);
+    addAndMakeVisible (cpuLabel);
+
+    addTrackButton.setTooltip ("Добавить дорожку"_ru);
+    addTrackButton.onClick = [this] { addTrack(); };
+    addTrackButton.setColour (juce::TextButton::buttonColourId, juce::Colour (0xff23272c));
+    trackList.addAndMakeVisible (addTrackButton);
 
     viewport.setViewedComponent (&trackList, false);
-    viewport.setScrollBarsShown (true, false);
+    viewport.setScrollBarsShown (true, true);
     addAndMakeVisible (viewport);
 
-    emptyHint.setText ("Добавьте дорожку: живой вход для голоса или плейбэк из файла. Затем нажмите «+ эффект» и выберите VST3-плагин "_ru
-                       "(если список пуст, сначала откройте «Плагины» и просканируйте)."_ru,
-                       juce::dontSendNotification);
+    emptyHint.setText ("Нажмите \"+\", чтобы добавить дорожку."_ru, juce::dontSendNotification);
     emptyHint.setJustificationType (juce::Justification::centred);
     emptyHint.setColour (juce::Label::textColourId, juce::Colours::grey);
     addAndMakeVisible (emptyHint);
 
-    setSize (1000, 660);
+    setSize (1000, 700);
 
     engine.loadProject();
     bpmSlider.setValue (engine.getBpm(), juce::dontSendNotification);
@@ -122,64 +242,47 @@ MainComponent::~MainComponent()
 void MainComponent::paint (juce::Graphics& g)
 {
     g.fillAll (juce::Colour (0xff181b1f));
-
-    // project panel background
-    auto panel = getLocalBounds().reduced (12, 0).withTrimmedTop (56).removeFromTop (64).toFloat();
     g.setColour (juce::Colour (0xff20242a));
-    g.fillRoundedRectangle (panel, 8.0f);
+    g.fillRect (getLocalBounds().removeFromTop (52));
 }
 
 void MainComponent::resized()
 {
-    auto area = getLocalBounds().reduced (12, 8);
+    auto area = getLocalBounds();
+    auto bar = area.removeFromTop (52).reduced (12, 8);
 
-    auto header = area.removeFromTop (40);
-    titleLabel.setBounds (header.removeFromLeft (60));
-    audioButton.setBounds (header.removeFromLeft (80).reduced (0, 4));
-    header.removeFromLeft (6);
-    pluginsButton.setBounds (header.removeFromLeft (90).reduced (0, 4));
-    header.removeFromLeft (12);
-    pinButton.setBounds (header.removeFromLeft (170));
-    statusLabel.setBounds (header);
+    menuButton.setBounds (bar.removeFromLeft (40));
+    cpuLabel.setBounds (bar.removeFromRight (110));
 
-    area.removeFromTop (8);
+    // tempo + key + gear, centred in the whole window
+    const int groupW = 170 + 8 + 56 + 30 + 130 + 8 + 38;
+    auto group = juce::Rectangle<int> (groupW, bar.getHeight()).withCentre ({ getWidth() / 2, bar.getCentreY() });
+    bpmSlider.setBounds (group.removeFromLeft (170));
+    group.removeFromLeft (8);
+    tapButton.setBounds (group.removeFromLeft (56));
+    group.removeFromLeft (30);
+    keyLabel.setBounds (group.removeFromLeft (130));
+    group.removeFromLeft (8);
+    analysisButton.setBounds (group.removeFromLeft (38));
 
-    auto panel = area.removeFromTop (64).reduced (14, 8);
-    auto tempoArea = panel.removeFromLeft (360);
-    bpmCaption.setBounds (tempoArea.removeFromTop (14));
-    bpmSlider.setBounds (tempoArea.removeFromLeft (190));
-    tempoArea.removeFromLeft (8);
-    tapButton.setBounds (tempoArea.removeFromLeft (70).reduced (0, 2));
-
-    panel.removeFromLeft (30);
-    auto keyArea = panel.removeFromLeft (300);
-    keyCaption.setBounds (keyArea.removeFromTop (14));
-    analysisButton.setBounds (keyArea.removeFromRight (36).reduced (0, 2));
-    keyValue.setBounds (keyArea);
-
-    area.removeFromTop (8);
-
-    auto bottom = area.removeFromBottom (36);
-    addLiveButton.setBounds (bottom.removeFromLeft (300));
-    bottom.removeFromLeft (8);
-    addPlayerButton.setBounds (bottom.removeFromLeft (200));
-    area.removeFromBottom (6);
-
-    viewport.setBounds (area);
+    viewport.setBounds (area.reduced (6, 6));
     emptyHint.setBounds (area.reduced (40, 20));
     layoutTracks();
 }
 
 void MainComponent::layoutTracks()
 {
-    const int w = juce::jmax (200, viewport.getMaximumVisibleWidth());
-    int y = 0;
+    const int gap = 6;
+    const int h = juce::jmax (560, viewport.getMaximumVisibleHeight());
+    int x = 0;
     for (auto* t : trackComponents)
     {
-        t->setBounds (0, y, w, TrackComponent::preferredHeight);
-        y += TrackComponent::preferredHeight + 4;
+        t->setBounds (x, 0, TrackComponent::stripWidth, h);
+        x += TrackComponent::stripWidth + gap;
     }
-    trackList.setSize (w, juce::jmax (y, viewport.getHeight()));
+    addTrackButton.setBounds (x, 0, 56, h);
+    x += 56;
+    trackList.setSize (juce::jmax (x, viewport.getMaximumVisibleWidth()), h);
     emptyHint.setVisible (trackComponents.isEmpty());
 }
 
@@ -192,7 +295,7 @@ void MainComponent::rebuildTracks()
     TrackComponent::Callbacks cb;
     cb.remove = [this] (std::shared_ptr<Track> t)
     {
-        for (int i = 0; i < t->getNumPlugins(); ++i)
+        for (int i = 0; i < Track::numSlots; ++i)
             if (auto* s = t->getSlot (i))
                 closeEditorsFor (s->plugin.get());
 
@@ -204,10 +307,10 @@ void MainComponent::rebuildTracks()
                 safe->engine.removeTrack (t);
         });
     };
-    cb.openEditor = [this] (std::shared_ptr<Track> t, int i) { openPluginEditor (t, i); };
-    cb.addPlugin = [this] (std::shared_ptr<Track> t, juce::Component* c) { showPluginMenu (t, c); };
+    cb.inputMenu = [this] (std::shared_ptr<Track> t, juce::Component* c) { showInputMenu (t, c); };
+    cb.slotMenu = [this] (std::shared_ptr<Track> t, int i, juce::Component* c) { showSlotMenu (t, i, c); };
+    cb.outputMenu = [this] (std::shared_ptr<Track> t, juce::Component* c) { showOutputMenu (t, c); };
     cb.pickFile = [this] (std::shared_ptr<Track> t) { pickPlayerFile (t); };
-    cb.pluginMenu = [this] (std::shared_ptr<Track> t, int i, juce::Component* c) { showSlotMenu (t, i, c); };
 
     for (auto& t : engine.getTracks())
     {
@@ -218,28 +321,18 @@ void MainComponent::rebuildTracks()
     layoutTracks();
 }
 
-void MainComponent::addLiveTrack()
+void MainComponent::refreshStrips()
 {
-    int liveCount = 0;
-    for (auto& t : engine.getTracks())
-        if (t->kind == Track::Kind::Live)
-            ++liveCount;
-
-    auto track = engine.addTrack (Track::Kind::Live, "Вокал "_ru + juce::String (liveCount + 1));
-    track->inputL = liveCount;   // successive tracks default to successive inputs
-    rebuildTracks();
+    for (auto* t : trackComponents)
+        t->refreshAll();
 }
 
-void MainComponent::addPlayerTrack()
+void MainComponent::addTrack()
 {
-    int count = 0;
-    for (auto& t : engine.getTracks())
-        if (t->kind == Track::Kind::Player)
-            ++count;
-
-    auto track = engine.addTrack (Track::Kind::Player, "Плейбэк "_ru + juce::String (count + 1));
-    rebuildTracks();
-    pickPlayerFile (track);
+    const int count = (int) engine.getTracks().size();
+    auto track = engine.addTrack ("Дорожка "_ru + juce::String (count + 1));
+    track->inputL = count;   // successive tracks default to successive inputs
+    refreshStrips();
 }
 
 void MainComponent::pickPlayerFile (const std::shared_ptr<Track>& track)
@@ -258,75 +351,167 @@ void MainComponent::pickPlayerFile (const std::shared_ptr<Track>& track)
                               if (! track->loadFile (file))
                                   juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, "TC",
                                                                           "Не удалось открыть файл:\n"_ru + file.getFullPathName());
-                              else
-                                  track->name = file.getFileNameWithoutExtension();
-                              safe->rebuildTracks();
+                              safe->refreshStrips();
                           });
 }
 
-// ---------------------------------------------------------------- plugins
+// ---------------------------------------------------------------- strip menus
 
-void MainComponent::showPluginMenu (const std::shared_ptr<Track>& track, juce::Component* anchor)
+void MainComponent::showInputMenu (const std::shared_ptr<Track>& track, juce::Component* anchor)
 {
-    std::vector<juce::PluginDescription> effects;
-    for (auto& d : engine.knownPlugins.getTypes())
-        if (! d.isInstrument)
-            effects.push_back (d);
+    juce::PopupMenu menu, bus;
 
-    std::sort (effects.begin(), effects.end(), [] (const juce::PluginDescription& a, const juce::PluginDescription& b)
+    bool anyBus = false;
+    for (auto& t : engine.getTracks())
     {
-        return a.name.compareIgnoreCase (b.name) < 0;
-    });
-
-    juce::PopupMenu menu;
-    if (effects.empty())
-    {
-        menu.addItem (1000000, "Плагинов нет — откройте «Плагины» и просканируйте"_ru, false);
+        if (t == track || engine.wouldCreateCycle (*track, t->id))
+            continue;
+        bus.addItem (10000 + t->id, t->name, true, track->busId.load() == t->id);
+        anyBus = true;
     }
-    else
+    if (! anyBus)
+        bus.addItem (9999, "(нет других дорожек)"_ru, false);
+
+    menu.addSubMenu ("Bus", bus);
+    menu.addSeparator();
+
+    const int il = track->inputL.load();
+    const int ir = track->inputR.load();
+    const bool noBus = track->busId.load() < 0;
+    menu.addItem (1, "Нет"_ru, true, noBus && il < 0);
+
+    const auto ins = activeChannelNames (engine.deviceManager.getCurrentAudioDevice(), true);
+    for (int i = 0; i < ins.size(); ++i)
+        menu.addItem (100 + i, "Вход "_ru + juce::String (i + 1) + ": " + ins[i], true,
+                      noBus && il == i && (ir < 0 || ir == i));
+
+    if (ins.size() >= 2)
+        menu.addSeparator();
+    for (int i = 0; i + 1 < ins.size(); i += 2)
+        menu.addItem (500 + i, "Вход "_ru + juce::String (i + 1) + "+" + juce::String (i + 2) + " (стерео)"_ru, true,
+                      noBus && il == i && ir == i + 1);
+
+    juce::Component::SafePointer<MainComponent> safe (this);
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (anchor),
+                        [safe, track] (int result)
+                        {
+                            if (safe == nullptr || result <= 0 || result == 9999)
+                                return;
+
+                            if (result >= 10000)
+                            {
+                                track->busId = result - 10000;
+                            }
+                            else if (result == 1)
+                            {
+                                track->busId = -1;
+                                track->inputL = -1;
+                                track->inputR = -1;
+                            }
+                            else if (result >= 500)
+                            {
+                                track->busId = -1;
+                                track->inputL = result - 500;
+                                track->inputR = result - 500 + 1;
+                            }
+                            else if (result >= 100)
+                            {
+                                track->busId = -1;
+                                track->inputL = result - 100;
+                                track->inputR = -1;
+                            }
+                            safe->refreshStrips();
+                        });
+}
+
+void MainComponent::showOutputMenu (const std::shared_ptr<Track>& track, juce::Component* anchor)
+{
+    juce::PopupMenu menu;
+    const int current = track->outputPair.load();
+    menu.addItem (1, "Нет"_ru, true, current < 0);
+    menu.addSeparator();
+
+    const auto outs = activeChannelNames (engine.deviceManager.getCurrentAudioDevice(), false);
+    const int pairs = juce::jmax (1, (outs.size() + 1) / 2);
+    for (int p = 0; p < pairs; ++p)
     {
-        for (size_t i = 0; i < effects.size(); ++i)
-            menu.addItem ((int) i + 1, effects[i].name + "   (" + effects[i].manufacturerName + ")");
+        juce::String label = "Выход "_ru + juce::String (p * 2 + 1) + "-" + juce::String (p * 2 + 2);
+        if (p * 2 < outs.size())
+            label += ": " + outs[p * 2];
+        if (p * 2 + 1 < outs.size())
+            label += " / " + outs[p * 2 + 1];
+        menu.addItem (10 + p, label, true, current == p);
     }
 
     juce::Component::SafePointer<MainComponent> safe (this);
     menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (anchor),
-                        [safe, track, effects] (int result)
+                        [safe, track] (int result)
                         {
-                            if (safe == nullptr || result <= 0 || result > (int) effects.size())
+                            if (safe == nullptr || result <= 0)
                                 return;
-
-                            const auto desc = effects[(size_t) result - 1];
-                            safe->engine.addPluginToTrack (track, desc, [safe, desc] (bool ok, const juce::String& error)
-                            {
-                                if (safe == nullptr)
-                                    return;
-                                if (! ok)
-                                    juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, "TC",
-                                                                            "Не удалось загрузить плагин «"_ru + desc.name + "»:\n"_ru + error);
-                                safe->rebuildTracks();
-                            });
+                            track->outputPair = result == 1 ? -1 : result - 10;
+                            safe->refreshStrips();
                         });
 }
 
 void MainComponent::showSlotMenu (const std::shared_ptr<Track>& track, int slotIndex, juce::Component* anchor)
 {
     auto* slot = track->getSlot (slotIndex);
-    if (slot == nullptr)
-        return;
+    const auto effects = engine.getEnabledEffects();
+    const bool hasPlayer = track->findPlayerSlot() >= 0;
+
+    auto addPluginItems = [&effects] (juce::PopupMenu& m)
+    {
+        if (effects.empty())
+        {
+            m.addItem (9999, "Нет отмеченных плагинов (Меню > Список плагинов)"_ru, false);
+            return;
+        }
+        for (size_t i = 0; i < effects.size(); ++i)
+            m.addItem (1000 + (int) i, effects[i].name + "   (" + effects[i].manufacturerName + ")");
+    };
 
     juce::PopupMenu menu;
-    menu.addItem (1, "Открыть окно плагина"_ru);
-    menu.addItem (2, "Обход (bypass)"_ru, true, slot->bypass.load());
-    menu.addSeparator();
-    menu.addItem (3, "Удалить из цепочки"_ru);
+    if (slot != nullptr)
+    {
+        if (slot->builtinPlayer)
+            menu.addItem (2, "Выбрать файл..."_ru);
+        else
+            menu.addItem (1, "Открыть окно плагина"_ru);
+        menu.addItem (3, "Обход (bypass)"_ru, true, slot->bypass.load());
+        menu.addItem (4, "Убрать из слота"_ru);
+        menu.addSeparator();
+
+        juce::PopupMenu replace;
+        if (! hasPlayer)
+            replace.addItem (5, "TC Плеер (файл + метроном)"_ru);
+        if (! hasPlayer)
+            replace.addSeparator();
+        addPluginItems (replace);
+        menu.addSubMenu ("Заменить на"_ru, replace);
+    }
+    else
+    {
+        if (! hasPlayer)
+        {
+            menu.addItem (5, "TC Плеер (файл + метроном)"_ru);
+            menu.addSeparator();
+        }
+        addPluginItems (menu);
+    }
 
     juce::Component::SafePointer<MainComponent> safe (this);
     menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (anchor),
-                        [safe, track, slotIndex] (int result)
+                        [safe, track, slotIndex, effects] (int result)
                         {
-                            if (safe == nullptr || result == 0)
+                            if (safe == nullptr || result <= 0 || result == 9999)
                                 return;
+
+                            auto closeSlotEditor = [&]
+                            {
+                                if (auto* s = track->getSlot (slotIndex))
+                                    safe->closeEditorsFor (s->plugin.get());
+                            };
 
                             if (result == 1)
                             {
@@ -334,21 +519,53 @@ void MainComponent::showSlotMenu (const std::shared_ptr<Track>& track, int slotI
                             }
                             else if (result == 2)
                             {
-                                if (auto* s = track->getSlot (slotIndex))
-                                {
-                                    s->bypass = ! s->bypass.load();
-                                    track->refreshLatency();
-                                    safe->rebuildTracks();
-                                }
+                                safe->pickPlayerFile (track);
                             }
                             else if (result == 3)
                             {
                                 if (auto* s = track->getSlot (slotIndex))
-                                    safe->closeEditorsFor (s->plugin.get());
-                                track->removePlugin (slotIndex);
-                                safe->rebuildTracks();
+                                {
+                                    s->bypass = ! s->bypass.load();
+                                    track->refreshLatency();
+                                    safe->refreshStrips();
+                                }
+                            }
+                            else if (result == 4)
+                            {
+                                closeSlotEditor();
+                                track->clearSlot (slotIndex);
+                                safe->refreshStrips();
+                            }
+                            else if (result == 5)
+                            {
+                                closeSlotEditor();
+                                track->clearSlot (slotIndex);
+                                track->setPlayerSlot (slotIndex);
+                                safe->refreshStrips();
+                            }
+                            else if (result >= 1000 && result - 1000 < (int) effects.size())
+                            {
+                                closeSlotEditor();
+                                track->clearSlot (slotIndex);
+                                safe->loadPluginIntoSlot (track, slotIndex, effects[(size_t) (result - 1000)]);
+                                safe->refreshStrips();
                             }
                         });
+}
+
+void MainComponent::loadPluginIntoSlot (const std::shared_ptr<Track>& track, int slotIndex,
+                                        const juce::PluginDescription& desc)
+{
+    juce::Component::SafePointer<MainComponent> safe (this);
+    engine.addPluginToTrack (track, slotIndex, desc, [safe, desc] (bool ok, const juce::String& error)
+    {
+        if (safe == nullptr)
+            return;
+        if (! ok)
+            juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, "TC",
+                                                    "Не удалось загрузить плагин \""_ru + desc.name + "\":\n"_ru + error);
+        safe->refreshStrips();
+    });
 }
 
 void MainComponent::openPluginEditor (const std::shared_ptr<Track>& track, int slotIndex)
@@ -377,44 +594,69 @@ void MainComponent::openPluginEditor (const std::shared_ptr<Track>& track, int s
 
 void MainComponent::closeEditorsFor (juce::AudioPluginInstance* plugin)
 {
+    if (plugin == nullptr)
+        return;
     for (int i = pluginWindows.size(); --i >= 0;)
         if (pluginWindows[i]->getPlugin() == plugin)
             pluginWindows.remove (i);
 }
 
-// ---------------------------------------------------------------- dialogs
+// ---------------------------------------------------------------- top bar / dialogs
+
+void MainComponent::showMainMenu()
+{
+    juce::PopupMenu menu;
+    menu.addItem (1, "Настройки аудио (драйвер, устройство, буфер)..."_ru);
+    menu.addSeparator();
+    menu.addItem (2, "Плагины: отметить нужные..."_ru);
+    menu.addItem (3, "Плагины: сканировать VST3..."_ru);
+    menu.addSeparator();
+    menu.addItem (4, "Добавить дорожку"_ru);
+    menu.addItem (5, "Поверх всех окон"_ru, true, pinned);
+    menu.addItem (6, "Сохранить проект"_ru);
+
+    juce::Component::SafePointer<MainComponent> safe (this);
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&menuButton),
+                        [safe] (int result)
+                        {
+                            if (safe == nullptr)
+                                return;
+                            switch (result)
+                            {
+                                case 1: safe->showAudioSettings(); break;
+                                case 2: safe->showPluginChooser(); break;
+                                case 3: safe->showPluginScanner(); break;
+                                case 4: safe->addTrack(); break;
+                                case 5: safe->setPinned (! safe->pinned); break;
+                                case 6: safe->engine.saveProject(); break;
+                                default: break;
+                            }
+                        });
+}
 
 void MainComponent::showAudioSettings()
 {
     auto* selector = new juce::AudioDeviceSelectorComponent (engine.deviceManager, 0, 64, 0, 64,
                                                              false, false, false, false);
     selector->setSize (560, 520);
-
-    juce::DialogWindow::LaunchOptions o;
-    o.content.setOwned (selector);
-    o.dialogTitle = "Аудио (драйвер, устройство, каналы, буфер)"_ru;
-    o.dialogBackgroundColour = juce::Colour (0xff20242a);
-    o.escapeKeyTriggersCloseButton = true;
-    o.useNativeTitleBar = true;
-    o.resizable = false;
-    o.launchAsync();
+    launchDialog (selector, "Аудио (драйвер, устройство, каналы, буфер)"_ru, false);
 }
 
-void MainComponent::showPluginManager()
+void MainComponent::showPluginChooser()
+{
+    juce::Component::SafePointer<MainComponent> safe (this);
+    auto* c = new PluginChooserComponent (engine, [safe] { if (safe != nullptr) safe->showPluginScanner(); });
+    c->setSize (560, 480);
+    launchDialog (c, "Плагины для слотов дорожек"_ru, true);
+}
+
+void MainComponent::showPluginScanner()
 {
     auto* list = new juce::PluginListComponent (engine.pluginFormats, engine.knownPlugins,
                                                 engine.getDataDirectory().getChildFile ("scan-deadman.txt"),
                                                 pluginScanProps.get(), true);
     list->setSize (720, 460);
-
-    juce::DialogWindow::LaunchOptions o;
-    o.content.setOwned (list);
-    o.dialogTitle = "Плагины VST3"_ru;
-    o.dialogBackgroundColour = juce::Colour (0xff20242a);
-    o.escapeKeyTriggersCloseButton = true;
-    o.useNativeTitleBar = true;
-    o.resizable = true;
-    o.launchAsync();
+    launchDialog (list, "Сканирование плагинов VST3"_ru, true);
 }
 
 void MainComponent::showAnalysisSettings()
@@ -422,11 +664,12 @@ void MainComponent::showAnalysisSettings()
     juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon, "Темп и тональность"_ru,
                                             "Здесь будет выбор каналов-источников для автоматического определения "_ru
                                             "темпа и тональности. Эта функция появится в следующей версии.\n\n"_ru
-                                            "Пока темп задаётся вручную или кнопкой Tap, и передаётся всем плагинам."_ru);
+                                            "Пока темп задаётся вручную или кнопкой Tap, и передаётся всем плагинам и метроному."_ru);
 }
 
-void MainComponent::setPinned (bool pinned)
+void MainComponent::setPinned (bool shouldPin)
 {
+    pinned = shouldPin;
     if (auto* top = getTopLevelComponent())
         top->setAlwaysOnTop (pinned);
 }
@@ -446,8 +689,7 @@ void MainComponent::tapTempo()
         const double avg = (double) (tapTimes.getLast() - tapTimes.getFirst()) / (double) (tapTimes.size() - 1);
         if (avg > 0.0)
         {
-            const double bpm = 60000.0 / avg;
-            engine.setBpm (bpm);
+            engine.setBpm (60000.0 / avg);
             bpmSlider.setValue (engine.getBpm(), juce::dontSendNotification);
         }
     }
@@ -457,15 +699,8 @@ void MainComponent::tapTempo()
 
 void MainComponent::changeListenerCallback (juce::ChangeBroadcaster* source)
 {
-    if (source == &engine.deviceManager)
-    {
-        for (auto* t : trackComponents)
-            t->refreshChannelLists();
-    }
-    else if (source == &engine.knownPlugins)
-    {
+    if (source == &engine.knownPlugins)
         engine.savePluginList();
-    }
 }
 
 void MainComponent::timerCallback()
@@ -476,11 +711,10 @@ void MainComponent::timerCallback()
     if (++slowCounter >= 15)   // twice a second
     {
         slowCounter = 0;
-        statusLabel.setText (juce::String::formatted ("CPU %d%%   |   %d Гц, блок %d   |   "_ru,
-                                                      (int) std::round (engine.getCpuLoad() * 100.0f),
-                                                      (int) engine.getSampleRate(), engine.getBlockSize())
-                                 + engine.describeDeviceLatency(),
-                             juce::dontSendNotification);
+        cpuLabel.setText ("CPU " + juce::String ((int) std::round (engine.getCpuLoad() * 100.0f)) + "%",
+                          juce::dontSendNotification);
+        cpuLabel.setTooltip (juce::String (engine.getSampleRate(), 0) + " Гц, блок "_ru
+                             + juce::String (engine.getBlockSize()) + "; " + engine.describeDeviceLatency());
     }
 
     if (++autosaveCounter >= 30 * 30)   // every 30 s

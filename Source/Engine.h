@@ -4,6 +4,7 @@
 #include "Text.h"
 
 #include <functional>
+#include <set>
 
 // Tempo / transport information that every hosted plugin can read (delays, arpeggiators ...).
 class TcPlayHead : public juce::AudioPlayHead
@@ -53,12 +54,21 @@ public:
     TcPlayHead playHead;
 
     // Tracks (message thread).
-    std::shared_ptr<Track> addTrack (Track::Kind kind, const juce::String& name);
+    std::shared_ptr<Track> addTrack (const juce::String& name, int forcedId = -1);
     void removeTrack (const std::shared_ptr<Track>& track);
     std::vector<std::shared_ptr<Track>> getTracks() const;
+    std::shared_ptr<Track> findTrack (int id) const;
+    // true if taking the audio of track `sourceId` into `track` would create a loop
+    bool wouldCreateCycle (const Track& track, int sourceId) const;
+
+    // Which plugins are offered in the track slot menus (ticked in the plugin list dialog).
+    bool isPluginEnabled (const juce::PluginDescription& d) const;
+    void setPluginEnabled (const juce::PluginDescription& d, bool enabled);
+    void setAllPluginsEnabled (bool enabled);
+    std::vector<juce::PluginDescription> getEnabledEffects() const;
 
     // Plugins (message thread). The callback runs on the message thread.
-    void addPluginToTrack (const std::shared_ptr<Track>& track, const juce::PluginDescription& description,
+    void addPluginToTrack (const std::shared_ptr<Track>& track, int slotIndex, const juce::PluginDescription& description,
                            std::function<void (bool ok, const juce::String& error)> done,
                            const juce::String& savedStateBase64 = {}, bool bypassed = false);
 
@@ -89,6 +99,13 @@ public:
 
 private:
     void updateCompensation();
+    void loadEnabledPlugins();
+    void saveEnabledPlugins() const;
+
+    std::set<juce::String> enabledPlugins;
+    bool allPluginsEnabled = true;
+    int nextTrackId = 1;
+    std::vector<Track*> order;
 
     mutable juce::CriticalSection tracksLock;
     std::vector<std::shared_ptr<Track>> tracks;

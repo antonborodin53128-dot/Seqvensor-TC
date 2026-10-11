@@ -1,14 +1,9 @@
 #include "Track.h"
+#include "Text.h"
 
-Track::Track (Kind kindToUse, juce::String trackName,
-              juce::AudioFormatManager& formats, juce::TimeSliceThread& thread)
-    : kind (kindToUse), name (std::move (trackName)), formatManager (formats), readThread (thread)
+Track::Track (juce::String trackName, juce::AudioFormatManager& formats, juce::TimeSliceThread& thread)
+    : name (std::move (trackName)), formatManager (formats), readThread (thread)
 {
-    if (kind == Kind::Player)
-    {
-        inputL = -1;
-        inputR = -1;
-    }
 }
 
 Track::~Track()
@@ -18,73 +13,149 @@ Track::~Track()
 
 // ---------------------------------------------------------------- chain
 
-void Track::addPlugin (std::unique_ptr<juce::AudioPluginInstance> plugin,
+void Track::setPlugin (int index, std::unique_ptr<juce::AudioPluginInstance> plugin,
                        const juce::PluginDescription& description)
 {
-    if (plugin == nullptr)
+    if (plugin == nullptr || ! juce::isPositiveAndBelow (index, numSlots))
         return;
 
     auto slot = std::make_unique<Slot>();
     slot->description = description;
     slot->plugin = std::move (plugin);
 
+    std::unique_ptr<Slot> old;
     {
         const juce::ScopedLock sl (chainLock);
-        slots.push_back (std::move (slot));
+        old = std::move (slots[(size_t) index]);
+        slots[(size_t) index] = std::move (slot);
+    }
+
+    if (old != nullptr && old->plugin != nullptr)
+    {
+        old->plugin->releaseResources();
+        old->plugin->setPlayHead (nullptr);
     }
     refreshLatency();
 }
 
-void Track::removePlugin (int index)
+void Track::setPlayerSlot (int index)
 {
-    std::unique_ptr<Slot> removed;
+    if (! juce::isPositiveAndBelow (index, numSlots) || findPlayerSlot() >= 0)
+        return;
+
+    auto slot = std::make_unique<Slot>();
+    slot->builtinPlayer = true;
+    slot->description.name = "TC Плеер"_ru;
+
+    std::unique_ptr<Slot> old;
     {
         const juce::ScopedLock sl (chainLock);
-        if (! juce::isPositiveAndBelow (index, (int) slots.size()))
-            return;
-        removed = std::move (slots[(size_t) index]);
-        slots.erase (slots.begin() + index);
+        old = std::move (slots[(size_t) index]);
+        slots[(size_t) index] = std::move (slot);
     }
 
-    if (removed != nullptr && removed->plugin != nullptr)
+    if (old != nullptr && old->plugin != nullptr)
     {
-        removed->plugin->releaseResources();
-        removed->plugin->setPlayHead (nullptr);
+        old->plugin->releaseResources();
+        old->plugin->setPlayHead (nullptr);
+    }
+    refreshLatency();
+}
+
+void Track::clearSlot (int index)
+{
+    if (! juce::isPositiveAndBelow (index, numSlots))
+        return;
+
+    std::unique_ptr<Slot> old;
+    {
+        const juce::ScopedLock sl (chainLock);
+        old = std::move (slots[(size_t) index]);
+    }
+
+    if (old == nullptr)
+        return;
+
+    if (old->builtinPlayer)
+    {
+        running = false;
+        startRequest = false;
+    }
+    if (old->plugin != nullptr)
+    {
+        old->plugin->releaseResources();
+        old->plugin->setPlayHead (nullptr);
     }
     refreshLatency();
 }
 
 int Track::getNumPlugins() const
 {
-    return (int) slots.size();
+    int n = 0;
+    for (auto& s : slots)
+        if (s != nullptr && s->plugin != nullptr)
+            ++n;
+    return n;
 }
 
 Track::Slot* Track::getSlot (int index) const
 {
-    return juce::isPositiveAndBelow (index, (int) slots.size()) ? slots[(size_t) index].get() : nullptr;
+    return juce::isPositiveAndBelow (index, numSlots) ? slots[(size_t) index].get() : nullptr;
+}
+
+int Track::findPlayerSlot() const
+{
+    for (int i = 0; i < numSlots; ++i)
+        if (slots[(size_t) i] != nullptr && slots[(size_t) i]->builtinPlayer)
+            return i;
+    return -1;
+}
+
+int Track::findFreeSlot() const
+{
+    for (int i = 0; i < numSlots; ++i)
+        if (slots[(size_t) i] == nullptr)
+            return i;
+    return -1;
 }
 
 int Track::computeLatencySamples() const
 {
     int total = 0;
     for (auto& s : slots)
-        if (s->plugin != nullptr && ! s->bypass.load())
+        if (s != nullptr && s->plugin != nullptr && ! s->bypass.load())
             total += s->plugin->getLatencySamples();
     return total;
+}
+
+void Track::refreshLatency()
+{
+    cachedLatency.store (computeLatencySamples());
+
+    bool active = false;
+    for (auto& s : slots)
+        if (s != nullptr && s->builtinPlayer && ! s->bypass.load())
+            active = true;
+
+    playerActive.store (active);
+    if (! active)
+    {
+        running = false;
+        startRequest = false;
+    }
 }
 
 // ---------------------------------------------------------------- player
 
 bool Track::loadFile (const juce::File& file)
 {
-    if (kind != Kind::Player)
-        return false;
-
     std::unique_ptr<juce::AudioFormatReader> reader (formatManager.createReaderFor (file));
     if (reader == nullptr)
         return false;
 
-    transport.stop();
+    running = false;
+    startRequest = false;
+    hasFile = false;
     transport.setSource (nullptr);
     readerSource.reset();
 
@@ -94,24 +165,34 @@ bool Track::loadFile (const juce::File& file)
     readerSource = std::make_unique<juce::AudioFormatReaderSource> (reader.release(), true);
     readerSource->setLooping (looping);
     transport.setSource (readerSource.get(), 32768, &readThread, fileRate);
+    transport.start();   // always "started": playback is gated by the track's own clock
     currentFile = file;
+    hasFile = true;
     return true;
 }
 
 void Track::play()
 {
-    if (readerSource != nullptr)
-        transport.start();
+    if (! playerActive.load())
+        return;
+
+    if (hasFile.load() && (transport.hasStreamFinished()
+                           || transport.getCurrentPosition() >= transport.getLengthInSeconds() - 0.01))
+        transport.setPosition (0.0);
+
+    startRequest = true;
 }
 
 void Track::pause()
 {
-    transport.stop();
+    startRequest = false;
+    running = false;
 }
 
 void Track::stopAndRewind()
 {
-    transport.stop();
+    startRequest = false;
+    running = false;
     transport.setPosition (0.0);
 }
 
@@ -130,6 +211,7 @@ void Track::prepare (double newSampleRate, int maxBlockSize, juce::AudioPlayHead
     maxBlock = juce::jmax (64, maxBlockSize);
 
     stereoBuf.setSize (2, maxBlock, false, true, false);
+    busOut.setSize (2, maxBlock, false, true, false);
     pluginBuf.setSize (16, maxBlock, false, true, false);
     midi.ensureSize (2048);
 
@@ -142,7 +224,7 @@ void Track::prepare (double newSampleRate, int maxBlockSize, juce::AudioPlayHead
     const juce::ScopedLock sl (chainLock);
     for (auto& s : slots)
     {
-        if (s->plugin == nullptr)
+        if (s == nullptr || s->plugin == nullptr)
             continue;
         s->plugin->setPlayHead (playHead);
         s->plugin->setRateAndBufferSizeDetails (sampleRate, maxBlock);
@@ -156,29 +238,113 @@ void Track::release()
     transport.releaseResources();
     const juce::ScopedLock sl (chainLock);
     for (auto& s : slots)
-        if (s->plugin != nullptr)
+        if (s != nullptr && s->plugin != nullptr)
             s->plugin->releaseResources();
 }
 
-void Track::process (const float* const* inputs, int numInputs,
-                     float* const* outputs, int numOutputs, int numSamples)
+void Track::renderClick (float* l, float* r, int n)
 {
-    int done = 0;
-    while (done < numSamples)
+    if (clickPos < 0)
+        return;
+
+    const int len = juce::jmax (1, (int) (sampleRate * 0.04));
+    const double freq = clickAccent ? 1600.0 : 1000.0;
+    const double w = juce::MathConstants<double>::twoPi * freq / sampleRate;
+
+    for (int i = 0; i < n; ++i)
     {
-        const int n = juce::jmin (maxBlock, numSamples - done);
-        processChunk (inputs, numInputs, outputs, numOutputs, done, n);
-        done += n;
+        if (clickPos >= len)
+        {
+            clickPos = -1;
+            break;
+        }
+        float env = 1.0f - (float) clickPos / (float) len;
+        env *= env;
+        const float s = 0.6f * env * (float) std::sin (w * (double) clickPos);
+        l[i] += s;
+        r[i] += s;
+        ++clickPos;
     }
 }
 
+void Track::renderPlayer (int n)
+{
+    stereoBuf.clear (0, n);
+
+    if (startRequest.exchange (false))
+    {
+        beatIndex = 0;
+        nextBeatIn = 0.0;
+        musicStarted = false;
+        clickPos = -1;
+        running = true;
+    }
+
+    if (! running.load())
+        return;
+
+    auto* l = stereoBuf.getWritePointer (0);
+    auto* r = stereoBuf.getWritePointer (1);
+
+    const double bpm = juce::jlimit (20.0, 400.0, bpmSource != nullptr ? bpmSource->load() : 120.0);
+    const double beatSamples = sampleRate * 60.0 / bpm;
+    const bool metro = metronomeOn.load();
+    const bool file = hasFile.load();
+
+    int pos = 0;
+    while (pos < n)
+    {
+        if (nextBeatIn <= 0.0)
+        {
+            if (beatIndex == countInBeats)
+                musicStarted = true;   // 4 clicks have passed: the music starts on the 5th beat
+
+            if (metro)
+            {
+                clickPos = 0;
+                clickAccent = (beatIndex % 4) == 0;
+            }
+            ++beatIndex;
+            nextBeatIn += beatSamples;
+        }
+
+        const int seg = juce::jmin (n - pos, juce::jmax (1, (int) std::ceil (nextBeatIn)));
+
+        if (musicStarted && file)
+        {
+            juce::AudioSourceChannelInfo info (&stereoBuf, pos, seg);
+            transport.getNextAudioBlock (info);
+            if (fileChannels == 1)
+                juce::FloatVectorOperations::copy (r + pos, l + pos, seg);
+        }
+
+        renderClick (l + pos, r + pos, seg);
+
+        nextBeatIn -= (double) seg;
+        pos += seg;
+    }
+
+    if (musicStarted && file && transport.hasStreamFinished())
+        running = false;
+}
+
 void Track::processChunk (const float* const* inputs, int numInputs,
-                          float* const* outputs, int numOutputs, int offset, int n)
+                          float* const* outputs, int numOutputs, int offset, int n,
+                          const Track* busSource)
 {
     auto* l = stereoBuf.getWritePointer (0);
     auto* r = stereoBuf.getWritePointer (1);
 
-    if (kind == Kind::Live)
+    if (playerActive.load())
+    {
+        renderPlayer (n);
+    }
+    else if (busSource != nullptr && busSource != this && busSource->busOut.getNumSamples() >= n)
+    {
+        juce::FloatVectorOperations::copy (l, busSource->busOut.getReadPointer (0), n);
+        juce::FloatVectorOperations::copy (r, busSource->busOut.getReadPointer (1), n);
+    }
+    else
     {
         const int il = inputL.load();
         const int ir = inputR.load();
@@ -197,40 +363,44 @@ void Track::processChunk (const float* const* inputs, int numInputs,
         else
             juce::FloatVectorOperations::clear (r, n);
     }
-    else
-    {
-        stereoBuf.clear (0, n);
-        if (readerSource != nullptr)
-        {
-            juce::AudioSourceChannelInfo info (&stereoBuf, 0, n);
-            transport.getNextAudioBlock (info);
-            if (fileChannels == 1)
-                juce::FloatVectorOperations::copy (r, l, n);
-        }
-    }
 
     runChain (n);
     applyExtraDelay (n);
 
-    // gain, mute, meters, sum into the chosen output pair
-    const float g = muted.load() ? 0.0f : gainLinear.load();
-    float pl = 0.0f, pr = 0.0f;
+    // fader; the signal for other tracks (bus) is taken after the fader, before mute
+    const float g = gainLinear.load();
     for (int i = 0; i < n; ++i)
     {
         l[i] *= g;
         r[i] *= g;
+    }
+    juce::FloatVectorOperations::copy (busOut.getWritePointer (0), l, n);
+    juce::FloatVectorOperations::copy (busOut.getWritePointer (1), r, n);
+
+    if (muted.load())
+    {
+        juce::FloatVectorOperations::clear (l, n);
+        juce::FloatVectorOperations::clear (r, n);
+    }
+
+    float pl = 0.0f, pr = 0.0f;
+    for (int i = 0; i < n; ++i)
+    {
         pl = juce::jmax (pl, std::abs (l[i]));
         pr = juce::jmax (pr, std::abs (r[i]));
     }
-    peakL.store (pl);
-    peakR.store (pr);
+    peakL.store (juce::jmax (pl, peakL.load()));
+    peakR.store (juce::jmax (pr, peakR.load()));
 
     const int pair = outputPair.load();
+    if (pair < 0)
+        return;
+
     const int outL = pair * 2;
     const int outR = pair * 2 + 1;
-    if (outL >= 0 && outL < numOutputs && outputs[outL] != nullptr)
+    if (outL < numOutputs && outputs[outL] != nullptr)
         juce::FloatVectorOperations::add (outputs[outL] + offset, l, n);
-    if (outR >= 0 && outR < numOutputs && outputs[outR] != nullptr)
+    if (outR < numOutputs && outputs[outR] != nullptr)
         juce::FloatVectorOperations::add (outputs[outR] + offset, r, n);
 }
 
@@ -242,7 +412,7 @@ void Track::runChain (int n)
 
     for (auto& s : slots)
     {
-        if (s->plugin == nullptr || s->bypass.load())
+        if (s == nullptr || s->plugin == nullptr || s->bypass.load())
             continue;
 
         auto* p = s->plugin.get();

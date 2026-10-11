@@ -28,53 +28,55 @@ public:
     void resized() override;
 
 private:
-    // actions
+    // top bar / menus
+    void showMainMenu();
     void showAudioSettings();
-    void showPluginManager();
+    void showPluginChooser();
+    void showPluginScanner();
     void showAnalysisSettings();
-    void showPluginMenu (const std::shared_ptr<Track>& track, juce::Component* anchor);
+
+    // strip menus
+    void showInputMenu (const std::shared_ptr<Track>& track, juce::Component* anchor);
     void showSlotMenu (const std::shared_ptr<Track>& track, int slotIndex, juce::Component* anchor);
+    void showOutputMenu (const std::shared_ptr<Track>& track, juce::Component* anchor);
+    void loadPluginIntoSlot (const std::shared_ptr<Track>& track, int slotIndex, const juce::PluginDescription& desc);
     void openPluginEditor (const std::shared_ptr<Track>& track, int slotIndex);
     void closeEditorsFor (juce::AudioPluginInstance* plugin);
     void pickPlayerFile (const std::shared_ptr<Track>& track);
-    void addPlayerTrack();
-    void addLiveTrack();
+    void addTrack();
     void tapTempo();
     void setPinned (bool pinned);
 
     void rebuildTracks();
+    void refreshStrips();
     void layoutTracks();
     void timerCallback() override;
     void changeListenerCallback (juce::ChangeBroadcaster* source) override;
 
     juce::LookAndFeel_V4 lookAndFeel;   // must outlive every child component
     Engine engine;
+    juce::TooltipWindow tooltipWindow { this, 600 };
 
-    // header
-    juce::Label titleLabel { {}, "TC" };
-    juce::TextButton audioButton { "Аудио"_ru }, pluginsButton { "Плагины"_ru };
-    juce::ToggleButton pinButton { "Поверх всех окон"_ru };
-    juce::Label statusLabel;
-
-    // project panel
-    juce::Label bpmCaption { {}, "ТЕМП"_ru }, keyCaption { {}, "ТОНАЛЬНОСТЬ"_ru };
+    // top bar
+    IconButton menuButton { IconButton::Icon::Menu };
     juce::Slider bpmSlider;
     juce::TextButton tapButton { "Tap" };
-    juce::Label keyValue { {}, "—"_ru };
-    juce::TextButton analysisButton { "⚙"_ru };
+    juce::Label keyLabel { {}, "Тон: -"_ru };
+    IconButton analysisButton { IconButton::Icon::Gear };
+    juce::Label cpuLabel;
 
     // tracks
     juce::Viewport viewport;
     juce::Component trackList;
     juce::OwnedArray<TrackComponent> trackComponents;
-    juce::TextButton addLiveButton { "+ Живой вход (вокал, инструмент)"_ru };
-    juce::TextButton addPlayerButton { "+ Плейбэк (файл)"_ru };
+    juce::TextButton addTrackButton { "+" };
     juce::Label emptyHint;
 
     juce::OwnedArray<PluginWindow> pluginWindows;
     std::unique_ptr<juce::FileChooser> chooser;
     std::unique_ptr<juce::PropertiesFile> pluginScanProps;
     juce::Array<juce::int64> tapTimes;
+    bool pinned = true;
     int autosaveCounter = 0;
     int slowCounter = 0;
 

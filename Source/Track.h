@@ -5,57 +5,66 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_audio_utils/juce_audio_utils.h>
 
+#include <array>
 #include <atomic>
 #include <memory>
 #include <vector>
 
-// One independent signal path: live input or file player -> plugin chain -> output pair.
+// One mixer channel: source (device input, another track = bus, or the built-in player)
+// -> up to 5 slots (VST3 plugins / built-in player) -> gain -> output pair.
 // Every track has its own chain, so plugin latency of one track never delays another one
 // unless "compensate" is switched on for that track.
 class Track
 {
 public:
-    enum class Kind { Live, Player };
+    static constexpr int numSlots = 5;
 
     struct Slot
     {
-        std::unique_ptr<juce::AudioPluginInstance> plugin;
+        std::unique_ptr<juce::AudioPluginInstance> plugin;   // null for the built-in player
         juce::PluginDescription description;
         std::atomic<bool> bypass { false };
+        bool builtinPlayer = false;
     };
 
-    Track (Kind kindToUse, juce::String trackName,
-           juce::AudioFormatManager& formats, juce::TimeSliceThread& readThread);
+    Track (juce::String trackName, juce::AudioFormatManager& formats, juce::TimeSliceThread& readThread);
     ~Track();
 
-    const Kind kind;
+    int id = 0;
     juce::String name;
 
     // Mixer / routing. Safe to change from the UI thread.
-    std::atomic<int> inputL { 0 };      // index among the active device inputs, -1 = none
-    std::atomic<int> inputR { -1 };     // -1 = mono (L is used for both sides)
-    std::atomic<int> outputPair { 0 };  // 0 = outputs 1-2, 1 = outputs 3-4, ...
+    std::atomic<int> inputL { -1 };      // index among the active device inputs, -1 = none
+    std::atomic<int> inputR { -1 };      // -1 = mono (L is used for both sides)
+    std::atomic<int> busId { -1 };       // >= 0: take the audio of the track with this id instead of an input
+    std::atomic<int> outputPair { 0 };   // 0 = outputs 1-2, 1 = outputs 3-4 ..., -1 = no output
     std::atomic<float> gainLinear { 1.0f };
     std::atomic<bool> muted { false };
+    std::atomic<bool> recArmed { false };
     std::atomic<bool> compensate { false };
+    std::atomic<bool> metronomeOn { true };
     std::atomic<float> peakL { 0.0f }, peakR { 0.0f };
 
     // Chain editing: message thread only.
-    void addPlugin (std::unique_ptr<juce::AudioPluginInstance> plugin, const juce::PluginDescription& description);
-    void removePlugin (int index);
-    int getNumPlugins() const;
+    void setPlugin (int index, std::unique_ptr<juce::AudioPluginInstance> plugin, const juce::PluginDescription& description);
+    void setPlayerSlot (int index);
+    void clearSlot (int index);
     Slot* getSlot (int index) const;
-    int computeLatencySamples() const;                       // message thread
+    int findPlayerSlot() const;
+    int findFreeSlot() const;
+    int getNumPlugins() const;
+    int computeLatencySamples() const;
     int getCachedLatencySamples() const { return cachedLatency.load(); }
-    void refreshLatency() { cachedLatency.store (computeLatencySamples()); }
+    void refreshLatency();                 // also refreshes the "player active" flag
+    bool isPlayerActive() const { return playerActive.load(); }
 
-    // Player: message thread only.
+    // Built-in player (+ metronome): message thread only.
     bool loadFile (const juce::File& file);
     juce::File getFile() const { return currentFile; }
-    void play();
+    void play();                           // 4 count-in clicks, music starts on beat 5
     void pause();
     void stopAndRewind();
-    bool isPlaying() const { return transport.isPlaying(); }
+    bool isPlaying() const { return running.load(); }
     double getLengthSeconds() const { return transport.getLengthInSeconds(); }
     double getPositionSeconds() const { return transport.getCurrentPosition(); }
     void setPositionSeconds (double seconds) { transport.setPosition (seconds); }
@@ -65,35 +74,50 @@ public:
     // Audio thread.
     void prepare (double sampleRate, int maxBlockSize, juce::AudioPlayHead* playHead);
     void release();
+    void setTempoSource (const std::atomic<double>* bpm) { bpmSource = bpm; }
     void setExtraDelay (int samples) { extraDelay.store (juce::jmax (0, samples)); }
-    void process (const float* const* inputs, int numInputs,
-                  float* const* outputs, int numOutputs, int numSamples);
+    void processChunk (const float* const* inputs, int numInputs,
+                       float* const* outputs, int numOutputs, int offset, int n,
+                       const Track* busSource);
+    const juce::AudioBuffer<float>& getBusOut() const { return busOut; }
 
     // Used by the engine to keep the audio thread out of chain edits.
     juce::CriticalSection chainLock;
 
 private:
-    void processChunk (const float* const* inputs, int numInputs,
-                       float* const* outputs, int numOutputs, int offset, int n);
+    void renderPlayer (int n);
+    void renderClick (float* l, float* r, int n);
     void runChain (int n);
     void applyExtraDelay (int n);
 
     juce::AudioFormatManager& formatManager;
     juce::TimeSliceThread& readThread;
 
-    std::vector<std::unique_ptr<Slot>> slots;
+    std::array<std::unique_ptr<Slot>, numSlots> slots;
 
     // player
+    static constexpr int countInBeats = 4;
     juce::File currentFile;
     std::unique_ptr<juce::AudioFormatReaderSource> readerSource;
     juce::AudioTransportSource transport;
     int fileChannels = 0;
     bool looping = false;
+    std::atomic<bool> hasFile { false };
+    std::atomic<bool> playerActive { false };
+    std::atomic<bool> running { false };
+    std::atomic<bool> startRequest { false };
+    int beatIndex = 0;
+    double nextBeatIn = 0.0;
+    bool musicStarted = false;
+    int clickPos = -1;
+    bool clickAccent = false;
+    const std::atomic<double>* bpmSource = nullptr;
 
     // audio state
     double sampleRate = 48000.0;
     int maxBlock = 512;
     juce::AudioBuffer<float> stereoBuf;
+    juce::AudioBuffer<float> busOut;
     juce::AudioBuffer<float> pluginBuf;
     juce::MidiBuffer midi;
     juce::AudioBuffer<float> delayBuf;
