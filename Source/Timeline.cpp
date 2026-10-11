@@ -220,7 +220,7 @@ void LaneComponent::paint (juce::Graphics& g)
         auto body = juce::Rectangle<float> ((float) juce::jmax (x0, -20), 4.0f,
                                             (float) (juce::jmin (x1, bounds.getWidth() + 20) - juce::jmax (x0, -20)),
                                             (float) getHeight() - 8.0f);
-        g.setColour (juce::Colour (0xff0d2a36));
+        g.setColour (juce::Colour (0xff0b2415));
         g.fillRoundedRectangle (body, 8.0f);
 
         // waveform: columns are locked to absolute pixels, so scrolling only shifts them
@@ -233,7 +233,7 @@ void LaneComponent::paint (juce::Graphics& g)
             c->data->draw (g, juce::Rectangle<int> (xa, 4 + 20, xb - xa, getHeight() - 8 - 24), t0, t0 + (xb - xa) * secPerPx);
         };
 
-        g.setColour (Pal::cyan);
+        g.setColour (Pal::green);
         if (! c->loop.load())
             drawWave (cx0, cx1, start);
         else
@@ -249,7 +249,7 @@ void LaneComponent::paint (juce::Graphics& g)
             g.fillRect (cx0, 4, juce::jmin (dimEnd, cx1) - cx0, getHeight() - 8);
         }
 
-        g.setColour (Pal::cyan.withAlpha (0.55f));
+        g.setColour (Pal::green.withAlpha (0.55f));
         g.drawRoundedRectangle (body.reduced (0.5f), 8.0f, 1.0f);
 
         g.setColour (juce::Colours::white);
