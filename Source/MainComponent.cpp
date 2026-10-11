@@ -1210,6 +1210,36 @@ void MainComponent::refreshPlayerBar()
 {
     auto seq = engine.getActiveSequence();
     const juce::String current = seq != nullptr ? seq->name : juce::String();
+
+    // Every track belongs to some playlist: tracks that are in none yet join the current one
+    // (a playlist is created if the sequence has none).
+    {
+        juce::StringArray used = playlist.items;
+        for (auto& pn : library.playlistNames())
+            if (pn != playlist.name)
+            {
+                Playlist other;
+                if (library.loadPlaylist (pn, other))
+                    used.addArray (other.items);
+            }
+
+        bool adopted = false;
+        for (auto& name : library.sequenceNames())
+            if (! used.contains (name))
+            {
+                if (playlist.name.isEmpty())
+                    playlist.name = Library::uniqueName (library.playlistNames(), "Плейлист 1"_ru);
+                playlist.items.add (name);
+                adopted = true;
+            }
+        if (adopted)
+        {
+            savePlaylistNow();
+            playlistIndex = seq != nullptr ? playlist.items.indexOf (seq->name) : -1;
+            preloadNeighbours();
+        }
+    }
+
     const int n = playlist.items.size();
 
     juce::String next = "-";
@@ -1237,15 +1267,6 @@ void MainComponent::refreshPlayerBar()
         trackRows.push_back ({ juce::String (i + 1) + ".  " + playlist.items[i], false, i == playlistIndex, i });
 
     otherTracks.clear();
-    for (auto& name : library.sequenceNames())
-        if (! playlist.items.contains (name))
-            otherTracks.add (name);
-    if (! otherTracks.isEmpty())
-    {
-        trackRows.push_back ({ "Не в плейлисте"_ru, true, false, -1 });
-        for (int i = 0; i < otherTracks.size(); ++i)
-            trackRows.push_back ({ otherTracks[i], false, playlistIndex < 0 && otherTracks[i] == current, 1000 + i });
-    }
 
     playerBar.setRows (PlayerBar::Tab::Seq, std::move (seqRows));
     playerBar.setRows (PlayerBar::Tab::Playlist, std::move (listRows));
