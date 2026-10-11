@@ -3,6 +3,7 @@
 #include "Engine.h"
 #include "TrackComponent.h"
 #include "Timeline.h"
+#include "Style.h"
 
 class PluginWindow : public juce::DocumentWindow
 {
@@ -60,9 +61,10 @@ private:
     void refreshStrips();
     void layoutTracks();
     void timerCallback() override;
+    void updateTimeline();
     void changeListenerCallback (juce::ChangeBroadcaster* source) override;
 
-    juce::LookAndFeel_V4 lookAndFeel;   // must outlive every child component
+    TcLookAndFeel lookAndFeel;   // must outlive every child component
     Engine engine;
     TimelineView timelineView;
     RulerComponent ruler { engine, timelineView };
@@ -94,7 +96,9 @@ private:
     bool pinned = true;
     int autosaveCounter = 0;
     int slowCounter = 0;
-    double lastClock = -1.0e9, lastSpan = 0.0, lastBpm = 0.0;
+    double lastScroll = -1.0e18, lastSpan = 0.0, lastBpm = 0.0;
+    double displayClock = 0.0, engineClockSeen = 0.0, engineClockStamp = 0.0, lastFrameStamp = 0.0;
+    juce::VBlankAttachment vblank;
     bool timelineDirty = true;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainComponent)

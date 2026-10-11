@@ -92,9 +92,9 @@ void ClipData::draw (juce::Graphics& g, juce::Rectangle<int> area, double t0, do
             }
         }
 
-        const float y0 = mid - juce::jlimit (-1.0f, 1.0f, hi) * half;
-        const float y1 = mid - juce::jlimit (-1.0f, 1.0f, lo) * half;
-        g.fillRect ((float) (area.getX() + px), y0, 1.0f, juce::jmax (1.0f, y1 - y0));
+        const int y0 = (int) std::floor (mid - juce::jlimit (-1.0f, 1.0f, hi) * half);
+        const int y1 = (int) std::ceil (mid - juce::jlimit (-1.0f, 1.0f, lo) * half);
+        g.fillRect (area.getX() + px, y0, 1, juce::jmax (1, y1 - y0));
     }
 }
 

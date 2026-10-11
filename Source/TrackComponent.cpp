@@ -22,8 +22,7 @@ TrackComponent::TrackComponent (Engine& engineToUse, std::shared_ptr<Track> trac
     outputButton.onClick = [this] { if (cb.outputMenu) cb.outputMenu (track, &outputButton); };
     addAndMakeVisible (outputButton);
 
-    metroButton.setColours (juce::Colour (0xff2fb5a2), juce::Colour (0xff24403d), juce::Colour (0xffa6efe4),
-                            juce::Colour (0xff35615c), juce::Colour (0xff8cbab4));
+    metroButton.setColours (Pal::orange, Pal::surface, juce::Colour (0xffffd9a0), Pal::hairline, Pal::textDim);
     metroButton.setToggleState (track->metronomeOn.load(), juce::dontSendNotification);
     metroButton.setTooltip ("Метроном на этой дорожке (в темпе проекта). Если он включён хотя бы на одной дорожке, "_ru
                             "общий Play начинается с 4 ударов отсчёта."_ru);
@@ -98,7 +97,7 @@ void TrackComponent::refreshAll()
     else
         input = "Вход: "_ru + juce::String (il + 1);
     inputButton.setButtonText (input);
-    inputButton.setColour (juce::TextButton::buttonColourId, bus >= 0 ? juce::Colour (0xff6a4fa3) : juce::Colour (0xff2c3138));
+    inputButton.setColour (juce::TextButton::buttonColourId, bus >= 0 ? juce::Colour (0xff5e5ce6) : Pal::surface);
 
     // slots
     for (int i = 0; i < Track::numSlots; ++i)
@@ -110,14 +109,14 @@ void TrackComponent::refreshAll()
         if (slot == nullptr)
         {
             b.setButtonText (juce::String (i + 1) + ". -"_ru);
-            b.setColour (juce::TextButton::buttonColourId, juce::Colour (0xff23272c));
-            b.setColour (juce::TextButton::textColourOffId, juce::Colour (0xff7d838c));
+            b.setColour (juce::TextButton::buttonColourId, Pal::surface.withAlpha (0.5f));
+            b.setColour (juce::TextButton::textColourOffId, Pal::textDim);
             b.setTooltip ("Пустой слот: выберите плагин"_ru);
         }
         else
         {
             b.setButtonText (slot->description.name);
-            b.setColour (juce::TextButton::buttonColourId, slot->bypass.load() ? juce::Colour (0xff3a3d42) : juce::Colour (0xff2b6f66));
+            b.setColour (juce::TextButton::buttonColourId, slot->bypass.load() ? Pal::surfaceHi : Pal::accent.darker (0.2f));
             b.setColour (juce::TextButton::textColourOffId, juce::Colours::white);
             b.setTooltip ("Открыть окно плагина: "_ru + slot->description.manufacturerName + " - " + slot->description.name);
         }
@@ -136,10 +135,10 @@ void TrackComponent::refreshAll()
 void TrackComponent::paint (juce::Graphics& g)
 {
     auto r = juce::Rectangle<float> (0.0f, 1.0f, (float) headerWidth - 4.0f, (float) getHeight() - 2.0f);
-    g.setColour (juce::Colour (0xff20242a));
-    g.fillRoundedRectangle (r, 6.0f);
-    g.setColour (juce::Colour (0xff2fb5a2));
-    g.fillRoundedRectangle (r.withWidth (4.0f), 2.0f);
+    g.setColour (Pal::surfaceLo);
+    g.fillRoundedRectangle (r, Pal::radiusBig);
+    g.setColour (Pal::hairline);
+    g.drawRoundedRectangle (r.reduced (0.5f), Pal::radiusBig, 1.0f);
 }
 
 void TrackComponent::resized()

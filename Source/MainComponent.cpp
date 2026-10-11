@@ -4,7 +4,7 @@
 // ---------------------------------------------------------------- plugin window
 
 PluginWindow::PluginWindow (juce::AudioPluginInstance& pluginToShow, std::function<void (PluginWindow*)> onCloseRequested)
-    : juce::DocumentWindow (pluginToShow.getName(), juce::Colour (0xff20242a), juce::DocumentWindow::closeButton),
+    : juce::DocumentWindow (pluginToShow.getName(), Pal::surface, juce::DocumentWindow::closeButton),
       plugin (&pluginToShow),
       onClose (std::move (onCloseRequested))
 {
@@ -133,7 +133,7 @@ namespace
         juce::DialogWindow::LaunchOptions o;
         o.content.setOwned (content);
         o.dialogTitle = title;
-        o.dialogBackgroundColour = juce::Colour (0xff20242a);
+        o.dialogBackgroundColour = Pal::surface;
         o.escapeKeyTriggersCloseButton = true;
         o.useNativeTitleBar = true;
         o.resizable = resizable;
@@ -158,9 +158,8 @@ namespace
 // ---------------------------------------------------------------- main component
 
 MainComponent::MainComponent()
+    : vblank (this, [this] { updateTimeline(); })
 {
-    lookAndFeel.setColourScheme (juce::LookAndFeel_V4::getMidnightColourScheme());
-    lookAndFeel.setColour (juce::ResizableWindow::backgroundColourId, juce::Colour (0xff181b1f));
     juce::LookAndFeel::setDefaultLookAndFeel (&lookAndFeel);
 
     juce::PropertiesFile::Options opts;
@@ -218,7 +217,7 @@ MainComponent::MainComponent()
 
     addTrackButton.setTooltip ("Добавить дорожку"_ru);
     addTrackButton.onClick = [this] { addTrack(); };
-    addTrackButton.setColour (juce::TextButton::buttonColourId, juce::Colour (0xff23272c));
+    addTrackButton.setColour (juce::TextButton::buttonColourId, Pal::surfaceLo);
     trackList.addAndMakeVisible (addTrackButton);
 
     viewport.setViewedComponent (&trackList, false);
@@ -245,7 +244,7 @@ MainComponent::MainComponent()
     engine.loadProject();
     bpmSlider.setValue (engine.getBpm(), juce::dontSendNotification);
     rebuildTracks();
-    startTimerHz (60);
+    startTimerHz (30);
 }
 
 MainComponent::~MainComponent()
@@ -262,9 +261,11 @@ MainComponent::~MainComponent()
 
 void MainComponent::paint (juce::Graphics& g)
 {
-    g.fillAll (juce::Colour (0xff181b1f));
-    g.setColour (juce::Colour (0xff20242a));
+    g.fillAll (Pal::window);
+    g.setColour (Pal::surfaceLo);
     g.fillRect (getLocalBounds().removeFromTop (96));
+    g.setColour (Pal::hairline);
+    g.fillRect (0, 96, getWidth(), 1);
 }
 
 void MainComponent::resized()
@@ -898,20 +899,49 @@ void MainComponent::changeListenerCallback (juce::ChangeBroadcaster* source)
         engine.savePluginList();
 }
 
-void MainComponent::timerCallback()
+// Runs once per screen refresh. The audio clock only advances once per audio block, so the displayed position
+// is extrapolated with the wall clock and gently pulled towards the real one: smooth, never jumps back.
+void MainComponent::updateTimeline()
 {
-    for (auto* t : trackComponents)
-        t->updateLive();
-
-    timelineView.clock = engine.getClockSeconds();
-    if (timelineDirty || timelineView.clock != lastClock || timelineView.span != lastSpan || engine.getBpm() != lastBpm)
+    const double now = juce::Time::getMillisecondCounterHiRes() * 0.001;
+    const double engineClock = engine.getClockSeconds();
+    if (engineClock != engineClockSeen)
     {
-        lastClock = timelineView.clock;
+        engineClockSeen = engineClock;
+        engineClockStamp = now;
+    }
+
+    if (engine.isPlaying() && ! engine.isPaused())
+    {
+        const double predicted = engineClock + (now - engineClockStamp);
+        if (std::abs (predicted - displayClock) > 0.25)
+            displayClock = predicted;
+        else
+            displayClock += (now - lastFrameStamp) + (predicted - displayClock - (now - lastFrameStamp)) * 0.1;
+    }
+    else
+        displayClock = engineClock;
+
+    lastFrameStamp = now;
+    timelineView.clock = displayClock;
+
+    const float laneW = (float) juce::jmax (1, ruler.getWidth());
+    const double scroll = timelineView.scrollPx (laneW);
+    if (timelineDirty || scroll != lastScroll || timelineView.span != lastSpan || engine.getBpm() != lastBpm)
+    {
+        lastScroll = scroll;
         lastSpan = timelineView.span;
         lastBpm = engine.getBpm();
         timelineDirty = false;
         repaintTimeline();
     }
+}
+
+void MainComponent::timerCallback()
+{
+    for (auto* t : trackComponents)
+        t->updateLive();
+
     playAllButton.setActive (engine.isPlaying());
     pauseAllButton.setActive (engine.isPaused());
     if (std::abs (bpmSlider.getValue() - engine.getBpm()) > 0.001 && ! bpmSlider.isMouseButtonDown())

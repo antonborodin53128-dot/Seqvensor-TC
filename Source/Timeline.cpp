@@ -1,11 +1,12 @@
 #include "Timeline.h"
 #include "Text.h"
+#include "Style.h"
 
 namespace
 {
-    void vline (juce::Graphics& g, float x, float y, float h, float thickness = 1.0f)
+    void vline (juce::Graphics& g, float x, float y, float h, int thickness = 1)
     {
-        g.fillRect (x - thickness * 0.5f, y, thickness, h);
+        g.fillRect ((int) std::lround (x) - thickness / 2, (int) std::lround (y), thickness, (int) std::lround (h));
     }
 }
 
@@ -24,10 +25,10 @@ void drawTimelineGrid (juce::Graphics& g, const TimelineView& view, double beat,
     {
         g.saveState();
         g.reduceClipRegion (area);
-        g.setColour (juce::Colour (0xff0b0d10));
-        g.fillRect (x0, (float) area.getY(), juce::jmax (0.0f, cx - x0), (float) area.getHeight());
-        g.setColour (juce::Colour (0xff1a2423));
-        g.fillRect (cx, (float) area.getY(), zx - cx, (float) area.getHeight());
+        g.setColour (juce::Colour (0xff0e0e10));
+        g.fillRect ((int) x0, area.getY(), juce::jmax (0, (int) std::lround (cx - x0)), area.getHeight());
+        g.setColour (juce::Colour (0xff1c2a24));
+        g.fillRect ((int) std::lround (cx), area.getY(), (int) std::lround (zx) - (int) std::lround (cx), area.getHeight());
         g.restoreState();
     }
 
@@ -49,20 +50,20 @@ void drawTimelineGrid (juce::Graphics& g, const TimelineView& view, double beat,
             continue;
 
         const float x = x0 + view.timeToX ((double) k * beat, w);
-        g.setColour (bar ? juce::Colour (0x59ffffff) : juce::Colour (0x1fffffff));
+        g.setColour (bar ? juce::Colour (0x40ffffff) : juce::Colour (0x17ffffff));
         vline (g, x, (float) area.getY() + (withNumbers && ! bar ? area.getHeight() * 0.55f : 0.0f),
                (float) area.getHeight() - (withNumbers && ! bar ? area.getHeight() * 0.55f : 0.0f));
 
         if (withNumbers && bar && barPx >= 22.0)
         {
-            g.setColour (juce::Colour (0xffc7ccd3));
+            g.setColour (Pal::textDim);
             g.drawText (juce::String (barNumber), (int) x + 4, area.getY() + 2, 40, 14, juce::Justification::left);
         }
     }
 
     // start of the music = bar 1
-    g.setColour (juce::Colour (0xff2fb5a2));
-    vline (g, zx, (float) area.getY(), (float) area.getHeight(), 2.0f);
+    g.setColour (Pal::green.withAlpha (0.9f));
+    vline (g, zx, (float) area.getY(), (float) area.getHeight(), 2);
     g.restoreState();
 }
 
@@ -70,7 +71,7 @@ void drawTimelineGrid (juce::Graphics& g, const TimelineView& view, double beat,
 
 void RulerComponent::paint (juce::Graphics& g)
 {
-    g.fillAll (juce::Colour (0xff1b1f24));
+    g.fillAll (Pal::surfaceLo);
     drawTimelineGrid (g, view, engine.getBeatSeconds(), getLocalBounds(), true);
 }
 
@@ -197,7 +198,7 @@ void LaneComponent::paint (juce::Graphics& g)
     const float w = (float) bounds.getWidth();
     const double beat = engine.getBeatSeconds();
 
-    g.fillAll (juce::Colour (0xff14171b));
+    g.fillAll (Pal::sunken);
     drawTimelineGrid (g, view, beat, bounds, false);
 
     for (auto& c : track->getClips())
@@ -209,68 +210,69 @@ void LaneComponent::paint (juce::Graphics& g)
         if (end < tLeft || start > tRight)
             continue;
 
-        const int x0 = (int) std::floor (view.timeToX (start, w));
-        const int x1 = (int) std::ceil (view.timeToX (end, w));
+        const int x0 = (int) std::lround (view.timeToX (start, w));
+        const int x1 = (int) std::lround (view.timeToX (end, w));
         const int cx0 = juce::jmax (0, x0), cx1 = juce::jmin (bounds.getWidth(), x1);
         if (cx1 <= cx0)
             continue;
 
-        auto body = juce::Rectangle<int> (cx0, 3, cx1 - cx0, getHeight() - 6);
-        g.setColour (juce::Colour (0xff1d3a4a));
-        g.fillRect (body);
+        // rounded body (its outer corners stay off-screen when the clip is cut by the lane edge)
+        auto body = juce::Rectangle<float> ((float) juce::jmax (x0, -20), 4.0f,
+                                            (float) (juce::jmin (x1, bounds.getWidth() + 20) - juce::jmax (x0, -20)),
+                                            (float) getHeight() - 8.0f);
+        g.setColour (juce::Colour (0xff10384f));
+        g.fillRoundedRectangle (body, 8.0f);
 
-        // waveform of the visible part (repeated for looping clips)
-        g.setColour (juce::Colour (0xff4fc3ff));
+        // waveform: columns are locked to absolute pixels, so scrolling only shifts them
+        const double secPerPx = 1.0 / view.pxPerSec (w);
+        auto drawWave = [&] (int xa, int xb, double origin)
+        {
+            if (xb <= xa)
+                return;
+            const double t0 = view.xToTime ((float) xa, w) - origin;
+            c->data->draw (g, juce::Rectangle<int> (xa, 4 + 20, xb - xa, getHeight() - 8 - 24), t0, t0 + (xb - xa) * secPerPx);
+        };
+
+        g.setColour (Pal::cyan);
         if (! c->loop.load())
-        {
-            const double t0 = view.xToTime ((float) cx0, w) - start;
-            const double t1 = view.xToTime ((float) cx1, w) - start;
-            c->data->draw (g, body.reduced (0, 3), juce::jmax (0.0, t0), juce::jmin (len, t1));
-        }
+            drawWave (cx0, cx1, start);
         else
-        {
             for (double s = start; s < tRight; s += len)
-            {
-                const int a = juce::jmax (cx0, (int) std::floor (view.timeToX (s, w)));
-                const int b = juce::jmin (cx1, (int) std::ceil (view.timeToX (s + len, w)));
-                if (b > a)
-                    c->data->draw (g, juce::Rectangle<int> (a, 6, b - a, getHeight() - 12),
-                                   view.xToTime ((float) a, w) - s, view.xToTime ((float) b, w) - s);
-            }
-        }
+                drawWave (juce::jmax (cx0, (int) std::lround (view.timeToX (s, w))),
+                          juce::jmin (cx1, (int) std::lround (view.timeToX (s + len, w))), s);
 
         // the part before the count-in is never played
-        const int dimEnd = (int) view.timeToX (-4.0 * beat, w);
+        const int dimEnd = (int) std::lround (view.timeToX (-4.0 * beat, w));
         if (dimEnd > cx0)
         {
-            g.setColour (juce::Colour (0xb0000000));
-            g.fillRect (cx0, 3, juce::jmin (dimEnd, cx1) - cx0, getHeight() - 6);
+            g.setColour (juce::Colour (0xb0101012));
+            g.fillRect (cx0, 4, juce::jmin (dimEnd, cx1) - cx0, getHeight() - 8);
         }
 
-        g.setColour (juce::Colour (0xff4fc3ff));
-        g.drawRect (body, 1);
+        g.setColour (Pal::cyan.withAlpha (0.55f));
+        g.drawRoundedRectangle (body.reduced (0.5f), 8.0f, 1.0f);
 
         g.setColour (juce::Colours::white);
-        g.setFont (juce::FontOptions (12.0f, juce::Font::bold));
+        g.setFont (juce::FontOptions (12.5f, juce::Font::bold));
         g.drawText (c->data->name + (c->loop.load() ? "  (повтор)"_ru : juce::String()),
-                    juce::jmax (x0, 0) + 5, 5, 400, 14, juce::Justification::left, false);
+                    juce::jmax (x0, 0) + 10, 7, 400, 16, juce::Justification::left, false);
     }
 
     if (track->loadingClips.load() > 0)
     {
-        g.setColour (juce::Colour (0xffe2b93b));
+        g.setColour (Pal::orange);
         g.setFont (juce::FontOptions (13.0f));
         g.drawText ("Загрузка аудио..."_ru, 8, 0, 300, getHeight(), juce::Justification::centredLeft);
     }
 
-    g.setColour (juce::Colour (0xff2a2f36));
+    g.setColour (Pal::hairline);
     g.drawHorizontalLine (getHeight() - 1, 0.0f, w);
 
     if (dropHighlight)
     {
-        g.setColour (juce::Colour (0x402fb5a2));
+        g.setColour (Pal::accent.withAlpha (0.18f));
         g.fillRect (bounds);
-        g.setColour (juce::Colour (0xff2fb5a2));
+        g.setColour (Pal::accent);
         g.drawRect (bounds, 2);
     }
 }
@@ -280,10 +282,10 @@ void LaneComponent::paint (juce::Graphics& g)
 void PlayheadOverlay::paint (juce::Graphics& g)
 {
     const float w = (float) getWidth();
-    const float x = (float) (view.playheadFraction * w);
+    const int x = view.headX (w);
 
-    g.setColour (juce::Colour (0xffffd24d));
-    g.fillRect (x - 1.0f, 0.0f, 2.0f, (float) getHeight());
+    g.setColour (juce::Colours::white.withAlpha (0.92f));
+    g.fillRect (x - 1, 0, 2, getHeight());
 
     // current bar | beat
     const double beatPos = view.clock / engine.getBeatSeconds();
@@ -291,10 +293,10 @@ void PlayheadOverlay::paint (juce::Graphics& g)
     const int beat = (int) std::floor (std::fmod (std::fmod (beatPos, 4.0) + 4.0, 4.0)) + 1;
     const juce::String label = "Такт "_ru + juce::String (bar) + " | " + juce::String (beat);
 
-    auto box = juce::Rectangle<float> (x + 4.0f, 3.0f, 86.0f, 18.0f);
-    g.setColour (juce::Colour (0xe0000000));
-    g.fillRoundedRectangle (box, 4.0f);
-    g.setColour (juce::Colour (0xffffd24d));
-    g.setFont (juce::FontOptions (12.0f, juce::Font::bold));
+    auto box = juce::Rectangle<float> ((float) x + 6.0f, 4.0f, 92.0f, 20.0f);
+    g.setColour (Pal::accent);
+    g.fillRoundedRectangle (box, 7.0f);
+    g.setColour (juce::Colours::white);
+    g.setFont (juce::FontOptions (12.5f, juce::Font::bold));
     g.drawText (label, box.toNearestInt(), juce::Justification::centred);
 }

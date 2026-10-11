@@ -10,8 +10,14 @@ struct TimelineView
     double clock = 0.0;             // song position in seconds (0 = bar 1, beat 1; < 0 = count-in)
     bool snap = true;               // clips snap to 1/16 of a beat unless Alt is held
 
-    float timeToX (double t, float width) const { return (float) ((t - clock) / span * width + playheadFraction * width); }
-    double xToTime (float x, float width) const { return clock + ((double) x / (double) width - playheadFraction) * span; }
+    // Everything is pixel-locked: the scroll position is a whole number of pixels, so grid lines and waveform
+    // columns keep exactly the same pixels while they slide (no shimmer / blur).
+    double pxPerSec (float width) const { return (double) width / span; }
+    int headX (float width) const { return (int) std::lround (playheadFraction * width); }
+    double scrollPx (float width) const { return (double) std::llround (clock * pxPerSec (width)); }
+
+    float timeToX (double t, float width) const { return (float) ((double) headX (width) + t * pxPerSec (width) - scrollPx (width)); }
+    double xToTime (float x, float width) const { return ((double) x - headX (width) + scrollPx (width)) / pxPerSec (width); }
 };
 
 // Ruler with bar / beat numbers. Drag = move the song position, wheel = zoom.
