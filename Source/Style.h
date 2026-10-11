@@ -5,22 +5,22 @@
 // One palette and one look for the whole app: dark, soft, rounded squares (Apple-like).
 namespace Pal
 {
-    inline const juce::Colour window     { 0xff1c1c1e };
-    inline const juce::Colour surface    { 0xff2c2c2e };
-    inline const juce::Colour surfaceHi  { 0xff3a3a3c };
-    inline const juce::Colour surfaceLo  { 0xff232325 };
-    inline const juce::Colour sunken     { 0xff141416 };
-    inline const juce::Colour hairline   { 0x1fffffff };
+    inline const juce::Colour window     { 0xff000000 };
+    inline const juce::Colour surface    { 0xff1f1f1f };
+    inline const juce::Colour surfaceHi  { 0xff2e2e2e };
+    inline const juce::Colour surfaceLo  { 0xff111111 };
+    inline const juce::Colour sunken     { 0xff050505 };
+    inline const juce::Colour hairline   { 0x26ffffff };
     inline const juce::Colour text       { 0xfff2f2f7 };
     inline const juce::Colour textDim    { 0xff98989f };
-    inline const juce::Colour accent     { 0xffff9f0a };
+    inline const juce::Colour accent     { 0xffffa81f };
     inline const juce::Colour green      { 0xff30d158 };
     inline const juce::Colour red        { 0xffff453a };
     inline const juce::Colour orange     { 0xffff9f0a };
     inline const juce::Colour violet     { 0xffbf5af2 };
-    inline const juce::Colour onAccent   { 0xff1c1c1e };   // text on top of the amber accent
+    inline const juce::Colour onAccent   { 0xff000000 };   // text on top of the amber accent
     inline const juce::Colour yellow     { 0xffffd60a };
-    inline const juce::Colour cyan       { 0xff64d2ff };
+    inline const juce::Colour cyan       { 0xff6bc7e8 };
 
     constexpr float radius = 8.0f;        // buttons, fields
     constexpr float radiusBig = 12.0f;    // cards, menus
@@ -59,12 +59,12 @@ public:
         setColour (juce::ComboBox::outlineColourId, juce::Colours::transparentBlack);
         setColour (juce::ListBox::backgroundColourId, Pal::surfaceLo);
         setColour (juce::ScrollBar::thumbColourId, juce::Colour (0x60ffffff));
-        setColour (juce::TooltipWindow::backgroundColourId, juce::Colour (0xf0343437));
+        setColour (juce::TooltipWindow::backgroundColourId, juce::Colour (0xf0202020));
         setColour (juce::TooltipWindow::textColourId, Pal::text);
         setColour (juce::TooltipWindow::outlineColourId, Pal::hairline);
 
         // popup menus: semi-transparent colour => the window is not opaque => rounded corners + shadow
-        setColour (juce::PopupMenu::backgroundColourId, juce::Colour (0xf2262628));
+        setColour (juce::PopupMenu::backgroundColourId, juce::Colour (0xf2161616));
         setColour (juce::PopupMenu::textColourId, Pal::text);
         setColour (juce::PopupMenu::headerTextColourId, Pal::textDim);
         setColour (juce::PopupMenu::highlightedBackgroundColourId, Pal::accent);
@@ -188,7 +188,7 @@ public:
     void drawTooltip (juce::Graphics& g, const juce::String& text, int w, int h) override
     {
         auto r = juce::Rectangle<float> (0.0f, 0.0f, (float) w, (float) h).reduced (0.5f);
-        g.setColour (juce::Colour (0xf0343437));
+        g.setColour (juce::Colour (0xf0202020));
         g.fillRoundedRectangle (r, 8.0f);
         g.setColour (Pal::hairline);
         g.drawRoundedRectangle (r, 8.0f, 1.0f);

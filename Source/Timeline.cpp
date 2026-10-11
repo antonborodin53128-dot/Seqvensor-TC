@@ -25,9 +25,9 @@ void drawTimelineGrid (juce::Graphics& g, const TimelineView& view, double beat,
     {
         g.saveState();
         g.reduceClipRegion (area);
-        g.setColour (juce::Colour (0xff0e0e10));
+        g.setColour (juce::Colour (0xff000000));
         g.fillRect ((int) x0, area.getY(), juce::jmax (0, (int) std::lround (cx - x0)), area.getHeight());
-        g.setColour (juce::Colour (0xff1c2a24));
+        g.setColour (juce::Colour (0xff0c1a14));
         g.fillRect ((int) std::lround (cx), area.getY(), (int) std::lround (zx) - (int) std::lround (cx), area.getHeight());
         g.restoreState();
     }
@@ -220,7 +220,7 @@ void LaneComponent::paint (juce::Graphics& g)
         auto body = juce::Rectangle<float> ((float) juce::jmax (x0, -20), 4.0f,
                                             (float) (juce::jmin (x1, bounds.getWidth() + 20) - juce::jmax (x0, -20)),
                                             (float) getHeight() - 8.0f);
-        g.setColour (juce::Colour (0xff10384f));
+        g.setColour (juce::Colour (0xff0d2a36));
         g.fillRoundedRectangle (body, 8.0f);
 
         // waveform: columns are locked to absolute pixels, so scrolling only shifts them
