@@ -56,7 +56,7 @@ private:
 class IconButton : public juce::Button
 {
 public:
-    enum class Icon { Play, Pause, Stop, Close, Gear, Menu, Arrow };
+    enum class Icon { Play, Pause, Stop, Close, Gear, Menu, Arrow, Prev, Next, Save, Trash, Plus };
 
     explicit IconButton (Icon i) : juce::Button ({}), icon (i) {}
 
@@ -91,6 +91,35 @@ public:
                 break;
             case Icon::Stop:
                 g.fillRect (juce::Rectangle<float> (s * 1.8f, s * 1.8f).withCentre (c));
+                break;
+            case Icon::Prev:
+            case Icon::Next:
+            {
+                const float d = icon == Icon::Prev ? -1.0f : 1.0f;
+                juce::Path p;
+                p.addTriangle (c.x + d * s * 1.15f, c.y - s * 1.1f, c.x + d * s * 1.15f, c.y + s * 1.1f, c.x - d * s * 0.55f, c.y);
+                g.fillPath (p);
+                g.fillRoundedRectangle (juce::Rectangle<float> (s * 0.4f, s * 2.2f).withCentre ({ c.x - d * s * 1.1f, c.y }), 1.5f);
+                break;
+            }
+            case Icon::Save:
+            {
+                auto body = juce::Rectangle<float> (s * 2.2f, s * 2.2f).withCentre (c);
+                g.drawRoundedRectangle (body, 3.0f, 1.8f);
+                g.fillRect (juce::Rectangle<float> (s * 1.1f, s * 0.7f).withCentre ({ c.x, body.getY() + s * 0.65f }));
+                g.fillRoundedRectangle (juce::Rectangle<float> (s * 1.3f, s * 0.8f).withCentre ({ c.x, body.getBottom() - s * 0.7f }), 1.5f);
+                break;
+            }
+            case Icon::Trash:
+            {
+                g.fillRoundedRectangle (juce::Rectangle<float> (s * 2.4f, s * 0.35f).withCentre ({ c.x, c.y - s * 0.95f }), 1.0f);
+                g.fillRoundedRectangle (juce::Rectangle<float> (s * 0.9f, s * 0.4f).withCentre ({ c.x, c.y - s * 1.3f }), 1.0f);
+                g.drawRoundedRectangle (juce::Rectangle<float> (s * 1.8f, s * 1.9f).withCentre ({ c.x, c.y + s * 0.2f }), 2.5f, 1.8f);
+                break;
+            }
+            case Icon::Plus:
+                g.fillRoundedRectangle (juce::Rectangle<float> (s * 2.2f, 2.2f).withCentre (c), 1.0f);
+                g.fillRoundedRectangle (juce::Rectangle<float> (2.2f, s * 2.2f).withCentre (c), 1.0f);
                 break;
             case Icon::Close:
                 g.drawLine (c.x - s, c.y - s, c.x + s, c.y + s, 2.0f);

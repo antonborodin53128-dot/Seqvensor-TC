@@ -4,6 +4,8 @@
 #include "TrackComponent.h"
 #include "Timeline.h"
 #include "Style.h"
+#include "PlayerBar.h"
+#include "Library.h"
 
 class PluginWindow : public juce::DocumentWindow
 {
@@ -53,6 +55,28 @@ private:
     void seekTimeline (double clockSeconds);
     void repaintTimeline();
     void layoutTimelineParts();
+    // sequences (songs) and playlists
+    void initialiseLibrary();
+    void switchToSequence (const juce::String& name, int indexInPlaylist);
+    void stepSong (int delta);
+    void refreshPlayerBar();
+    void preloadNeighbours();
+    void showSequenceMenu();
+    void showPlaylistMenu();
+    void showAddTrackMenu();
+    void showDeleteMenu();
+    void createSequence (const juce::String& wantedName, bool addToPlaylist);
+    void addToPlaylist (const juce::String& sequenceName);
+    void renameSequence();
+    void renamePlaylist();
+    void savePlaylistNow();
+    void saveEverything (bool announce);
+    void showSongsMenu();
+    void say (const juce::String& message);
+    void askText (const juce::String& title, const juce::String& label, const juce::String& initial,
+                  std::function<void (juce::String)> done);
+    void confirmDelete (const juce::String& message, std::function<void()> done);
+    juce::PopupMenu::Options optionsBelow (juce::Rectangle<int> localRectInPlayerBar);
     void addTrack();
     void tapTempo();
     void setPinned (bool pinned);
@@ -70,6 +94,10 @@ private:
     RulerComponent ruler { engine, timelineView };
     PlayheadOverlay playhead { engine, timelineView };
     juce::Label statusLabel;
+    Library library { engine.getDataDirectory() };
+    Playlist playlist;
+    int playlistIndex = -1;
+    PlayerBar playerBar;
     juce::TooltipWindow tooltipWindow { this, 600 };
 
     // top bar

@@ -26,6 +26,7 @@ target_sources(TC PRIVATE
     Source/MainComponent.cpp
     Source/TrackComponent.cpp
     Source/Timeline.cpp
+    Source/PlayerBar.cpp
     Source/Clip.cpp
     Source/TempoDetect.cpp)
 

@@ -20,6 +20,8 @@ namespace Pal
     inline const juce::Colour violet     { 0xffbf5af2 };
     inline const juce::Colour onAccent   { 0xff000000 };   // text on top of the amber accent
     inline const juce::Colour yellow     { 0xffffd60a };
+    inline const juce::Colour clip       { 0xff5aa66e };   // audio clips: plain, calm green
+    inline const juce::Colour clipBody   { 0xff112519 };
     inline const juce::Colour cyan       { 0xff6bc7e8 };
 
     constexpr float radius = 8.0f;        // buttons, fields

@@ -41,7 +41,7 @@ void Engine::shutdown()
     if (! running && tracks.empty())
         return;
 
-    saveProject();
+    saveActiveSequence();
 
     if (auto xml = deviceManager.createStateXml())
         xml->writeTo (getDataDirectory().getChildFile ("audio.xml"));
@@ -52,6 +52,8 @@ void Engine::shutdown()
     {
         const juce::ScopedLock sl (tracksLock);
         tracks.clear();
+        sequenceCache.clear();
+        activeSequence.reset();
     }
 }
 
@@ -63,13 +65,19 @@ void Engine::savePluginList() const
 
 // ---------------------------------------------------------------- tracks
 
-std::shared_ptr<Track> Engine::addTrack (const juce::String& name, int forcedId)
+std::shared_ptr<Track> Engine::makeTrack (const juce::String& name, int id)
 {
     auto track = std::make_shared<Track> (name);
-    track->id = forcedId > 0 ? forcedId : nextTrackId;
-    nextTrackId = juce::jmax (nextTrackId, track->id + 1);
+    track->id = id;
     track->setTempoSource (&playHead.bpm);
     track->prepare (currentSampleRate, currentBlockSize, &playHead);
+    return track;
+}
+
+std::shared_ptr<Track> Engine::addTrack (const juce::String& name, int forcedId)
+{
+    auto track = makeTrack (name, forcedId > 0 ? forcedId : nextTrackId);
+    nextTrackId = juce::jmax (nextTrackId, track->id + 1);
     {
         const juce::ScopedLock sl (tracksLock);
         tracks.push_back (track);
@@ -271,6 +279,9 @@ void Engine::audioDeviceAboutToStart (juce::AudioIODevice* device)
     const juce::ScopedLock sl (tracksLock);
     for (auto& t : tracks)
         t->prepare (currentSampleRate, currentBlockSize, &playHead);
+    for (auto& kv : sequenceCache)
+        for (auto& t : kv.second->tracks)
+            t->prepare (currentSampleRate, currentBlockSize, &playHead);
     running = true;
 }
 
@@ -279,6 +290,9 @@ void Engine::audioDeviceStopped()
     const juce::ScopedLock sl (tracksLock);
     for (auto& t : tracks)
         t->release();
+    for (auto& kv : sequenceCache)
+        for (auto& t : kv.second->tracks)
+            t->release();
     running = false;
 }
 
@@ -518,74 +532,130 @@ void Engine::removeClip (const std::shared_ptr<Track>& track, int clipId)
     clipsChanged();
 }
 
-// ---------------------------------------------------------------- project file
+// ---------------------------------------------------------------- sequences (songs)
 
-void Engine::saveProject()
+namespace
 {
-    juce::XmlElement root ("TC_PROJECT");
-    root.setAttribute ("version", 3);
-    root.setAttribute ("bpm", getBpm());
-
-    for (auto& t : getTracks())
+    void writeSequenceFile (const juce::File& file, const std::vector<std::shared_ptr<Track>>& list, double bpm)
     {
-        auto* te = root.createNewChildElement ("TRACK");
-        te->setAttribute ("id", t->id);
-        te->setAttribute ("name", t->name);
-        te->setAttribute ("inL", t->inputL.load());
-        te->setAttribute ("inR", t->inputR.load());
-        te->setAttribute ("bus", t->busId.load());
-        te->setAttribute ("out", t->outputPair.load());
-        te->setAttribute ("gain", (double) t->gainLinear.load());
-        te->setAttribute ("mute", t->muted.load());
-        te->setAttribute ("rec", t->recArmed.load());
-        te->setAttribute ("comp", t->compensate.load());
-        te->setAttribute ("metro", t->metronomeOn.load());
-        te->setAttribute ("inputSet", t->inputChosenByUser);
+        juce::XmlElement root ("TC_PROJECT");
+        root.setAttribute ("version", 3);
+        root.setAttribute ("bpm", bpm);
 
-        for (auto& c : t->getClips())
+        for (auto& t : list)
         {
-            auto* ce = te->createNewChildElement ("CLIP");
-            ce->setAttribute ("file", c->data->file.getFullPathName());
-            ce->setAttribute ("start", c->start.load());
-            ce->setAttribute ("loop", c->loop.load());
+            auto* te = root.createNewChildElement ("TRACK");
+            te->setAttribute ("id", t->id);
+            te->setAttribute ("name", t->name);
+            te->setAttribute ("inL", t->inputL.load());
+            te->setAttribute ("inR", t->inputR.load());
+            te->setAttribute ("bus", t->busId.load());
+            te->setAttribute ("out", t->outputPair.load());
+            te->setAttribute ("gain", (double) t->gainLinear.load());
+            te->setAttribute ("mute", t->muted.load());
+            te->setAttribute ("rec", t->recArmed.load());
+            te->setAttribute ("comp", t->compensate.load());
+            te->setAttribute ("metro", t->metronomeOn.load());
+            te->setAttribute ("inputSet", t->inputChosenByUser);
+
+            for (auto& c : t->getClips())
+            {
+                auto* ce = te->createNewChildElement ("CLIP");
+                ce->setAttribute ("file", c->data->file.getFullPathName());
+                ce->setAttribute ("start", c->start.load());
+                ce->setAttribute ("loop", c->loop.load());
+            }
+
+            for (int i = 0; i < Track::numSlots; ++i)
+            {
+                auto* slot = t->getSlot (i);
+                if (slot == nullptr || slot->plugin == nullptr)
+                    continue;
+
+                auto* pe = te->createNewChildElement ("PLUGIN");
+                pe->setAttribute ("slot", i);
+                pe->setAttribute ("bypass", slot->bypass.load());
+
+                if (auto desc = slot->description.createXml())
+                    pe->addChildElement (desc.release());
+
+                juce::MemoryBlock state;
+                slot->plugin->getStateInformation (state);
+                pe->setAttribute ("state", juce::Base64::toBase64 (state.getData(), state.getSize()));
+            }
         }
 
-        for (int i = 0; i < Track::numSlots; ++i)
-        {
-            auto* slot = t->getSlot (i);
-            if (slot == nullptr)
-                continue;
-
-            if (slot->plugin == nullptr)
-                continue;
-
-            auto* pe = te->createNewChildElement ("PLUGIN");
-            pe->setAttribute ("slot", i);
-            pe->setAttribute ("bypass", slot->bypass.load());
-
-            if (auto desc = slot->description.createXml())
-                pe->addChildElement (desc.release());
-
-            juce::MemoryBlock state;
-            slot->plugin->getStateInformation (state);
-            pe->setAttribute ("state", juce::Base64::toBase64 (state.getData(), state.getSize()));
-        }
+        file.getParentDirectory().createDirectory();
+        file.replaceWithText (root.toString());
     }
-
-    getProjectFile().replaceWithText (root.toString());
 }
 
-void Engine::loadProject()
+void Engine::saveActiveSequence()
 {
-    auto xml = juce::XmlDocument::parse (getProjectFile());
+    // never write a half-loaded sequence: its missing clips / plugins would be lost
+    if (activeSequence == nullptr || activeSequence->pending.load() > 0)
+        return;
+    writeSequenceFile (activeSequence->file, getTracks(), getBpm());
+}
+
+void Engine::sequenceProgress (const std::shared_ptr<Sequence>& seq)
+{
+    if (seq == activeSequence)
+    {
+        clipsChanged();
+        if (onTracksChanged)
+            onTracksChanged();
+    }
+}
+
+std::shared_ptr<Sequence> Engine::obtainSequence (const juce::File& file)
+{
+    const auto key = file.getFullPathName();
+    {
+        const juce::ScopedLock sl (tracksLock);
+        auto it = sequenceCache.find (key);
+        if (it != sequenceCache.end())
+            return it->second;
+    }
+
+    auto seq = std::make_shared<Sequence>();
+    seq->file = file;
+    seq->name = file.getFileNameWithoutExtension();
+    fillSequence (seq);
+
+    const juce::ScopedLock sl (tracksLock);
+    sequenceCache[key] = seq;
+    return seq;
+}
+
+void Engine::fillSequence (const std::shared_ptr<Sequence>& seq)
+{
+    auto xml = juce::XmlDocument::parse (seq->file);
     if (xml == nullptr || ! xml->hasTagName ("TC_PROJECT"))
         return;
 
-    setBpm (xml->getDoubleAttribute ("bpm", 120.0));
+    seq->bpm = xml->getDoubleAttribute ("bpm", 120.0);
+    const int version = xml->getIntAttribute ("version", 1);
+    std::weak_ptr<Sequence> weakSeq = seq;
+
+    auto finished = [this, weakSeq]
+    {
+        if (auto s = weakSeq.lock())
+        {
+            s->pending--;
+            sequenceProgress (s);
+        }
+    };
+
+    int maxId = 0;
+    for (auto* te : xml->getChildWithTagNameIterator ("TRACK"))
+        maxId = juce::jmax (maxId, te->getIntAttribute ("id", 0));
 
     for (auto* te : xml->getChildWithTagNameIterator ("TRACK"))
     {
-        auto track = addTrack (te->getStringAttribute ("name", "Дорожка"_ru), te->getIntAttribute ("id", -1));
+        const int id = te->getIntAttribute ("id", -1);
+        auto track = makeTrack (te->getStringAttribute ("name", "Дорожка"_ru), id > 0 ? id : ++maxId);
+        seq->tracks.push_back (track);
 
         track->inputL = te->getIntAttribute ("inL", -1);
         track->inputR = te->getIntAttribute ("inR", -1);
@@ -596,7 +666,7 @@ void Engine::loadProject()
         track->recArmed = te->getBoolAttribute ("rec", false);
         track->compensate = te->getBoolAttribute ("comp", false);
         track->inputChosenByUser = te->getBoolAttribute ("inputSet", true);
-        if (xml->getIntAttribute ("version", 1) >= 3)
+        if (version >= 3)
             track->metronomeOn = te->getBoolAttribute ("metro", false);
 
         for (auto* ce : te->getChildWithTagNameIterator ("CLIP"))
@@ -604,13 +674,13 @@ void Engine::loadProject()
             juce::File f (ce->getStringAttribute ("file"));
             if (! f.existsAsFile())
                 continue;
+            seq->pending++;
             addClipFromFile (track, f, ce->getDoubleAttribute ("start", 0.0),
-                             [this, loop = ce->getBoolAttribute ("loop", false)] (std::shared_ptr<Clip> clip, const juce::String&)
+                             [finished, loop = ce->getBoolAttribute ("loop", false)] (std::shared_ptr<Clip> clip, const juce::String&)
                              {
                                  if (clip != nullptr)
                                      clip->loop = loop;
-                                 clipsChanged();
-                                 if (onTracksChanged) onTracksChanged();
+                                 finished();
                              });
         }
 
@@ -620,7 +690,11 @@ void Engine::loadProject()
             juce::ignoreUnused (pe);
             juce::File f (te->getStringAttribute ("file"));
             if (f.existsAsFile())
-                addClipFromFile (track, f, te->getDoubleAttribute ("offset", 0.0));
+            {
+                seq->pending++;
+                addClipFromFile (track, f, te->getDoubleAttribute ("offset", 0.0),
+                                 [finished] (std::shared_ptr<Clip>, const juce::String&) { finished(); });
+            }
         }
 
         int fallbackSlot = 0;
@@ -630,12 +704,88 @@ void Engine::loadProject()
             juce::PluginDescription desc;
             if (auto* de = pe->getFirstChildElement())
                 if (desc.loadFromXml (*de))
-                    addPluginToTrack (track, slot, desc,
-                                      [this] (bool, const juce::String&) { if (onTracksChanged) onTracksChanged(); },
+                {
+                    seq->pending++;
+                    addPluginToTrack (track, slot, desc, [finished] (bool, const juce::String&) { finished(); },
                                       pe->getStringAttribute ("state"), pe->getBoolAttribute ("bypass", false));
+                }
         }
     }
+}
 
+void Engine::activateSequence (const std::shared_ptr<Sequence>& seq)
+{
+    if (seq == nullptr || seq == activeSequence)
+        return;
+
+    stopAll();
+
+    if (activeSequence != nullptr)
+    {
+        saveActiveSequence();
+        activeSequence->tracks = getTracks();
+        activeSequence->bpm = getBpm();
+    }
+
+    int maxId = 0;
+    for (auto& t : seq->tracks)
+        maxId = juce::jmax (maxId, t->id);
+
+    {
+        const juce::ScopedLock sl (tracksLock);
+        tracks = seq->tracks;
+        activeSequence = seq;
+    }
+
+    nextTrackId = maxId + 1;
+    setBpm (seq->bpm);
+    clipsChanged();
     if (onTracksChanged)
         onTracksChanged();
+}
+
+void Engine::dropSequences (const std::vector<juce::File>& keep)
+{
+    std::vector<std::shared_ptr<Sequence>> dropped;   // destroyed outside the lock
+    {
+        const juce::ScopedLock sl (tracksLock);
+        for (auto it = sequenceCache.begin(); it != sequenceCache.end();)
+        {
+            const bool wanted = it->second == activeSequence
+                                || std::find (keep.begin(), keep.end(), it->second->file) != keep.end();
+            if (wanted)
+                ++it;
+            else
+            {
+                dropped.push_back (it->second);
+                it = sequenceCache.erase (it);
+            }
+        }
+    }
+    dropped.clear();
+}
+
+void Engine::forgetSequence (const juce::File& file)
+{
+    std::shared_ptr<Sequence> gone;
+    const juce::ScopedLock sl (tracksLock);
+    auto it = sequenceCache.find (file.getFullPathName());
+    if (it != sequenceCache.end() && it->second != activeSequence)
+    {
+        gone = it->second;
+        sequenceCache.erase (it);
+    }
+}
+
+void Engine::renameSequenceFile (const juce::File& from, const juce::File& to)
+{
+    const juce::ScopedLock sl (tracksLock);
+    auto it = sequenceCache.find (from.getFullPathName());
+    if (it == sequenceCache.end())
+        return;
+    auto seq = it->second;
+    sequenceCache.erase (it);
+    seq->file = to;
+    seq->name = to.getFileNameWithoutExtension();
+    sequenceCache[to.getFullPathName()] = seq;
 }

@@ -4,6 +4,7 @@
 #include "Text.h"
 
 #include <functional>
+#include <map>
 #include <set>
 
 // Tempo / transport information that every hosted plugin can read (delays, arpeggiators ...).
@@ -35,6 +36,17 @@ public:
     std::atomic<double> sampleRate { 48000.0 };
     std::atomic<bool> playing { false };
     std::atomic<juce::int64> samplePos { 0 };
+};
+
+// One song: its tracks, clips, plugins and tempo. Sequences of the neighbouring songs are kept loaded
+// (and prepared) in memory, so switching between songs is instant.
+struct Sequence
+{
+    juce::String name;
+    juce::File file;
+    double bpm = 120.0;
+    std::vector<std::shared_ptr<Track>> tracks;   // while the sequence is not the active one
+    std::atomic<int> pending { 0 };               // clips / plugins that are still loading
 };
 
 class Engine : public juce::AudioIODeviceCallback
@@ -100,9 +112,16 @@ public:
     // Persistence.
     juce::File getDataDirectory() const;
     void savePluginList() const;
-    void saveProject();
-    void loadProject();
-    juce::File getProjectFile() const { return getDataDirectory().getChildFile ("project.xml"); }
+    juce::File getLegacyProjectFile() const { return getDataDirectory().getChildFile ("project.xml"); }
+
+    // Sequences (songs). Message thread only.
+    std::shared_ptr<Sequence> obtainSequence (const juce::File& file);   // cached, or loaded from disk (empty if no file yet)
+    std::shared_ptr<Sequence> getActiveSequence() const { return activeSequence; }
+    void activateSequence (const std::shared_ptr<Sequence>& seq);         // stops the transport, swaps the tracks
+    void saveActiveSequence();
+    void dropSequences (const std::vector<juce::File>& keep);              // frees cached sequences (the active one stays)
+    void renameSequenceFile (const juce::File& from, const juce::File& to);
+    void forgetSequence (const juce::File& file);
 
     std::function<void()> onTracksChanged;
 
@@ -115,6 +134,9 @@ public:
                                            const juce::AudioIODeviceCallbackContext& context) override;
 
 private:
+    std::shared_ptr<Track> makeTrack (const juce::String& name, int id);
+    void fillSequence (const std::shared_ptr<Sequence>& seq);
+    void sequenceProgress (const std::shared_ptr<Sequence>& seq);
     void updateCompensation();
     void loadEnabledPlugins();
     void saveEnabledPlugins() const;
@@ -134,6 +156,9 @@ private:
     int beatIndex = 0;
     double nextBeatIn = 0.0;
     std::vector<Track*> order;
+
+    std::map<juce::String, std::shared_ptr<Sequence>> sequenceCache;
+    std::shared_ptr<Sequence> activeSequence;
 
     mutable juce::CriticalSection tracksLock;
     std::vector<std::shared_ptr<Track>> tracks;
