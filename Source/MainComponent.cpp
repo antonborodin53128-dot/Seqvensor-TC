@@ -204,7 +204,10 @@ MainComponent::MainComponent()
                               "сначала 4 удара отсчёта, музыка начинается на 5-м."_ru);
     playAllButton.onClick = [this] { engine.playAll(); };
     addAndMakeVisible (playAllButton);
-    stopAllButton.setTooltip ("Остановить все плееры"_ru);
+    pauseAllButton.setTooltip ("Пауза: все плееры и метроном замирают, Play продолжит с этого места"_ru);
+    pauseAllButton.onClick = [this] { engine.pauseAll(); };
+    addAndMakeVisible (pauseAllButton);
+    stopAllButton.setTooltip ("Стоп: остановить всё и вернуться в начало"_ru);
     stopAllButton.onClick = [this] { engine.stopAll(); };
     addAndMakeVisible (stopAllButton);
 
@@ -276,8 +279,10 @@ void MainComponent::resized()
     analysisButton.setBounds (group.removeFromLeft (38));
 
     // global transport under the tempo
-    auto transportRow = juce::Rectangle<int> (96, 34).withCentre ({ getWidth() / 2, fullBar.getY() + 20 });
+    auto transportRow = juce::Rectangle<int> (46 * 3 + 8, 34).withCentre ({ getWidth() / 2, fullBar.getY() + 20 });
     playAllButton.setBounds (transportRow.removeFromLeft (46));
+    transportRow.removeFromLeft (4);
+    pauseAllButton.setBounds (transportRow.removeFromLeft (46));
     transportRow.removeFromLeft (4);
     stopAllButton.setBounds (transportRow.removeFromLeft (46));
 
@@ -748,6 +753,7 @@ void MainComponent::timerCallback()
     for (auto* t : trackComponents)
         t->updateLive();
     playAllButton.setActive (engine.isPlaying());
+    pauseAllButton.setActive (engine.isPaused());
     if (std::abs (bpmSlider.getValue() - engine.getBpm()) > 0.001 && ! bpmSlider.isMouseButtonDown())
         bpmSlider.setValue (engine.getBpm(), juce::dontSendNotification);
 

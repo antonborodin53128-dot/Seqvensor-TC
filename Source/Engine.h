@@ -72,11 +72,18 @@ public:
                            std::function<void (bool ok, const juce::String& error)> done,
                            const juce::String& savedStateBase64 = {}, bool bypassed = false);
 
-    // Global transport: starts every player at once. If the metronome is on for at least
-    // one track, 4 count-in beats are played first and the music starts on beat 5.
-    void playAll();
-    void stopAll();
+    // Global transport. One clock (seconds, 0 = first beat, < 0 = count-in) drives the metronome
+    // and every player. The metronome is independent of the players: it keeps clicking when a
+    // player is stopped. A player that is started joins at the current clock time.
+    void playAll();                                     // start / resume (all players)
+    void playTrack (const std::shared_ptr<Track>& t);   // this player only (joins a running clock)
+    void pauseAll();                                    // freezes the clock, Play continues from here
+    void stopAll();                                     // stops everything and rewinds
+    void seek (double clockSeconds);                    // move the song position
     bool isPlaying() const;
+    bool isPaused() const { return paused.load(); }
+    bool isGridMode() const { return gridMode.load(); }  // true: audio offsets and the count-in are in use
+    double getClockSeconds() const { return clockNow.load(); }
 
     double getSampleRate() const { return currentSampleRate; }
     int getBlockSize() const { return currentBlockSize; }
@@ -111,7 +118,18 @@ private:
     std::set<juce::String> enabledPlugins;
     bool allPluginsEnabled = true;
     int nextTrackId = 1;
-    std::atomic<int> pendingStart { -1 };
+    void startTransport (const std::vector<std::shared_ptr<Track>>& toPlay);
+    void armTrack (Track& t, double clockTime, bool grid);
+
+    std::atomic<bool> clockRunning { false };
+    std::atomic<bool> paused { false };
+    std::atomic<bool> gridMode { false };
+    std::atomic<double> clockNow { 0.0 };       // clock time at the end of the last audio block
+    std::atomic<int> command { 0 };             // 1 = (re)start the clock at commandClock
+    std::atomic<double> commandClock { 0.0 };
+    double clockSeconds = 0.0;                  // audio thread only
+    int beatIndex = 0;
+    double nextBeatIn = 0.0;
     std::vector<Track*> order;
 
     mutable juce::CriticalSection tracksLock;

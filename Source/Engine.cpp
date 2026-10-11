@@ -175,37 +175,113 @@ void Engine::addPluginToTrack (const std::shared_ptr<Track>& track, int slotInde
 
 // ---------------------------------------------------------------- transport
 
+void Engine::armTrack (Track& t, double clockTime, bool grid)
+{
+    if (! t.isPlayerActive() || ! t.hasAudio())
+        return;
+
+    // without the grid (no metronome anywhere) the song simply plays from its beginning
+    const double offset = grid ? t.getClipOffset() : 0.0;
+    const double fileAtStart = clockTime - offset;
+    if (fileAtStart >= 0.0)
+        t.armPlayback (clockTime, fileAtStart);   // already running: join in sync
+    else
+        t.armPlayback (offset, 0.0);              // the file starts later on the clock
+}
+
+void Engine::startTransport (const std::vector<std::shared_ptr<Track>>& toPlay)
+{
+    const bool live = clockRunning.load() || command.load() == 1;
+    double start = 0.0;
+    bool grid = gridMode.load();
+
+    if (live)
+    {
+        start = command.load() == 1 ? commandClock.load() : clockNow.load() + 0.2;   // join the running clock
+    }
+    else if (paused.load())
+    {
+        start = clockNow.load();   // resume where we paused
+    }
+    else
+    {
+        bool anyMetronome = false;
+        for (auto& t : getTracks())
+            if (t->metronomeOn.load())
+                anyMetronome = true;
+
+        const int countIn = anyMetronome ? 4 : 0;
+        grid = countIn > 0;
+        gridMode.store (grid);
+        start = -(double) countIn * 60.0 / juce::jlimit (20.0, 400.0, getBpm());
+    }
+
+    for (auto& t : toPlay)
+        armTrack (*t, start, grid);
+
+    if (! live)
+    {
+        paused.store (false);
+        commandClock.store (start);
+        command.store (1);
+    }
+}
+
 void Engine::playAll()
 {
-    // 4 count-in beats only if some metronome is on; otherwise every song just starts from its beginning
-    bool needCountIn = false;
-    auto all = getTracks();
-    for (auto& t : all)
-        if (t->metronomeOn.load())
-            needCountIn = true;
+    startTransport (getTracks());
+}
 
-    const int countIn = needCountIn ? 4 : 0;
-    for (auto& t : all)
-        t->prepareStart (countIn);
-    pendingStart.store (countIn);
+void Engine::playTrack (const std::shared_ptr<Track>& t)
+{
+    startTransport ({ t });
+}
+
+void Engine::pauseAll()
+{
+    if (! (clockRunning.load() || command.load() == 1))
+        return;
+
+    command.store (0);
+    clockRunning.store (false);
+    paused.store (true);
+    for (auto& t : getTracks())
+        t->stopPlayer();
 }
 
 void Engine::stopAll()
 {
-    pendingStart.store (-1);
+    command.store (0);
+    clockRunning.store (false);
+    paused.store (false);
+    clockNow.store (0.0);
     for (auto& t : getTracks())
-        t->stopAndRewind();
+        t->stopPlayer();
+}
+
+void Engine::seek (double clockSecondsTarget)
+{
+    const double t = juce::jmax (0.0, clockSecondsTarget);
+
+    if (clockRunning.load() || command.load() == 1)
+    {
+        const bool grid = gridMode.load();
+        for (auto& tr : getTracks())
+            if (tr->isPlaying())
+                armTrack (*tr, t, grid);
+        commandClock.store (t);
+        command.store (1);
+    }
+    else
+    {
+        paused.store (true);   // the next Play continues from here
+        clockNow.store (t);
+    }
 }
 
 bool Engine::isPlaying() const
 {
-    if (pendingStart.load() >= 0)
-        return true;
-    const juce::ScopedLock sl (tracksLock);
-    for (auto& t : tracks)
-        if (t->isPlaying())
-            return true;
-    return false;
+    return clockRunning.load() || command.load() == 1;
 }
 
 // ---------------------------------------------------------------- audio
@@ -276,11 +352,17 @@ void Engine::audioDeviceIOCallbackWithContext (const float* const* inputChannelD
 
     updateCompensation();
 
-    // all tracks get the start request in the same callback, so their clocks stay aligned
-    const int startBeats = pendingStart.exchange (-1);
-    if (startBeats >= 0)
-        for (auto& t : tracks)
-            t->requestStart (startBeats);
+    // (re)start / jump of the global clock requested by the UI
+    if (command.exchange (0) == 1)
+    {
+        clockSeconds = commandClock.load();
+        const double beatSamples = currentSampleRate * 60.0 / juce::jlimit (20.0, 400.0, getBpm());
+        const double beatPos = clockSeconds * getBpm() / 60.0;
+        const double nextBeat = std::ceil (beatPos - 1.0e-6);
+        beatIndex = (int) nextBeat;
+        nextBeatIn = (nextBeat - beatPos) * beatSamples;
+        clockRunning.store (true);
+    }
 
     // tracks that read another track (bus) go last so they get the fresh block
     order.clear();
@@ -296,6 +378,34 @@ void Engine::audioDeviceIOCallbackWithContext (const float* const* inputChannelD
     while (done < numSamples)
     {
         const int n = juce::jmin (chunk, numSamples - done);
+
+        ChunkClock clock;
+        clock.running = clockRunning.load();
+        clock.startSeconds = clockSeconds;
+
+        if (clock.running)
+        {
+            const double beatSamples = currentSampleRate * 60.0 / juce::jlimit (20.0, 400.0, getBpm());
+            int pos = 0;
+            while (pos < n)
+            {
+                if (nextBeatIn <= 0.0)
+                {
+                    if (clock.numEvents < ChunkClock::maxEvents)
+                    {
+                        clock.eventOffset[clock.numEvents] = pos;
+                        clock.eventAccent[clock.numEvents] = (((beatIndex % 4) + 4) % 4) == 0;
+                        ++clock.numEvents;
+                    }
+                    ++beatIndex;
+                    nextBeatIn += beatSamples;
+                }
+                const int seg = juce::jmin (n - pos, juce::jmax (1, (int) std::ceil (nextBeatIn)));
+                nextBeatIn -= (double) seg;
+                pos += seg;
+            }
+        }
+
         for (auto* t : order)
         {
             const Track* source = nullptr;
@@ -305,33 +415,38 @@ void Engine::audioDeviceIOCallbackWithContext (const float* const* inputChannelD
                     if (o->id == b)
                         source = o;
             t->processChunk (inputChannelData, numInputChannels, outputChannelData, numOutputChannels,
-                             done, n, source);
+                             done, n, source, clock);
+        }
+
+        if (clock.running)
+        {
+            clockSeconds += (double) n / currentSampleRate;
+            clockNow.store (clockSeconds);
         }
         done += n;
     }
 
-    bool anyPlaying = false, anyPlayerTrack = false, anyPlayerRunning = false;
-    for (auto& t : tracks)
+    // the music has ended by itself: stop the clock (and with it the metronome)
+    if (clockRunning.load())
     {
-        if (t->isPlaying())
-            anyPlaying = true;
-        if (t->isPlayerActive() && t->hasAudio())
+        bool anyActive = false, anyEnded = false;
+        for (auto& t : tracks)
         {
-            anyPlayerTrack = true;
             if (t->isPlaying())
-                anyPlayerRunning = true;
+                anyActive = true;
+            if (t->hasEndedNaturally())
+                anyEnded = true;
+        }
+        if (anyEnded && ! anyActive)
+        {
+            clockRunning.store (false);
+            clockNow.store (0.0);
+            for (auto& t : tracks)
+                t->clearEnded();
         }
     }
 
-    // all the music has ended: stop the clocks (metronome) of the other tracks too
-    if (anyPlaying && anyPlayerTrack && ! anyPlayerRunning)
-    {
-        for (auto& t : tracks)
-            t->haltTransport();
-        anyPlaying = false;
-    }
-
-    playHead.playing.store (anyPlaying);
+    playHead.playing.store (clockRunning.load());
     playHead.advance (numSamples);
 }
 

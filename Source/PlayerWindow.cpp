@@ -243,9 +243,9 @@ namespace
             vline (g, zeroX + 1, 0.0f, (float) waveH);
 
             // playhead
-            if (track->isPlaying() && len > 0.0)
+            if ((engine.isPlaying() || engine.isPaused()) && len > 0.0)
             {
-                const float x = timeToX (track->getPositionSeconds() + offset);
+                const float x = timeToX (engine.getClockSeconds());
                 g.setColour (juce::Colour (0xffffd24d));
                 vline (g, x, 0.0f, (float) waveH);
             }
@@ -350,12 +350,46 @@ namespace
             addButton.onClick = [this] { chooseFile(); };
             addAndMakeVisible (addButton);
 
-            playButton.setTooltip ("Играть этот плеер"_ru);
-            playButton.onClick = [this] { track->play(); };
-            stopButton.setTooltip ("Стоп"_ru);
-            stopButton.onClick = [this] { track->stopAndRewind(); };
+            playButton.setTooltip ("Играть (если стоит пауза - продолжить; иначе этот плеер подключится ко времени общего плеера)"_ru);
+            playButton.onClick = [this]
+            {
+                if (engine.isPaused())
+                    engine.playAll();
+                else
+                    engine.playTrack (track);
+            };
+            pauseButton.setTooltip ("Пауза: все плееры и метроном замирают, Play продолжит с этого места"_ru);
+            pauseButton.onClick = [this] { engine.pauseAll(); };
+            stopButton.setTooltip ("Стоп этого плеера (метроном продолжает идти)"_ru);
+            stopButton.onClick = [this] { track->stopPlayer(); };
             addAndMakeVisible (playButton);
+            addAndMakeVisible (pauseButton);
             addAndMakeVisible (stopButton);
+
+            seekSlider.setSliderStyle (juce::Slider::LinearHorizontal);
+            seekSlider.setTextBoxStyle (juce::Slider::NoTextBox, true, 0, 0);
+            seekSlider.setRange (0.0, 1.0, 0.0);
+            seekSlider.setTooltip ("Перемотка песни: схватите ползунок и тяните"_ru);
+            seekSlider.onDragStart = [this] { seeking = true; };
+            seekSlider.onDragEnd = [this]
+            {
+                seeking = false;
+                engine.seek (seekSlider.getValue());
+            };
+            seekSlider.onValueChange = [this]
+            {
+                // while dragging, follow the thumb (limited to ~20 times per second)
+                const auto now = juce::Time::getMillisecondCounter();
+                if (seeking && now - lastSeekMs > 50)
+                {
+                    lastSeekMs = now;
+                    engine.seek (seekSlider.getValue());
+                }
+            };
+            addAndMakeVisible (seekSlider);
+            timeLabel.setJustificationType (juce::Justification::centredRight);
+            timeLabel.setFont (juce::FontOptions (14.0f, juce::Font::bold));
+            addAndMakeVisible (timeLabel);
 
             loopButton.setToggleState (track->isLooping(), juce::dontSendNotification);
             loopButton.onClick = [this] { track->setLooping (loopButton.getToggleState()); };
@@ -389,7 +423,7 @@ namespace
             addAndMakeVisible (hint);
 
             addAndMakeVisible (wave);
-            startTimerHz (10);
+            startTimerHz (20);
             timerCallback();
         }
 
@@ -400,6 +434,8 @@ namespace
             addButton.setBounds (top.removeFromLeft (170));
             top.removeFromLeft (8);
             playButton.setBounds (top.removeFromLeft (40));
+            top.removeFromLeft (4);
+            pauseButton.setBounds (top.removeFromLeft (40));
             top.removeFromLeft (4);
             stopButton.setBounds (top.removeFromLeft (40));
             top.removeFromLeft (10);
@@ -412,6 +448,10 @@ namespace
 
             r.removeFromTop (4);
             fileLabel.setBounds (r.removeFromTop (20));
+            r.removeFromTop (4);
+            auto seekRow = r.removeFromTop (24);
+            timeLabel.setBounds (seekRow.removeFromRight (120));
+            seekSlider.setBounds (seekRow);
             r.removeFromTop (4);
             hint.setBounds (r.removeFromBottom (48));
             r.removeFromBottom (4);
@@ -492,13 +532,32 @@ namespace
             const int ms = (int) std::lround (track->getClipOffset() * 1000.0);
             offsetLabel.setText ("Сдвиг: "_ru + (ms > 0 ? "+" : "") + juce::String (ms) + " мс"_ru, juce::dontSendNotification);
             playButton.setActive (track->isPlaying());
+            pauseButton.setActive (engine.isPaused());
+
+            const double total = juce::jmax (1.0, track->getClipOffset() + track->getLengthSeconds());
+            seekSlider.setRange (0.0, total, 0.0);
+            const double pos = juce::jlimit (0.0, total, engine.getClockSeconds());
+            if (! seeking)
+                seekSlider.setValue (pos, juce::dontSendNotification);
+
+            auto mmss = [] (double sec)
+            {
+                const int t = (int) std::floor (juce::jmax (0.0, sec));
+                return juce::String (t / 60) + ":" + juce::String (t % 60).paddedLeft ('0', 2);
+            };
+            timeLabel.setText (mmss (seeking ? seekSlider.getValue() : pos) + " / " + mmss (total), juce::dontSendNotification);
         }
 
         Engine& engine;
         std::shared_ptr<Track> track;
         juce::TextButton addButton, resetButton, tempoButton;
         juce::String tempoStatus;
-        IconButton playButton { IconButton::Icon::Play }, stopButton { IconButton::Icon::Stop };
+        IconButton playButton { IconButton::Icon::Play }, pauseButton { IconButton::Icon::Pause },
+                   stopButton { IconButton::Icon::Stop };
+        juce::Slider seekSlider;
+        juce::Label timeLabel;
+        bool seeking = false;
+        juce::uint32 lastSeekMs = 0;
         juce::ToggleButton loopButton { "Повтор"_ru };
         juce::ToggleButton snapButton { "Привязка к сетке (1/16 доли)"_ru };
         juce::Label fileLabel, offsetLabel, hint;

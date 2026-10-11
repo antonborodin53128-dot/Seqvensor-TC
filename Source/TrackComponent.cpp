@@ -27,12 +27,12 @@ TrackComponent::TrackComponent (Engine& engineToUse, std::shared_ptr<Track> trac
         slotArrows[i].onClick = [this, i] { if (cb.slotMenu) cb.slotMenu (track, i, &slotArrows[i]); };
         addChildComponent (slotArrows[i]);
 
-        slotPlay[i].setTooltip ("Играть этот плеер"_ru);
-        slotPlay[i].onClick = [this] { track->play(); };
+        slotPlay[i].setTooltip ("Играть этот плеер (подключится ко времени общего плеера)"_ru);
+        slotPlay[i].onClick = [this] { engine.playTrack (track); };
         addChildComponent (slotPlay[i]);
 
-        slotStop[i].setTooltip ("Остановить этот плеер"_ru);
-        slotStop[i].onClick = [this] { track->stopAndRewind(); };
+        slotStop[i].setTooltip ("Остановить этот плеер (метроном продолжает идти)"_ru);
+        slotStop[i].onClick = [this] { track->stopPlayer(); };
         addChildComponent (slotStop[i]);
     }
 

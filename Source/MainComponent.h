@@ -66,7 +66,8 @@ private:
     juce::Label keyLabel { {}, "Тон: -"_ru };
     IconButton analysisButton { IconButton::Icon::Gear };
     juce::Label cpuLabel;
-    IconButton playAllButton { IconButton::Icon::Play }, stopAllButton { IconButton::Icon::Stop };
+    IconButton playAllButton { IconButton::Icon::Play }, pauseAllButton { IconButton::Icon::Pause },
+              stopAllButton { IconButton::Icon::Stop };
 
     // tracks
     juce::Viewport viewport;
