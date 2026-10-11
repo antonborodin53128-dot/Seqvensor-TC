@@ -244,8 +244,8 @@ MainComponent::MainComponent()
     addAndMakeVisible (playerBar);
     playerBar.cb.sequenceMenu = [this] { showSequenceMenu(); };
     playerBar.cb.sequenceSave = [this] { saveEverything (true); };
-    playerBar.cb.sequenceNew = [this] { askText ("Новая секвенция"_ru, "Название:"_ru, "Секвенция"_ru,
-                                                  [this] (juce::String n) { createSequence (n, false); }); };
+    playerBar.cb.sequenceNew = [this] { askText ("Новая секвенция"_ru, "Название (например, группа):"_ru, "Новая секвенция"_ru,
+                                                  [this] (juce::String n) { createProject (n); }); };
     playerBar.cb.playlistMenu = [this] { showPlaylistMenu(); };
     playerBar.cb.playlistSave = [this] { saveEverything (true); };
     playerBar.cb.playlistDelete = [this] { showDeleteMenu(); };
@@ -821,7 +821,7 @@ void MainComponent::showMainMenu()
     menu.addItem (4, "Добавить дорожку"_ru);
     menu.addItem (5, "Поверх всех окон"_ru, true, pinned);
     menu.addItem (7, "Привязка клипов к сетке"_ru, true, timelineView.snap);
-    menu.addItem (6, "Сохранить секвенцию и плейлист"_ru);
+    menu.addItem (6, "Сохранить всё"_ru);
 
     juce::Component::SafePointer<MainComponent> safe (this);
     menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&menuButton),
@@ -1024,23 +1024,112 @@ void MainComponent::confirmDelete (const juce::String& message, std::function<vo
 
 void MainComponent::initialiseLibrary()
 {
-    // projects of the older versions: one project.xml -> the first sequence
-    if (library.sequenceNames().isEmpty() && engine.getLegacyProjectFile().existsAsFile())
-        engine.getLegacyProjectFile().copyFileTo (library.sequenceFile ("Секвенция 1"_ru));
+    auto projects = library.projectNames();
+    const bool fresh = projects.isEmpty();
+    if (fresh)
+    {
+        library.createProject ("Моя секвенция"_ru);
+        projects = library.projectNames();
+    }
 
-    juce::String seqName, plName;
-    library.loadSession (seqName, plName);
+    juce::String proj, comp, plName;
+    library.loadSession (proj, comp, plName);
+    if (! projects.contains (proj))
+    {
+        proj = projects[0];
+        comp = {};
+        plName = {};
+    }
+    library.setProject (proj);
 
+    // a project of the first versions: one project.xml -> the first composition
+    if (fresh && engine.getLegacyProjectFile().existsAsFile())
+        engine.getLegacyProjectFile().copyFileTo (library.sequenceFile ("Композиция 1"_ru));
+
+    playlist = Playlist();
     if (plName.isNotEmpty())
         library.loadPlaylist (plName, playlist);
 
-    auto names = library.sequenceNames();
-    if (seqName.isEmpty() || ! names.contains (seqName))
-        seqName = names.isEmpty() ? juce::String ("Секвенция 1"_ru) : names[0];
+    enterProject (comp);
+}
 
-    switchToSequence (seqName, playlist.items.indexOf (seqName));
-    if (names.isEmpty())
+void MainComponent::enterProject (const juce::String& preferredComposition)
+{
+    const auto comps = library.sequenceNames();
+    juce::String target = preferredComposition;
+    if (target.isEmpty() || ! comps.contains (target))
+        target = ! playlist.items.isEmpty() && comps.contains (playlist.items[0]) ? playlist.items[0]
+                 : comps.isEmpty() ? juce::String ("Композиция 1"_ru) : comps[0];
+
+    switchToSequence (target, playlist.items.indexOf (target));
+    if (comps.isEmpty())
         engine.saveActiveSequence();   // creates the file
+}
+
+void MainComponent::switchProject (const juce::String& name)
+{
+    saveEverything (false);
+    library.setProject (name);
+    playlist = Playlist();
+    playlistIndex = -1;
+
+    const auto lists = library.playlistNames();
+    if (! lists.isEmpty())
+        library.loadPlaylist (lists[0], playlist);
+
+    enterProject ({});
+}
+
+void MainComponent::createProject (const juce::String& wanted)
+{
+    const auto name = Library::uniqueName (library.projectNames(), Library::sanitize (wanted));
+    saveEverything (false);
+    library.createProject (name);
+    switchProject (name);
+}
+
+void MainComponent::renameProject()
+{
+    askText ("Переименовать секвенцию"_ru, "Новое название:"_ru, library.getProject(),
+             [this] (juce::String wanted)
+             {
+                 const auto oldName = library.getProject();
+                 auto names = library.projectNames();
+                 names.removeString (oldName);
+                 const auto newName = Library::uniqueName (names, Library::sanitize (wanted));
+                 if (newName == oldName)
+                     return;
+
+                 saveEverything (false);
+                 const auto oldDir = library.projectDir (oldName), newDir = library.projectDir (newName);
+                 if (! library.renameProject (oldName, newName))
+                     return;
+
+                 engine.relocateSequences (oldDir, newDir);
+                 refreshPlayerBar();
+                 if (auto s = engine.getActiveSequence())
+                     library.saveSession (s->name, playlist.name);
+             });
+}
+
+void MainComponent::deleteProject()
+{
+    const auto cur = library.getProject();
+    auto others = library.projectNames();
+    others.removeString (cur);
+    if (others.isEmpty())
+    {
+        say ("Последнюю секвенцию удалить нельзя"_ru);
+        return;
+    }
+
+    confirmDelete ("Удалить секвенцию «"_ru + cur + "» со всеми композициями и плейлистами? Это нельзя отменить."_ru,
+                   [this, cur, others]
+                   {
+                       switchProject (others[0]);
+                       library.deleteProject (cur);
+                       refreshPlayerBar();
+                   });
 }
 
 void MainComponent::refreshPlayerBar()
@@ -1053,7 +1142,7 @@ void MainComponent::refreshPlayerBar()
     if (playlistIndex >= 0 && playlistIndex + 1 < n)
         next = playlist.items[playlistIndex + 1];
 
-    playerBar.setInfo (current, playlist.name.isNotEmpty() ? playlist.name : juce::String ("Нет плейлиста"_ru),
+    playerBar.setInfo (library.getProject(), playlist.name.isNotEmpty() ? playlist.name : juce::String ("Нет плейлиста"_ru),
                        current, next,
                        playlistIndex >= 0 ? juce::String (playlistIndex + 1) + " / " + juce::String (n) : juce::String());
     playerBar.setCanStep (playlistIndex > 0, playlistIndex >= 0 && playlistIndex + 1 < n);
@@ -1123,37 +1212,57 @@ void MainComponent::saveEverything (bool announce)
 
 void MainComponent::showSongsMenu()
 {
-    if (playlist.items.isEmpty())
-    {
-        showPlaylistMenu();
-        return;
-    }
+    auto seq = engine.getActiveSequence();
+    const auto all = library.sequenceNames();
+
+    juce::StringArray others;
+    for (auto& n : all)
+        if (! playlist.items.contains (n))
+            others.add (n);
 
     juce::PopupMenu m;
-    for (int i = 0; i < playlist.items.size(); ++i)
-        m.addItem (100 + i, juce::String (i + 1) + ".  " + playlist.items[i], true, i == playlistIndex);
+    if (! playlist.items.isEmpty())
+    {
+        m.addSectionHeader (playlist.name);
+        for (int i = 0; i < playlist.items.size(); ++i)
+            m.addItem (100 + i, juce::String (i + 1) + ".  " + playlist.items[i], true, i == playlistIndex);
+    }
+    if (! others.isEmpty())
+    {
+        m.addSectionHeader ("Не в плейлисте"_ru);
+        for (int i = 0; i < others.size(); ++i)
+            m.addItem (500 + i, others[i], true, seq != nullptr && others[i] == seq->name);
+    }
+    m.addSeparator();
+    m.addItem (1, "Переименовать композицию..."_ru, seq != nullptr);
 
     juce::Component::SafePointer<MainComponent> safe (this);
     m.showMenuAsync (optionsBelow (playerBar.getPlateRect()),
-                     [safe] (int r)
+                     [safe, others] (int r)
                      {
-                         if (safe != nullptr && r >= 100)
+                         if (safe == nullptr || r <= 0)
+                             return;
+                         if (r == 1)
+                             safe->renameSequence();
+                         else if (r >= 500)
+                             safe->switchToSequence (others[r - 500], -1);
+                         else if (r >= 100)
                              safe->switchToSequence (safe->playlist.items[r - 100], r - 100);
                      });
 }
 
 void MainComponent::showSequenceMenu()
 {
-    const auto names = library.sequenceNames();
-    auto seq = engine.getActiveSequence();
+    const auto names = library.projectNames();
 
     juce::PopupMenu m;
     for (int i = 0; i < names.size(); ++i)
-        m.addItem (100 + i, names[i], true, seq != nullptr && names[i] == seq->name);
+        m.addItem (100 + i, names[i], true, names[i] == library.getProject());
     m.addSeparator();
     m.addItem (1, "Новая секвенция..."_ru);
     m.addItem (2, "Переименовать..."_ru);
-    m.addItem (3, "Сохранить"_ru);
+    m.addItem (3, "Удалить секвенцию..."_ru, names.size() > 1);
+    m.addItem (4, "Сохранить"_ru);
 
     juce::Component::SafePointer<MainComponent> safe (this);
     m.showMenuAsync (optionsBelow (playerBar.getSequenceRect()),
@@ -1162,13 +1271,18 @@ void MainComponent::showSequenceMenu()
                          if (safe == nullptr || r <= 0)
                              return;
                          if (r >= 100)
-                             safe->switchToSequence (names[r - 100], safe->playlist.items.indexOf (names[r - 100]));
+                         {
+                             if (names[r - 100] != safe->library.getProject())
+                                 safe->switchProject (names[r - 100]);
+                         }
                          else if (r == 1)
-                             safe->askText ("Новая секвенция"_ru, "Название:"_ru, "Секвенция"_ru,
-                                            [safe] (juce::String n) { if (safe != nullptr) safe->createSequence (n, false); });
+                             safe->askText ("Новая секвенция"_ru, "Название (например, группа):"_ru, "Новая секвенция"_ru,
+                                            [safe] (juce::String n) { if (safe != nullptr) safe->createProject (n); });
                          else if (r == 2)
-                             safe->renameSequence();
+                             safe->renameProject();
                          else if (r == 3)
+                             safe->deleteProject();
+                         else if (r == 4)
                              safe->saveEverything (true);
                      });
 }
@@ -1252,12 +1366,12 @@ void MainComponent::showAddTrackMenu()
     const auto names = library.sequenceNames();
 
     juce::PopupMenu m;
-    m.addSectionHeader ("Добавить в плейлист"_ru);
+    m.addSectionHeader ("Добавить композицию в плейлист"_ru);
     for (int i = 0; i < names.size(); ++i)
         m.addItem (100 + i, names[i]);
     if (! names.isEmpty())
         m.addSeparator();
-    m.addItem (1, "Новая пустая секвенция..."_ru);
+    m.addItem (1, "Новая композиция..."_ru);
 
     juce::Component::SafePointer<MainComponent> safe (this);
     m.showMenuAsync (juce::PopupMenu::Options().withTargetScreenArea (playerBar.localAreaToGlobal (playerBar.getAddButtonRect())),
@@ -1268,7 +1382,7 @@ void MainComponent::showAddTrackMenu()
                          if (r >= 100)
                              safe->addToPlaylist (names[r - 100]);
                          else if (r == 1)
-                             safe->askText ("Новая секвенция"_ru, "Название:"_ru, "Секвенция"_ru,
+                             safe->askText ("Новая композиция"_ru, "Название:"_ru, "Композиция"_ru,
                                             [safe] (juce::String n) { if (safe != nullptr) safe->createSequence (n, true); });
                      });
 }
@@ -1292,7 +1406,7 @@ void MainComponent::renameSequence()
     if (seq == nullptr)
         return;
 
-    askText ("Переименовать секвенцию"_ru, "Новое название:"_ru, seq->name,
+    askText ("Переименовать композицию"_ru, "Новое название:"_ru, seq->name,
              [this] (juce::String wanted)
              {
                  auto s = engine.getActiveSequence();
@@ -1353,7 +1467,7 @@ void MainComponent::showDeleteMenu()
     m.addItem (1, "Убрать «"_ru + cur + "» из плейлиста"_ru, playlistIndex >= 0);
     m.addItem (2, "Удалить плейлист «"_ru + playlist.name + "»"_ru, playlist.name.isNotEmpty());
     m.addSeparator();
-    m.addItem (3, "Удалить секвенцию «"_ru + cur + "» с диска..."_ru, seq != nullptr);
+    m.addItem (3, "Удалить композицию «"_ru + cur + "» с диска..."_ru, seq != nullptr);
 
     juce::Component::SafePointer<MainComponent> safe (this);
     m.showMenuAsync (juce::PopupMenu::Options().withTargetScreenArea (playerBar.localAreaToGlobal (playerBar.getDeleteButtonRect())),
@@ -1372,7 +1486,7 @@ void MainComponent::showDeleteMenu()
                          }
                          else if (r == 2)
                          {
-                             safe->confirmDelete ("Удалить плейлист «"_ru + safe->playlist.name + "»? Сами секвенции останутся."_ru,
+                             safe->confirmDelete ("Удалить плейлист «"_ru + safe->playlist.name + "»? Сами композиции останутся."_ru,
                                                   [safe]
                                                   {
                                                       if (safe == nullptr)
@@ -1387,7 +1501,7 @@ void MainComponent::showDeleteMenu()
                          }
                          else if (r == 3)
                          {
-                             safe->confirmDelete ("Удалить секвенцию «"_ru + cur + "» с диска? Это нельзя отменить."_ru,
+                             safe->confirmDelete ("Удалить композицию «"_ru + cur + "» с диска? Это нельзя отменить."_ru,
                                                   [safe, cur]
                                                   {
                                                       if (safe == nullptr)
@@ -1399,7 +1513,7 @@ void MainComponent::showDeleteMenu()
 
                                                       auto others = safe->library.sequenceNames();
                                                       others.removeString (cur);
-                                                      const auto next = others.isEmpty() ? juce::String ("Секвенция 1"_ru) : others[0];
+                                                      const auto next = others.isEmpty() ? juce::String ("Композиция 1"_ru) : others[0];
 
                                                       safe->switchToSequence (next, safe->playlist.items.indexOf (next));
                                                       safe->engine.forgetSequence (file);

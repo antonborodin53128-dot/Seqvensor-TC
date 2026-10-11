@@ -122,6 +122,7 @@ public:
     void dropSequences (const std::vector<juce::File>& keep);              // frees cached sequences (the active one stays)
     void renameSequenceFile (const juce::File& from, const juce::File& to);
     void forgetSequence (const juce::File& file);
+    void relocateSequences (const juce::File& oldDir, const juce::File& newDir);   // a folder was renamed
 
     std::function<void()> onTracksChanged;
 

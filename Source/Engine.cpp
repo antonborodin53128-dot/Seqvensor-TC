@@ -789,3 +789,17 @@ void Engine::renameSequenceFile (const juce::File& from, const juce::File& to)
     seq->name = to.getFileNameWithoutExtension();
     sequenceCache[to.getFullPathName()] = seq;
 }
+
+void Engine::relocateSequences (const juce::File& oldDir, const juce::File& newDir)
+{
+    const juce::ScopedLock sl (tracksLock);
+    std::map<juce::String, std::shared_ptr<Sequence>> moved;
+    for (auto& kv : sequenceCache)
+    {
+        auto seq = kv.second;
+        if (seq->file.isAChildOf (oldDir))
+            seq->file = newDir.getChildFile (seq->file.getRelativePathFrom (oldDir));
+        moved[seq->file.getFullPathName()] = seq;
+    }
+    sequenceCache.swap (moved);
+}
