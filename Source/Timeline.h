@@ -2,6 +2,8 @@
 
 #include "Engine.h"
 
+#include <set>
+
 // Shared view of the timeline: the playhead line stays at a fixed x, the clips scroll under it.
 struct TimelineView
 {
@@ -9,6 +11,7 @@ struct TimelineView
     double playheadFraction = 0.25; // where the fixed line is (0..1 of the lane width)
     double clock = 0.0;             // song position in seconds (0 = bar 1, beat 1; < 0 = count-in)
     bool snap = true;               // clips snap to 1/16 of a beat unless Alt is held
+    std::set<int> selected;         // ids of the selected clips (all lanes)
 
     // Everything is pixel-locked: the scroll position is a whole number of pixels, so grid lines and waveform
     // columns keep exactly the same pixels while they slide (no shimmer / blur).
@@ -48,6 +51,13 @@ public:
     {
         std::function<void (double newClock)> seek;
         std::function<void (float wheelDelta)> zoom;
+        // selection: pressing a clip (ctrl = toggle, shift = range), a plain click on an already selected clip
+        std::function<void (std::shared_ptr<Track>, std::shared_ptr<Clip>, const juce::ModifierKeys&)> clipPressed;
+        std::function<void (std::shared_ptr<Clip>)> clipClickedAlone;
+        std::function<void (std::shared_ptr<Clip> primary, double deltaSeconds)> dragSelected;   // move all selected clips
+        std::function<void (const juce::ModifierKeys&)> emptyPressed;                            // click on an empty place
+        std::function<void (juce::Rectangle<int> screenRect, bool finished)> marquee;             // rubber band
+        std::function<void()> focus;                                                              // keyboard focus for Delete / Ctrl+A
         std::function<void (std::shared_ptr<Track>, std::shared_ptr<Clip>, juce::Point<int> screenPos)> clipMenu;
         std::function<void (std::shared_ptr<Track>, double time, juce::Point<int> screenPos)> laneMenu;
         std::function<void (std::shared_ptr<Track>, const juce::StringArray& files, double time)> filesDropped;
@@ -70,6 +80,9 @@ public:
 
     static bool isAudioFile (const juce::String& path);
 
+    // ids of the clips of this lane that touch a rectangle given in screen coordinates
+    void collectClipsInScreenRect (juce::Rectangle<int> screenRect, std::set<int>& ids) const;
+
 private:
     std::shared_ptr<Clip> clipAt (float x) const;
     double snapTime (double t, bool allowSnap) const;
@@ -80,8 +93,8 @@ private:
     Callbacks cb;
 
     std::shared_ptr<Clip> dragClip;
-    double dragClipStart = 0.0, dragClock = 0.0;
-    bool panning = false, dropHighlight = false;
+    double dragClipStart = 0.0;
+    bool didDrag = false, pressedOnSelected = false, plainPress = false, marqueeing = false, dropHighlight = false;
 };
 
 // Fixed playhead line over the ruler and all lanes + "bar | beat" readout.
@@ -91,9 +104,12 @@ public:
     PlayheadOverlay (Engine& e, TimelineView& v) : engine (e), view (v) { setInterceptsMouseClicks (false, false); }
     void paint (juce::Graphics&) override;
 
+    void setMarquee (juce::Rectangle<int> r) { if (r != marquee) { marquee = r; repaint(); } }
+
 private:
     Engine& engine;
     TimelineView& view;
+    juce::Rectangle<int> marquee;
 };
 
 // Draws vertical grid lines (beats / bars) and the count-in shading; shared by ruler and lanes.

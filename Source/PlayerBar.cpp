@@ -1,31 +1,93 @@
 #include "PlayerBar.h"
 #include "Text.h"
 
-PlayerBar::PlayerBar()
+namespace
 {
-    seqSave.setTooltip ("Сохранить секвенцию"_ru);
-    seqSave.onClick = [this] { if (cb.sequenceSave) cb.sequenceSave(); };
-    seqNew.setTooltip ("Новая секвенция"_ru);
-    seqNew.onClick = [this] { if (cb.sequenceNew) cb.sequenceNew(); };
-    plSave.setTooltip ("Сохранить плейлист"_ru);
-    plSave.onClick = [this] { if (cb.playlistSave) cb.playlistSave(); };
-    plDelete.setTooltip ("Удалить: песню из плейлиста, плейлист или секвенцию"_ru);
-    plDelete.onClick = [this] { if (cb.playlistDelete) cb.playlistDelete(); };
-    plAdd.setTooltip ("Добавить трек в плейлист"_ru);
-    plAdd.onClick = [this] { if (cb.playlistAdd) cb.playlistAdd(); };
-    prevButton.setTooltip ("Предыдущая песня"_ru);
-    prevButton.onClick = [this] { if (cb.previous) cb.previous(); };
-    nextButton.setTooltip ("Следующая песня"_ru);
-    nextButton.onClick = [this] { if (cb.next) cb.next(); };
-
-    for (auto* b : { &seqSave, &seqNew, &plSave, &plDelete, &plAdd, &prevButton, &nextButton })
-        addAndMakeVisible (b);
+    const char* tabNames[3] = { "Seq", "Playlist", "Tracks" };
 }
 
-void PlayerBar::setInfo (const juce::String& s, const juce::String& p, const juce::String& cur,
-                         const juce::String& nxt, const juce::String& counter)
+PlayerBar::PlayerBar() : list ("songs", nullptr)
 {
-    seqName = s; plName = p; currentTitle = cur; nextTitle = nxt; counterText = counter;
+    list.setModel (this);
+    list.setRowHeight (28);
+    list.setOutlineThickness (0);
+    list.setColour (juce::ListBox::backgroundColourId, juce::Colours::transparentBlack);
+    addAndMakeVisible (list);
+
+    saveButton.setTooltip ("Сохранить всё"_ru);
+    saveButton.onClick = [this] { if (cb.save) cb.save(); };
+    trashButton.onClick = [this] { if (cb.remove) cb.remove (tab); };
+    plusButton.onClick = [this] { if (cb.add) cb.add (tab); };
+    prevButton.setTooltip ("Предыдущий трек"_ru);
+    prevButton.onClick = [this] { if (cb.previous) cb.previous(); };
+    nextButton.setTooltip ("Следующий трек"_ru);
+    nextButton.onClick = [this] { if (cb.next) cb.next(); };
+
+    for (auto* b : { &saveButton, &trashButton, &plusButton, &prevButton, &nextButton })
+        addAndMakeVisible (b);
+
+    updateTabUi();
+}
+
+void PlayerBar::showTab (Tab t, bool openList)
+{
+    const bool heightChanges = openList != open;
+    tab = t;
+    open = openList;
+    updateTabUi();
+    resized();
+    repaint();
+    if (heightChanges && cb.heightChanged)
+        cb.heightChanged();
+}
+
+void PlayerBar::updateTabUi()
+{
+    switch (tab)
+    {
+        case Tab::Seq:
+            plusButton.setTooltip ("Новая секвенция"_ru);
+            trashButton.setTooltip ("Удалить секвенцию"_ru);
+            break;
+        case Tab::Playlist:
+            plusButton.setTooltip ("Новый плейлист"_ru);
+            trashButton.setTooltip ("Удалить плейлист"_ru);
+            break;
+        case Tab::Tracks:
+            plusButton.setTooltip ("Добавить трек в плейлист"_ru);
+            trashButton.setTooltip ("Удалить трек: из плейлиста или с диска"_ru);
+            break;
+    }
+    list.setVisible (open);
+    list.updateContent();
+    list.repaint();
+}
+
+void PlayerBar::setRows (Tab t, std::vector<Row> newRows)
+{
+    rows[(int) t] = std::move (newRows);
+    if (t == tab)
+    {
+        list.updateContent();
+        list.repaint();
+
+        // keep the active item in view
+        const auto& r = rows[(int) t];
+        for (int i = 0; i < (int) r.size(); ++i)
+            if (r[(size_t) i].current)
+            {
+                list.scrollToEnsureRowIsOnscreen (i);
+                break;
+            }
+    }
+    repaint();
+}
+
+void PlayerBar::setNow (const juce::String& cur, const juce::String& nxt, const juce::String& counter)
+{
+    currentTitle = cur;
+    nextTitle = nxt;
+    counterText = counter;
     repaint();
 }
 
@@ -37,14 +99,17 @@ void PlayerBar::setCanStep (bool canPrev, bool canNext)
     nextButton.setAlpha (canNext ? 1.0f : 0.35f);
 }
 
+juce::Rectangle<int> PlayerBar::tabRect (int index) const
+{
+    return juce::Rectangle<int> (leftBlock.getX() + index * 94, leftBlock.getY(), 88, 30);
+}
+
 void PlayerBar::resized()
 {
     auto r = getLocalBounds().reduced (12, 10);
     const int gap = 10, bigW = 84;
 
-    seqRect = r.removeFromLeft (240);
-    r.removeFromLeft (gap);
-    plRect = r.removeFromLeft (252);
+    leftBlock = r.removeFromLeft (juce::jmin (520, r.getWidth() / 2));
     r.removeFromLeft (gap);
 
     prevButton.setBounds (r.removeFromLeft (bigW));
@@ -53,90 +118,131 @@ void PlayerBar::resized()
     r.removeFromRight (gap);
     plateRect = r;
 
-    // small icon buttons in the top-right corner of a plate, right to left
-    auto place = [] (juce::Rectangle<int> card, std::initializer_list<IconButton*> buttons)
-    {
-        int x = card.getRight() - 8;
-        for (auto* b : buttons)
-        {
-            b->setBounds (x - 28, card.getY() + 7, 28, 22);
-            x -= 28 + 4;
-        }
-    };
-    place (seqRect, { &seqNew, &seqSave });
-    place (plRect, { &plAdd, &plDelete, &plSave });
-}
+    // tab row: [Seq] [Playlist] [Tracks] ............ [save] [delete] [add]
+    auto tabsRow = leftBlock.withHeight (30);
+    plusButton.setBounds (tabsRow.removeFromRight (34).reduced (0, 3));
+    tabsRow.removeFromRight (4);
+    trashButton.setBounds (tabsRow.removeFromRight (34).reduced (0, 3));
+    tabsRow.removeFromRight (4);
+    saveButton.setBounds (tabsRow.removeFromRight (34).reduced (0, 3));
 
-void PlayerBar::drawCard (juce::Graphics& g, juce::Rectangle<int> r, const juce::String& caption,
-                          const juce::String& title, bool hovered)
-{
-    auto rf = r.toFloat();
-    g.setColour (hovered ? Pal::surface : Pal::surfaceLo);
-    g.fillRoundedRectangle (rf, Pal::radiusBig);
-    g.setColour (Pal::hairline);
-    g.drawRoundedRectangle (rf.reduced (0.5f), Pal::radiusBig, 1.0f);
-
-    g.setColour (Pal::textDim);
-    g.setFont (juce::FontOptions (11.0f, juce::Font::bold));
-    g.drawText (caption, r.getX() + 14, r.getY() + 9, r.getWidth() - 28, 14, juce::Justification::left);
-
-    g.setColour (Pal::text);
-    g.setFont (juce::FontOptions (18.0f, juce::Font::bold));
-    g.drawText (title, r.getX() + 14, r.getY() + 34, r.getWidth() - 28, 28, juce::Justification::left, true);
+    list.setBounds (leftBlock.withTrimmedTop (36));
 }
 
 void PlayerBar::paint (juce::Graphics& g)
 {
-    drawCard (g, seqRect, "СЕКВЕНЦИЯ"_ru, seqName, hot == 1);
-    drawCard (g, plRect, "ПЛЕЙЛИСТ"_ru, plName, hot == 2);
+    // tabs
+    for (int i = 0; i < 3; ++i)
+    {
+        auto tr = tabRect (i).toFloat();
+        const bool on = i == (int) tab;
+        g.setColour (on ? Pal::accent : Pal::surface);
+        g.fillRoundedRectangle (tr, Pal::radius);
+        if (! on)
+        {
+            g.setColour (Pal::hairline);
+            g.drawRoundedRectangle (tr.reduced (0.5f), Pal::radius, 1.0f);
+        }
+        g.setColour (on ? Pal::onAccent : Pal::text);
+        g.setFont (juce::FontOptions (14.0f, juce::Font::bold));
+        g.drawText (tabNames[i], tr.toNearestInt(), juce::Justification::centred);
+    }
 
+    // list background / collapsed summary
+    auto body = leftBlock.withTrimmedTop (36);
+    g.setColour (Pal::surfaceLo);
+    g.fillRoundedRectangle (body.toFloat(), Pal::radiusBig);
+    g.setColour (Pal::hairline);
+    g.drawRoundedRectangle (body.toFloat().reduced (0.5f), Pal::radiusBig, 1.0f);
+
+    if (! open)
+    {
+        juce::String current;
+        for (auto& row : rows[(int) tab])
+            if (row.current)
+                current = row.text;
+        g.setColour (Pal::text);
+        g.setFont (juce::FontOptions (18.0f, juce::Font::bold));
+        g.drawText (current.isEmpty() ? juce::String ("-") : current, body.reduced (14, 0), juce::Justification::centredLeft, true);
+    }
+
+    // now playing: the current track big, the next one below it smaller and dimmer
     auto r = plateRect;
-    g.setColour (hot == 3 ? Pal::surface : Pal::surfaceLo);
+    g.setColour (Pal::surfaceLo);
     g.fillRoundedRectangle (r.toFloat(), Pal::radiusBig);
     g.setColour (Pal::hairline);
     g.drawRoundedRectangle (r.toFloat().reduced (0.5f), Pal::radiusBig, 1.0f);
 
+    auto inner = r.reduced (18, 10);
     g.setColour (Pal::textDim);
     g.setFont (juce::FontOptions (11.0f, juce::Font::bold));
-    g.drawText ("СЕЙЧАС ИГРАЕТ"_ru, r.getX() + 18, r.getY() + 9, 200, 14, juce::Justification::left);
-    g.drawText (counterText, r.getRight() - 118, r.getY() + 9, 100, 14, juce::Justification::right);
+    g.drawText ("СЕЙЧАС ИГРАЕТ"_ru, inner.removeFromTop (14), juce::Justification::left);
+    g.drawText (counterText, r.getRight() - 118, r.getY() + 10, 100, 14, juce::Justification::right);
 
-    // the current song, big; the next one below it: smaller and dimmer (like music players)
+    const int blockH = 32 + 4 + 20;
+    auto mid = inner.withSizeKeepingCentre (inner.getWidth(), juce::jmin (blockH, inner.getHeight()));
     g.setColour (Pal::text);
     g.setFont (juce::FontOptions (25.0f, juce::Font::bold));
-    g.drawText (currentTitle, r.getX() + 18, r.getY() + 25, r.getWidth() - 36, 32, juce::Justification::left, true);
-
+    g.drawText (currentTitle, mid.removeFromTop (32), juce::Justification::left, true);
+    mid.removeFromTop (4);
     g.setColour (Pal::textDim.withAlpha (0.65f));
     g.setFont (juce::FontOptions (14.0f));
-    g.drawText ("Далее: "_ru + nextTitle, r.getX() + 18, r.getY() + 59, r.getWidth() - 36, 20, juce::Justification::left, true);
-}
-
-int PlayerBar::hitTest (juce::Point<int> p) const
-{
-    if (seqRect.contains (p)) return 1;
-    if (plRect.contains (p)) return 2;
-    if (plateRect.contains (p)) return 3;
-    return 0;
-}
-
-void PlayerBar::mouseMove (const juce::MouseEvent& e)
-{
-    // the cards react only above their icon rows
-    auto p = e.getPosition();
-    int h = hitTest (p);
-    if ((h == 1 && p.y < seqRect.getY() + 32 && p.x > seqRect.getRight() - 140) || (h == 2 && p.y < plRect.getY() + 32 && p.x > plRect.getRight() - 140))
-        h = 0;
-    setHot (h);
+    g.drawText ("Далее: "_ru + nextTitle, mid.removeFromTop (20), juce::Justification::left, true);
 }
 
 void PlayerBar::mouseDown (const juce::MouseEvent& e)
 {
-    auto p = e.getPosition();
-    const int h = hitTest (p);
-    if (h == 1 && cb.sequenceMenu)
-        cb.sequenceMenu();
-    else if (h == 2 && cb.playlistMenu)
-        cb.playlistMenu();
-    else if (h == 3 && cb.plateClick)
-        cb.plateClick();
+    for (int i = 0; i < 3; ++i)
+        if (tabRect (i).contains (e.getPosition()))
+        {
+            // the selected tab again = fold / unfold the list
+            showTab ((Tab) i, i == (int) tab ? ! open : true);
+            return;
+        }
+}
+
+void PlayerBar::paintListBoxItem (int row, juce::Graphics& g, int w, int h, bool selected)
+{
+    const auto& list_ = rows[(int) tab];
+    if (row < 0 || row >= (int) list_.size())
+        return;
+    const auto& item = list_[(size_t) row];
+
+    auto r = juce::Rectangle<float> (4.0f, 1.0f, (float) w - 8.0f, (float) h - 2.0f);
+    if (item.header)
+    {
+        g.setColour (Pal::textDim);
+        g.setFont (juce::FontOptions (11.0f, juce::Font::bold));
+        g.drawText (item.text.toUpperCase(), r.reduced (10.0f, 0.0f).toNearestInt(), juce::Justification::bottomLeft);
+        return;
+    }
+
+    if (item.current)
+    {
+        g.setColour (Pal::accent.withAlpha (0.2f));
+        g.fillRoundedRectangle (r, 7.0f);
+    }
+    else if (selected)
+    {
+        g.setColour (Pal::surface);
+        g.fillRoundedRectangle (r, 7.0f);
+    }
+
+    g.setColour (item.current ? Pal::accent : Pal::text);
+    g.setFont (juce::FontOptions (15.0f, item.current ? juce::Font::bold : juce::Font::plain));
+    g.drawText (item.text, r.reduced (12.0f, 0.0f).toNearestInt(), juce::Justification::centredLeft, true);
+}
+
+void PlayerBar::listBoxItemClicked (int row, const juce::MouseEvent&)
+{
+    const auto& list_ = rows[(int) tab];
+    if (row >= 0 && row < (int) list_.size() && ! list_[(size_t) row].header && cb.rowClick)
+        cb.rowClick (tab, list_[(size_t) row].id);
+}
+
+void PlayerBar::listBoxItemDoubleClicked (int row, const juce::MouseEvent&)
+{
+    const auto& list_ = rows[(int) tab];
+    if (row >= 0 && row < (int) list_.size() && ! list_[(size_t) row].header && cb.rowDouble)
+        cb.rowDouble (tab, list_[(size_t) row].id);
 }

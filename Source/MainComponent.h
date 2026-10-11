@@ -21,6 +21,7 @@ private:
 };
 
 class MainComponent : public juce::Component,
+                      public juce::FileDragAndDropTarget,
                       private juce::Timer,
                       private juce::ChangeListener
 {
@@ -30,6 +31,9 @@ public:
 
     void paint (juce::Graphics&) override;
     void resized() override;
+    bool keyPressed (const juce::KeyPress&) override;
+    bool isInterestedInFileDrag (const juce::StringArray& files) override;
+    void filesDropped (const juce::StringArray& files, int x, int y) override;
 
 private:
     // top bar / menus
@@ -66,22 +70,30 @@ private:
     void stepSong (int delta);
     void refreshPlayerBar();
     void preloadNeighbours();
-    void showSequenceMenu();
-    void showPlaylistMenu();
     void showAddTrackMenu();
     void showDeleteMenu();
+    void onPlayerRowClicked (PlayerBar::Tab tab, int id);
+    void loadPlaylistByName (const juce::String& name);
+    void createPlaylist (const juce::String& wantedName);
+    void deletePlaylistConfirm();
     void createSequence (const juce::String& wantedName, bool addToPlaylist);
     void addToPlaylist (const juce::String& sequenceName);
     void renameSequence();
     void renamePlaylist();
     void savePlaylistNow();
     void saveEverything (bool announce);
-    void showSongsMenu();
     void say (const juce::String& message);
     void askText (const juce::String& title, const juce::String& label, const juce::String& initial,
                   std::function<void (juce::String)> done);
     void confirmDelete (const juce::String& message, std::function<void()> done);
-    juce::PopupMenu::Options optionsBelow (juce::Rectangle<int> localRectInPlayerBar);
+    // clip selection
+    std::vector<std::shared_ptr<Clip>> selectedClips() const;
+    void clipPressed (const std::shared_ptr<Track>& track, const std::shared_ptr<Clip>& clip, const juce::ModifierKeys& mods);
+    void dragSelectedClips (const std::shared_ptr<Clip>& primary, double deltaSeconds);
+    void emptyPressed (const juce::ModifierKeys& mods);
+    void marqueeSelect (juce::Rectangle<int> screenRect, bool finished);
+    void selectAllClips();
+    void deleteSelectedClips();
     void addTrack();
     void tapTempo();
     void setPinned (bool pinned);
@@ -102,6 +114,10 @@ private:
     Library library { engine.getDataDirectory() };
     Playlist playlist;
     int playlistIndex = -1;
+    int anchorRow = -1;
+    std::set<int> marqueeBase;
+    std::vector<std::pair<std::shared_ptr<Clip>, double>> dragOrigins;
+    juce::StringArray projectRows, playlistRows, otherTracks;
     PlayerBar playerBar;
     juce::TooltipWindow tooltipWindow { this, 600 };
 

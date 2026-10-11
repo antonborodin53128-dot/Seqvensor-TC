@@ -120,8 +120,10 @@ void LaneComponent::filesDropped (const juce::StringArray& files, int x, int)
         if (isAudioFile (f))
             audio.add (f);
 
+    // dropped audio always lands on bar 1
+    juce::ignoreUnused (x);
     if (cb.filesDropped && ! audio.isEmpty())
-        cb.filesDropped (track, audio, snapTime (view.xToTime ((float) x, (float) getWidth()), view.snap));
+        cb.filesDropped (track, audio, 0.0);
 }
 
 std::shared_ptr<Clip> LaneComponent::clipAt (float x) const
@@ -139,10 +141,32 @@ std::shared_ptr<Clip> LaneComponent::clipAt (float x) const
     return nullptr;
 }
 
+void LaneComponent::collectClipsInScreenRect (juce::Rectangle<int> screenRect, std::set<int>& ids) const
+{
+    const auto local = screenRect.withPosition (getLocalPoint (nullptr, screenRect.getPosition()));
+    const float w = (float) getWidth();
+    if (local.getBottom() < 4 || local.getY() > getHeight() - 4)
+        return;
+
+    for (auto& c : track->getClips())
+    {
+        const float x0 = view.timeToX (c->start.load(), w);
+        const float x1 = c->loop.load() ? w : view.timeToX (c->end(), w);
+        if (x1 >= (float) local.getX() && x0 <= (float) local.getRight())
+            ids.insert (c->id);
+    }
+}
+
 void LaneComponent::mouseDown (const juce::MouseEvent& e)
 {
     dragClip = nullptr;
-    panning = false;
+    didDrag = false;
+    marqueeing = false;
+    plainPress = false;
+    pressedOnSelected = false;
+    if (cb.focus)
+        cb.focus();
+
     auto clip = clipAt ((float) e.x);
 
     if (e.mods.isPopupMenu())
@@ -159,37 +183,59 @@ void LaneComponent::mouseDown (const juce::MouseEvent& e)
 
     if (clip != nullptr)
     {
-        dragClip = clip;
-        dragClipStart = clip->start.load();
+        pressedOnSelected = view.selected.count (clip->id) > 0;
+        plainPress = ! e.mods.isShiftDown() && ! e.mods.isCtrlDown() && ! e.mods.isCommandDown();
+        if (cb.clipPressed)
+            cb.clipPressed (track, clip, e.mods);
+
+        if (plainPress)
+        {
+            dragClip = clip;
+            dragClipStart = clip->start.load();
+        }
     }
     else
     {
-        panning = true;
-        dragClock = view.clock;
+        marqueeing = true;
+        if (cb.emptyPressed)
+            cb.emptyPressed (e.mods);
     }
 }
 
 void LaneComponent::mouseDrag (const juce::MouseEvent& e)
 {
-    const double dt = (double) e.getDistanceFromDragStartX() / (double) juce::jmax (1, getWidth()) * view.span;
+    if (e.getDistanceFromDragStart() < 3 && ! didDrag)
+        return;
+    didDrag = true;
 
     if (dragClip != nullptr)
     {
-        dragClip->start.store (snapTime (dragClipStart + dt, view.snap && ! e.mods.isAltDown()));
-        engine.clipsChanged();
-        if (cb.changed)
-            cb.changed();
+        const double dt = (double) e.getDistanceFromDragStartX() / (double) juce::jmax (1, getWidth()) * view.span;
+        const double newStart = snapTime (dragClipStart + dt, view.snap && ! e.mods.isAltDown());
+        if (cb.dragSelected)
+            cb.dragSelected (dragClip, newStart - dragClipStart);
     }
-    else if (panning && cb.seek)
+    else if (marqueeing && cb.marquee)
     {
-        cb.seek (dragClock - dt);
+        auto a = e.getMouseDownScreenPosition();
+        auto b = e.getScreenPosition();
+        cb.marquee (juce::Rectangle<int>::leftTopRightBottom (juce::jmin (a.x, b.x), juce::jmin (a.y, b.y),
+                                                              juce::jmax (a.x, b.x), juce::jmax (a.y, b.y)), false);
     }
 }
 
 void LaneComponent::mouseUp (const juce::MouseEvent&)
 {
+    if (marqueeing && cb.marquee)
+        cb.marquee ({}, true);
+
+    // a plain click (no drag) on a clip of a multiple selection selects just that clip
+    if (dragClip != nullptr && ! didDrag && pressedOnSelected && plainPress && view.selected.size() > 1 && cb.clipClickedAlone)
+        cb.clipClickedAlone (dragClip);
+
     dragClip = nullptr;
-    panning = false;
+    marqueeing = false;
+    didDrag = false;
 }
 
 void LaneComponent::paint (juce::Graphics& g)
@@ -220,7 +266,8 @@ void LaneComponent::paint (juce::Graphics& g)
         auto body = juce::Rectangle<float> ((float) juce::jmax (x0, -20), 4.0f,
                                             (float) (juce::jmin (x1, bounds.getWidth() + 20) - juce::jmax (x0, -20)),
                                             (float) getHeight() - 8.0f);
-        g.setColour (Pal::clipBody);
+        const bool isSelected = view.selected.count (c->id) > 0;
+        g.setColour (isSelected ? Pal::clipBody.brighter (0.35f) : Pal::clipBody);
         g.fillRoundedRectangle (body, 8.0f);
 
         // waveform: columns are locked to absolute pixels, so scrolling only shifts them
@@ -249,8 +296,16 @@ void LaneComponent::paint (juce::Graphics& g)
             g.fillRect (cx0, 4, juce::jmin (dimEnd, cx1) - cx0, getHeight() - 8);
         }
 
-        g.setColour (Pal::clip.withAlpha (0.6f));
-        g.drawRoundedRectangle (body.reduced (0.5f), 8.0f, 1.0f);
+        if (isSelected)
+        {
+            g.setColour (Pal::accent);
+            g.drawRoundedRectangle (body.reduced (1.0f), 8.0f, 2.0f);
+        }
+        else
+        {
+            g.setColour (Pal::clip.withAlpha (0.6f));
+            g.drawRoundedRectangle (body.reduced (0.5f), 8.0f, 1.0f);
+        }
 
         g.setColour (juce::Colours::white);
         g.setFont (juce::FontOptions (12.5f, juce::Font::bold));
@@ -299,4 +354,12 @@ void PlayheadOverlay::paint (juce::Graphics& g)
     g.setColour (Pal::onAccent);
     g.setFont (juce::FontOptions (12.5f, juce::Font::bold));
     g.drawText (label, box.toNearestInt(), juce::Justification::centred);
+
+    if (! marquee.isEmpty())
+    {
+        g.setColour (Pal::accent.withAlpha (0.14f));
+        g.fillRect (marquee);
+        g.setColour (Pal::accent.withAlpha (0.9f));
+        g.drawRect (marquee, 1);
+    }
 }

@@ -330,6 +330,17 @@ void Track::processChunk (const float* const* inputs, int numInputs,
     juce::FloatVectorOperations::add (l, clickBuf.getReadPointer (0), n);
     juce::FloatVectorOperations::add (r, clickBuf.getReadPointer (1), n);
 
+    // the meter shows the level of the audio itself (after the plugins, before the fader and mute),
+    // so moving the fader does not change what the meter reads
+    float pl = 0.0f, pr = 0.0f;
+    for (int i = 0; i < n; ++i)
+    {
+        pl = juce::jmax (pl, std::abs (l[i]));
+        pr = juce::jmax (pr, std::abs (r[i]));
+    }
+    peakL.store (juce::jmax (pl, peakL.load()));
+    peakR.store (juce::jmax (pr, peakR.load()));
+
     // fader; the signal for other tracks (bus) is taken after the fader, before mute
     const float g = gainLinear.load();
     for (int i = 0; i < n; ++i)
@@ -345,15 +356,6 @@ void Track::processChunk (const float* const* inputs, int numInputs,
         juce::FloatVectorOperations::clear (l, n);
         juce::FloatVectorOperations::clear (r, n);
     }
-
-    float pl = 0.0f, pr = 0.0f;
-    for (int i = 0; i < n; ++i)
-    {
-        pl = juce::jmax (pl, std::abs (l[i]));
-        pr = juce::jmax (pr, std::abs (r[i]));
-    }
-    peakL.store (juce::jmax (pl, peakL.load()));
-    peakR.store (juce::jmax (pr, peakR.load()));
 
     const int pair = outputPair.load();
     if (pair < 0)

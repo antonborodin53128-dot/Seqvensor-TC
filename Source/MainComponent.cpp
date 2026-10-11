@@ -242,17 +242,34 @@ MainComponent::MainComponent()
     setSize (1280, 720);
 
     addAndMakeVisible (playerBar);
-    playerBar.cb.sequenceMenu = [this] { showSequenceMenu(); };
-    playerBar.cb.sequenceSave = [this] { saveEverything (true); };
-    playerBar.cb.sequenceNew = [this] { askText ("Новая секвенция"_ru, "Название (например, группа):"_ru, "Новая секвенция"_ru,
-                                                  [this] (juce::String n) { createProject (n); }); };
-    playerBar.cb.playlistMenu = [this] { showPlaylistMenu(); };
-    playerBar.cb.playlistSave = [this] { saveEverything (true); };
-    playerBar.cb.playlistDelete = [this] { showDeleteMenu(); };
-    playerBar.cb.playlistAdd = [this] { showAddTrackMenu(); };
-    playerBar.cb.plateClick = [this] { showSongsMenu(); };
+    playerBar.cb.heightChanged = [this] { resized(); repaint(); };
+    playerBar.cb.save = [this] { saveEverything (true); };
     playerBar.cb.previous = [this] { stepSong (-1); };
     playerBar.cb.next = [this] { stepSong (1); };
+    playerBar.cb.rowClick = [this] (PlayerBar::Tab tab, int id) { onPlayerRowClicked (tab, id); };
+    playerBar.cb.rowDouble = [this] (PlayerBar::Tab tab, int id)
+    {
+        onPlayerRowClicked (tab, id);
+        if (tab == PlayerBar::Tab::Seq) renameProject();
+        else if (tab == PlayerBar::Tab::Playlist) renamePlaylist();
+        else renameSequence();
+    };
+    playerBar.cb.add = [this] (PlayerBar::Tab tab)
+    {
+        if (tab == PlayerBar::Tab::Seq)
+            askText ("Новая секвенция"_ru, "Название (например, группа):"_ru, "Новая секвенция"_ru,
+                     [this] (juce::String n) { createProject (n); });
+        else if (tab == PlayerBar::Tab::Playlist)
+            askText ("Новый плейлист"_ru, "Название:"_ru, "Плейлист"_ru, [this] (juce::String n) { createPlaylist (n); });
+        else
+            showAddTrackMenu();
+    };
+    playerBar.cb.remove = [this] (PlayerBar::Tab tab)
+    {
+        if (tab == PlayerBar::Tab::Seq) deleteProject();
+        else if (tab == PlayerBar::Tab::Playlist) deletePlaylistConfirm();
+        else showDeleteMenu();
+    };
 
     initialiseLibrary();
     bpmSlider.setValue (engine.getBpm(), juce::dontSendNotification);
@@ -275,7 +292,7 @@ MainComponent::~MainComponent()
 void MainComponent::paint (juce::Graphics& g)
 {
     g.fillAll (Pal::window);
-    const int topH = 62 + PlayerBar::barHeight;
+    const int topH = 62 + playerBar.getPreferredHeight();
     g.setColour (Pal::surfaceLo);
     g.fillRect (0, 0, getWidth(), 62);
     g.setColour (Pal::hairline);
@@ -308,7 +325,7 @@ void MainComponent::resized()
     group.removeFromLeft (6);
     stopAllButton.setBounds (group.removeFromLeft (64));
 
-    playerBar.setBounds (area.removeFromTop (PlayerBar::barHeight));
+    playerBar.setBounds (area.removeFromTop (playerBar.getPreferredHeight()));
 
     area.removeFromTop (28);   // ruler row (placed in layoutTimelineParts)
     viewport.setBounds (area.reduced (6, 0).withTrimmedBottom (6));
@@ -382,6 +399,12 @@ void MainComponent::rebuildTracks()
     LaneComponent::Callbacks lane;
     lane.seek = [this] (double t) { seekTimeline (t); };
     lane.zoom = [this] (float d) { zoomTimeline (d); };
+    lane.clipPressed = [this] (std::shared_ptr<Track> t, std::shared_ptr<Clip> c, const juce::ModifierKeys& m) { clipPressed (t, c, m); };
+    lane.clipClickedAlone = [this] (std::shared_ptr<Clip> c) { timelineView.selected = { c->id }; repaintTimeline(); };
+    lane.dragSelected = [this] (std::shared_ptr<Clip> c, double delta) { dragSelectedClips (c, delta); };
+    lane.emptyPressed = [this] (const juce::ModifierKeys& m) { emptyPressed (m); };
+    lane.marquee = [this] (juce::Rectangle<int> r, bool finished) { marqueeSelect (r, finished); };
+    lane.focus = [this] { grabKeyboardFocus(); };
     lane.clipMenu = [this] (std::shared_ptr<Track> t, std::shared_ptr<Clip> c, juce::Point<int> p) { showClipMenu (t, c, p); };
     lane.laneMenu = [this] (std::shared_ptr<Track> t, double time, juce::Point<int> p) { showLaneMenu (t, time, p); };
     lane.filesDropped = [this] (std::shared_ptr<Track> t, const juce::StringArray& f, double time) { addAudioFiles (t, f, time); };
@@ -461,8 +484,12 @@ void MainComponent::chooseAudioFor (const std::shared_ptr<Track>& track, double 
 void MainComponent::addAudioFiles (const std::shared_ptr<Track>& track, const juce::StringArray& files, double time)
 {
     juce::Component::SafePointer<MainComponent> safe (this);
-    for (auto& path : files)
-        engine.addClipFromFile (track, juce::File (path), time,
+    auto sorted = files;
+    sorted.sort (true);
+
+    auto place = [this, safe, time] (const std::shared_ptr<Track>& target, const juce::String& path)
+    {
+        engine.addClipFromFile (target, juce::File (path), time,
                                 [safe, path] (std::shared_ptr<Clip> clip, const juce::String& error)
                                 {
                                     if (safe == nullptr)
@@ -473,8 +500,44 @@ void MainComponent::addAudioFiles (const std::shared_ptr<Track>& track, const ju
                                     safe->refreshStrips();
                                     safe->repaintTimeline();
                                 });
+    };
+
+    for (int i = 0; i < sorted.size(); ++i)
+    {
+        const juce::File f (sorted[i]);
+        std::shared_ptr<Track> target = track;
+
+        if (i > 0 || target == nullptr)
+        {
+            target = engine.addTrack (f.getFileNameWithoutExtension());   // one new track per extra file
+            target->inputL = -1;
+            target->inputR = -1;
+        }
+        else if (target->name.startsWith ("Дорожка"_ru) && target->getClips().empty())
+            target->name = f.getFileNameWithoutExtension();
+
+        place (target, sorted[i]);
+    }
     refreshStrips();
     repaintTimeline();
+}
+
+bool MainComponent::isInterestedInFileDrag (const juce::StringArray& files)
+{
+    for (auto& f : files)
+        if (LaneComponent::isAudioFile (f))
+            return true;
+    return false;
+}
+
+void MainComponent::filesDropped (const juce::StringArray& files, int, int)
+{
+    juce::StringArray audio;
+    for (auto& f : files)
+        if (LaneComponent::isAudioFile (f))
+            audio.add (f);
+    if (! audio.isEmpty())
+        addAudioFiles (nullptr, audio, 0.0);   // dropped outside any lane: a new track per file, all on bar 1
 }
 
 void MainComponent::showLaneMenu (const std::shared_ptr<Track>& track, double time, juce::Point<int> screenPos)
@@ -499,23 +562,32 @@ void MainComponent::showLaneMenu (const std::shared_ptr<Track>& track, double ti
 
 void MainComponent::showClipMenu (const std::shared_ptr<Track>& track, const std::shared_ptr<Clip>& clip, juce::Point<int> screenPos)
 {
+    if (timelineView.selected.count (clip->id) == 0)
+        timelineView.selected = { clip->id };   // right click on a clip outside the selection selects just it
+    repaintTimeline();
+
+    const auto group = selectedClips();
+    const bool many = group.size() > 1;
     const int total = (int) clip->data->lengthSeconds();
+
     juce::PopupMenu m;
-    m.addItem (100, clip->data->name + "   ("_ru + juce::String (total / 60) + ":" + juce::String (total % 60).paddedLeft ('0', 2) + ")", false);
+    m.addItem (100, many ? "Выбрано клипов: "_ru + juce::String ((int) group.size())
+                         : clip->data->name + "   ("_ru + juce::String (total / 60) + ":" + juce::String (total % 60).paddedLeft ('0', 2) + ")",
+               false);
     m.addSeparator();
-    m.addItem (1, "Определить темп (только показать)"_ru);
+    m.addItem (1, "Определить темп (только показать)"_ru, ! many);
     m.addItem (2, "Поставить на такт 1"_ru);
     m.addItem (3, "Поставить на такт раньше (в отсчёт)"_ru);
     m.addSeparator();
     m.addItem (4, "Повтор"_ru, true, clip->loop.load());
     m.addItem (5, "Привязка к сетке"_ru, true, timelineView.snap);
-    m.addItem (6, "Заменить файл..."_ru);
+    m.addItem (6, "Заменить файл..."_ru, ! many);
     m.addSeparator();
-    m.addItem (7, "Удалить"_ru);
+    m.addItem (7, many ? "Удалить выбранные"_ru : "Удалить"_ru);
 
     juce::Component::SafePointer<MainComponent> safe (this);
     m.showMenuAsync (juce::PopupMenu::Options().withTargetScreenArea (juce::Rectangle<int> (screenPos.x, screenPos.y, 1, 1)),
-                     [safe, track, clip] (int r)
+                     [safe, track, clip, group] (int r)
                      {
                          if (safe == nullptr || r <= 0)
                              return;
@@ -524,9 +596,15 @@ void MainComponent::showClipMenu (const std::shared_ptr<Track>& track, const std
                          switch (r)
                          {
                              case 1: safe->detectClipTempo (clip); break;
-                             case 2: clip->start.store (0.0); eng.clipsChanged(); break;
-                             case 3: clip->start.store (-4.0 * eng.getBeatSeconds()); eng.clipsChanged(); break;
-                             case 4: clip->loop = ! clip->loop.load(); eng.clipsChanged(); break;
+                             case 2: for (auto& c : group) c->start.store (0.0); eng.clipsChanged(); break;
+                             case 3: for (auto& c : group) c->start.store (-4.0 * eng.getBeatSeconds()); eng.clipsChanged(); break;
+                             case 4:
+                             {
+                                 const bool newValue = ! clip->loop.load();
+                                 for (auto& c : group) c->loop = newValue;
+                                 eng.clipsChanged();
+                                 break;
+                             }
                              case 5: safe->timelineView.snap = ! safe->timelineView.snap; break;
                              case 6:
                              {
@@ -546,12 +624,13 @@ void MainComponent::showClipMenu (const std::shared_ptr<Track>& track, const std
                                                                              return;
                                                                          fresh->loop = loop;
                                                                          safe->engine.removeClip (track, clip->id);
+                                                                         safe->timelineView.selected.clear();
                                                                          safe->repaintTimeline();
                                                                      });
                                                              });
                                  break;
                              }
-                             case 7: eng.removeClip (track, clip->id); break;
+                             case 7: safe->deleteSelectedClips(); break;
                              default: break;
                          }
                          safe->repaintTimeline();
@@ -986,12 +1065,6 @@ void MainComponent::say (const juce::String& message)
     statusLabel.setText (message, juce::dontSendNotification);
 }
 
-juce::PopupMenu::Options MainComponent::optionsBelow (juce::Rectangle<int> r)
-{
-    return juce::PopupMenu::Options().withTargetScreenArea (playerBar.localAreaToGlobal (r))
-                                     .withMinimumWidth (r.getWidth())
-                                     .withPreferredPopupDirection (juce::PopupMenu::Options::PopupDirection::downwards);
-}
 
 void MainComponent::askText (const juce::String& title, const juce::String& label, const juce::String& initial,
                              std::function<void (juce::String)> done)
@@ -1045,7 +1118,7 @@ void MainComponent::initialiseLibrary()
 
     // a project of the first versions: one project.xml -> the first composition
     if (fresh && engine.getLegacyProjectFile().existsAsFile())
-        engine.getLegacyProjectFile().copyFileTo (library.sequenceFile ("Композиция 1"_ru));
+        engine.getLegacyProjectFile().copyFileTo (library.sequenceFile ("Трек 1"_ru));
 
     playlist = Playlist();
     if (plName.isNotEmpty())
@@ -1060,7 +1133,7 @@ void MainComponent::enterProject (const juce::String& preferredComposition)
     juce::String target = preferredComposition;
     if (target.isEmpty() || ! comps.contains (target))
         target = ! playlist.items.isEmpty() && comps.contains (playlist.items[0]) ? playlist.items[0]
-                 : comps.isEmpty() ? juce::String ("Композиция 1"_ru) : comps[0];
+                 : comps.isEmpty() ? juce::String ("Трек 1"_ru) : comps[0];
 
     switchToSequence (target, playlist.items.indexOf (target));
     if (comps.isEmpty())
@@ -1143,10 +1216,112 @@ void MainComponent::refreshPlayerBar()
     if (playlistIndex >= 0 && playlistIndex + 1 < n)
         next = playlist.items[playlistIndex + 1];
 
-    playerBar.setInfo (library.getProject(), playlist.name.isNotEmpty() ? playlist.name : juce::String ("Нет плейлиста"_ru),
-                       current, next,
-                       playlistIndex >= 0 ? juce::String (playlistIndex + 1) + " / " + juce::String (n) : juce::String());
+    playerBar.setNow (current, next,
+                      playlistIndex >= 0 ? juce::String (playlistIndex + 1) + " / " + juce::String (n) : juce::String());
     playerBar.setCanStep (playlistIndex > 0, playlistIndex >= 0 && playlistIndex + 1 < n);
+
+    std::vector<PlayerBar::Row> seqRows, listRows, trackRows;
+
+    // Seq tab: all sequences
+    projectRows = library.projectNames();
+    for (int i = 0; i < projectRows.size(); ++i)
+        seqRows.push_back ({ projectRows[i], false, projectRows[i] == library.getProject(), i });
+
+    // Playlist tab: the playlists of the current sequence
+    playlistRows = library.playlistNames();
+    for (int i = 0; i < playlistRows.size(); ++i)
+        listRows.push_back ({ playlistRows[i], false, playlistRows[i] == playlist.name, i });
+
+    // Tracks tab: the tracks of the current playlist, then the tracks that are not in it
+    for (int i = 0; i < n; ++i)
+        trackRows.push_back ({ juce::String (i + 1) + ".  " + playlist.items[i], false, i == playlistIndex, i });
+
+    otherTracks.clear();
+    for (auto& name : library.sequenceNames())
+        if (! playlist.items.contains (name))
+            otherTracks.add (name);
+    if (! otherTracks.isEmpty())
+    {
+        trackRows.push_back ({ "Не в плейлисте"_ru, true, false, -1 });
+        for (int i = 0; i < otherTracks.size(); ++i)
+            trackRows.push_back ({ otherTracks[i], false, playlistIndex < 0 && otherTracks[i] == current, 1000 + i });
+    }
+
+    playerBar.setRows (PlayerBar::Tab::Seq, std::move (seqRows));
+    playerBar.setRows (PlayerBar::Tab::Playlist, std::move (listRows));
+    playerBar.setRows (PlayerBar::Tab::Tracks, std::move (trackRows));
+}
+
+void MainComponent::onPlayerRowClicked (PlayerBar::Tab tab, int id)
+{
+    if (tab == PlayerBar::Tab::Seq)
+    {
+        if (id >= 0 && id < projectRows.size() && projectRows[id] != library.getProject())
+            switchProject (projectRows[id]);
+    }
+    else if (tab == PlayerBar::Tab::Playlist)
+    {
+        if (id >= 0 && id < playlistRows.size() && playlistRows[id] != playlist.name)
+            loadPlaylistByName (playlistRows[id]);
+    }
+    else
+    {
+        if (id >= 1000 && id - 1000 < otherTracks.size())
+            switchToSequence (otherTracks[id - 1000], -1);
+        else if (id >= 0 && id < playlist.items.size())
+            switchToSequence (playlist.items[id], id);
+    }
+}
+
+void MainComponent::loadPlaylistByName (const juce::String& name)
+{
+    savePlaylistNow();
+    Playlist p;
+    if (! library.loadPlaylist (name, p))
+        return;
+    playlist = p;
+
+    auto seq = engine.getActiveSequence();
+    const int at = seq != nullptr ? p.items.indexOf (seq->name) : -1;
+    if (at < 0 && ! p.items.isEmpty())
+        switchToSequence (p.items[0], 0);
+    else
+    {
+        playlistIndex = at;
+        preloadNeighbours();
+        refreshPlayerBar();
+        library.saveSession (seq != nullptr ? seq->name : juce::String(), p.name);
+    }
+    playerBar.showTab (PlayerBar::Tab::Tracks, true);
+}
+
+void MainComponent::createPlaylist (const juce::String& wanted)
+{
+    savePlaylistNow();
+    playlist = Playlist();
+    playlist.name = Library::uniqueName (library.playlistNames(), Library::sanitize (wanted));
+    playlistIndex = -1;
+    savePlaylistNow();
+    refreshPlayerBar();
+    if (auto s = engine.getActiveSequence())
+        library.saveSession (s->name, playlist.name);
+}
+
+void MainComponent::deletePlaylistConfirm()
+{
+    if (playlist.name.isEmpty())
+        return;
+
+    confirmDelete ("Удалить плейлист «"_ru + playlist.name + "»? Сами треки останутся."_ru,
+                   [this]
+                   {
+                       library.deletePlaylist (playlist.name);
+                       playlist = Playlist();
+                       playlistIndex = -1;
+                       refreshPlayerBar();
+                       if (auto s = engine.getActiveSequence())
+                           library.saveSession (s->name, {});
+                   });
 }
 
 void MainComponent::preloadNeighbours()
@@ -1211,141 +1386,8 @@ void MainComponent::saveEverything (bool announce)
         say ("Сохранено"_ru);
 }
 
-void MainComponent::showSongsMenu()
-{
-    auto seq = engine.getActiveSequence();
-    const auto all = library.sequenceNames();
 
-    juce::StringArray others;
-    for (auto& n : all)
-        if (! playlist.items.contains (n))
-            others.add (n);
 
-    juce::PopupMenu m;
-    if (! playlist.items.isEmpty())
-    {
-        m.addSectionHeader (playlist.name);
-        for (int i = 0; i < playlist.items.size(); ++i)
-            m.addItem (100 + i, juce::String (i + 1) + ".  " + playlist.items[i], true, i == playlistIndex);
-    }
-    if (! others.isEmpty())
-    {
-        m.addSectionHeader ("Не в плейлисте"_ru);
-        for (int i = 0; i < others.size(); ++i)
-            m.addItem (500 + i, others[i], true, seq != nullptr && others[i] == seq->name);
-    }
-    m.addSeparator();
-    m.addItem (1, "Переименовать композицию..."_ru, seq != nullptr);
-
-    juce::Component::SafePointer<MainComponent> safe (this);
-    m.showMenuAsync (optionsBelow (playerBar.getPlateRect()),
-                     [safe, others] (int r)
-                     {
-                         if (safe == nullptr || r <= 0)
-                             return;
-                         if (r == 1)
-                             safe->renameSequence();
-                         else if (r >= 500)
-                             safe->switchToSequence (others[r - 500], -1);
-                         else if (r >= 100)
-                             safe->switchToSequence (safe->playlist.items[r - 100], r - 100);
-                     });
-}
-
-void MainComponent::showSequenceMenu()
-{
-    const auto names = library.projectNames();
-
-    juce::PopupMenu m;
-    for (int i = 0; i < names.size(); ++i)
-        m.addItem (100 + i, names[i], true, names[i] == library.getProject());
-    m.addSeparator();
-    m.addItem (1, "Новая секвенция..."_ru);
-    m.addItem (2, "Переименовать..."_ru);
-    m.addItem (3, "Удалить секвенцию..."_ru, names.size() > 1);
-    m.addItem (4, "Сохранить"_ru);
-
-    juce::Component::SafePointer<MainComponent> safe (this);
-    m.showMenuAsync (optionsBelow (playerBar.getSequenceRect()),
-                     [safe, names] (int r)
-                     {
-                         if (safe == nullptr || r <= 0)
-                             return;
-                         if (r >= 100)
-                         {
-                             if (names[r - 100] != safe->library.getProject())
-                                 safe->switchProject (names[r - 100]);
-                         }
-                         else if (r == 1)
-                             safe->askText ("Новая секвенция"_ru, "Название (например, группа):"_ru, "Новая секвенция"_ru,
-                                            [safe] (juce::String n) { if (safe != nullptr) safe->createProject (n); });
-                         else if (r == 2)
-                             safe->renameProject();
-                         else if (r == 3)
-                             safe->deleteProject();
-                         else if (r == 4)
-                             safe->saveEverything (true);
-                     });
-}
-
-void MainComponent::showPlaylistMenu()
-{
-    const auto names = library.playlistNames();
-
-    juce::PopupMenu m;
-    for (int i = 0; i < names.size(); ++i)
-        m.addItem (100 + i, names[i], true, names[i] == playlist.name);
-    if (! names.isEmpty())
-        m.addSeparator();
-    m.addItem (1, "Новый плейлист..."_ru);
-    m.addItem (2, "Переименовать..."_ru, playlist.name.isNotEmpty());
-
-    juce::Component::SafePointer<MainComponent> safe (this);
-    m.showMenuAsync (optionsBelow (playerBar.getPlaylistRect()),
-                     [safe, names] (int r)
-                     {
-                         if (safe == nullptr || r <= 0)
-                             return;
-
-                         if (r >= 100)
-                         {
-                             safe->savePlaylistNow();
-                             Playlist p;
-                             if (! safe->library.loadPlaylist (names[r - 100], p))
-                                 return;
-                             safe->playlist = p;
-
-                             auto seq = safe->engine.getActiveSequence();
-                             const int at = seq != nullptr ? p.items.indexOf (seq->name) : -1;
-                             if (at < 0 && ! p.items.isEmpty())
-                                 safe->switchToSequence (p.items[0], 0);
-                             else
-                             {
-                                 safe->playlistIndex = at;
-                                 safe->preloadNeighbours();
-                                 safe->refreshPlayerBar();
-                                 safe->library.saveSession (seq != nullptr ? seq->name : juce::String(), p.name);
-                             }
-                         }
-                         else if (r == 1)
-                             safe->askText ("Новый плейлист"_ru, "Название:"_ru, "Плейлист"_ru,
-                                            [safe] (juce::String n)
-                                            {
-                                                if (safe == nullptr)
-                                                    return;
-                                                safe->savePlaylistNow();
-                                                safe->playlist = Playlist();
-                                                safe->playlist.name = Library::uniqueName (safe->library.playlistNames(), Library::sanitize (n));
-                                                safe->playlistIndex = -1;
-                                                safe->savePlaylistNow();
-                                                safe->refreshPlayerBar();
-                                                if (auto s = safe->engine.getActiveSequence())
-                                                    safe->library.saveSession (s->name, safe->playlist.name);
-                                            });
-                         else if (r == 2)
-                             safe->renamePlaylist();
-                     });
-}
 
 void MainComponent::addToPlaylist (const juce::String& sequenceName)
 {
@@ -1367,15 +1409,15 @@ void MainComponent::showAddTrackMenu()
     const auto names = library.sequenceNames();
 
     juce::PopupMenu m;
-    m.addSectionHeader ("Добавить композицию в плейлист"_ru);
+    m.addSectionHeader ("Добавить трек в плейлист"_ru);
     for (int i = 0; i < names.size(); ++i)
         m.addItem (100 + i, names[i]);
     if (! names.isEmpty())
         m.addSeparator();
-    m.addItem (1, "Новая композиция..."_ru);
+    m.addItem (1, "Новый трек..."_ru);
 
     juce::Component::SafePointer<MainComponent> safe (this);
-    m.showMenuAsync (juce::PopupMenu::Options().withTargetScreenArea (playerBar.localAreaToGlobal (playerBar.getAddButtonRect())),
+    m.showMenuAsync (juce::PopupMenu::Options().withTargetScreenArea (playerBar.getAddButtonScreenBounds()),
                      [safe, names] (int r)
                      {
                          if (safe == nullptr || r <= 0)
@@ -1383,7 +1425,7 @@ void MainComponent::showAddTrackMenu()
                          if (r >= 100)
                              safe->addToPlaylist (names[r - 100]);
                          else if (r == 1)
-                             safe->askText ("Новая композиция"_ru, "Название:"_ru, "Композиция"_ru,
+                             safe->askText ("Новый трек"_ru, "Название:"_ru, "Трек"_ru,
                                             [safe] (juce::String n) { if (safe != nullptr) safe->createSequence (n, true); });
                      });
 }
@@ -1407,7 +1449,7 @@ void MainComponent::renameSequence()
     if (seq == nullptr)
         return;
 
-    askText ("Переименовать композицию"_ru, "Новое название:"_ru, seq->name,
+    askText ("Переименовать трек"_ru, "Новое название:"_ru, seq->name,
              [this] (juce::String wanted)
              {
                  auto s = engine.getActiveSequence();
@@ -1468,10 +1510,10 @@ void MainComponent::showDeleteMenu()
     m.addItem (1, "Убрать «"_ru + cur + "» из плейлиста"_ru, playlistIndex >= 0);
     m.addItem (2, "Удалить плейлист «"_ru + playlist.name + "»"_ru, playlist.name.isNotEmpty());
     m.addSeparator();
-    m.addItem (3, "Удалить композицию «"_ru + cur + "» с диска..."_ru, seq != nullptr);
+    m.addItem (3, "Удалить трек «"_ru + cur + "» с диска..."_ru, seq != nullptr);
 
     juce::Component::SafePointer<MainComponent> safe (this);
-    m.showMenuAsync (juce::PopupMenu::Options().withTargetScreenArea (playerBar.localAreaToGlobal (playerBar.getDeleteButtonRect())),
+    m.showMenuAsync (juce::PopupMenu::Options().withTargetScreenArea (playerBar.getDeleteButtonScreenBounds()),
                      [safe, cur] (int r)
                      {
                          if (safe == nullptr || r <= 0)
@@ -1487,7 +1529,7 @@ void MainComponent::showDeleteMenu()
                          }
                          else if (r == 2)
                          {
-                             safe->confirmDelete ("Удалить плейлист «"_ru + safe->playlist.name + "»? Сами композиции останутся."_ru,
+                             safe->confirmDelete ("Удалить плейлист «"_ru + safe->playlist.name + "»? Сами треки останутся."_ru,
                                                   [safe]
                                                   {
                                                       if (safe == nullptr)
@@ -1502,7 +1544,7 @@ void MainComponent::showDeleteMenu()
                          }
                          else if (r == 3)
                          {
-                             safe->confirmDelete ("Удалить композицию «"_ru + cur + "» с диска? Это нельзя отменить."_ru,
+                             safe->confirmDelete ("Удалить трек «"_ru + cur + "» с диска? Это нельзя отменить."_ru,
                                                   [safe, cur]
                                                   {
                                                       if (safe == nullptr)
@@ -1514,7 +1556,7 @@ void MainComponent::showDeleteMenu()
 
                                                       auto others = safe->library.sequenceNames();
                                                       others.removeString (cur);
-                                                      const auto next = others.isEmpty() ? juce::String ("Композиция 1"_ru) : others[0];
+                                                      const auto next = others.isEmpty() ? juce::String ("Трек 1"_ru) : others[0];
 
                                                       safe->switchToSequence (next, safe->playlist.items.indexOf (next));
                                                       safe->engine.forgetSequence (file);
@@ -1525,4 +1567,154 @@ void MainComponent::showDeleteMenu()
                                                   });
                          }
                      });
+}
+
+
+// ---------------------------------------------------------------- clip selection
+
+std::vector<std::shared_ptr<Clip>> MainComponent::selectedClips() const
+{
+    std::vector<std::shared_ptr<Clip>> result;
+    for (auto& t : engine.getTracks())
+        for (auto& c : t->getClips())
+            if (timelineView.selected.count (c->id) > 0)
+                result.push_back (c);
+    return result;
+}
+
+void MainComponent::clipPressed (const std::shared_ptr<Track>& track, const std::shared_ptr<Clip>& clip, const juce::ModifierKeys& mods)
+{
+    auto tracks = engine.getTracks();
+    int index = 0;
+    for (int i = 0; i < (int) tracks.size(); ++i)
+        if (tracks[(size_t) i] == track)
+            index = i;
+
+    if (mods.isCtrlDown() || mods.isCommandDown())
+    {
+        if (timelineView.selected.erase (clip->id) == 0)
+            timelineView.selected.insert (clip->id);
+        anchorRow = index;
+    }
+    else if (mods.isShiftDown() && anchorRow >= 0)
+    {
+        // everything on the rows between the anchor and this one
+        const int a = juce::jmin (anchorRow, index), b = juce::jmax (anchorRow, index);
+        for (int i = a; i <= b && i < (int) tracks.size(); ++i)
+            for (auto& c : tracks[(size_t) i]->getClips())
+                timelineView.selected.insert (c->id);
+    }
+    else
+    {
+        if (timelineView.selected.count (clip->id) == 0)
+            timelineView.selected = { clip->id };   // clicking a selected clip keeps the group, so it can be moved together
+        anchorRow = index;
+    }
+
+    // remember where everything started for the drag
+    dragOrigins.clear();
+    for (auto& c : selectedClips())
+        dragOrigins.push_back ({ c, c->start.load() });
+
+    repaintTimeline();
+}
+
+void MainComponent::dragSelectedClips (const std::shared_ptr<Clip>& primary, double delta)
+{
+    if (timelineView.selected.count (primary->id) == 0 || dragOrigins.empty())
+        return;
+
+    // the group may not go earlier than the count-in bar
+    double minStart = 1.0e18;
+    for (auto& o : dragOrigins)
+        minStart = juce::jmin (minStart, o.second);
+    delta = juce::jmax (delta, -4.0 * engine.getBeatSeconds() - minStart);
+
+    for (auto& o : dragOrigins)
+        o.first->start.store (o.second + delta);
+
+    engine.clipsChanged();
+    repaintTimeline();
+}
+
+void MainComponent::emptyPressed (const juce::ModifierKeys& mods)
+{
+    marqueeBase.clear();
+    if (mods.isCtrlDown() || mods.isCommandDown() || mods.isShiftDown())
+        marqueeBase = timelineView.selected;   // add to the current selection
+    else
+        timelineView.selected.clear();
+    repaintTimeline();
+}
+
+void MainComponent::marqueeSelect (juce::Rectangle<int> screenRect, bool finished)
+{
+    if (finished)
+    {
+        playhead.setMarquee ({});
+        return;
+    }
+
+    std::set<int> ids = marqueeBase;
+    for (auto* t : trackComponents)
+        t->getLane().collectClipsInScreenRect (screenRect, ids);
+
+    timelineView.selected = ids;
+    playhead.setMarquee (screenRect.withPosition (playhead.getLocalPoint (nullptr, screenRect.getPosition())));
+    repaintTimeline();
+}
+
+void MainComponent::selectAllClips()
+{
+    timelineView.selected.clear();
+    for (auto& t : engine.getTracks())
+        for (auto& c : t->getClips())
+            timelineView.selected.insert (c->id);
+    repaintTimeline();
+}
+
+void MainComponent::deleteSelectedClips()
+{
+    if (timelineView.selected.empty())
+        return;
+
+    for (auto& t : engine.getTracks())
+    {
+        std::vector<int> ids;
+        for (auto& c : t->getClips())
+            if (timelineView.selected.count (c->id) > 0)
+                ids.push_back (c->id);
+        for (int id : ids)
+            engine.removeClip (t, id);
+    }
+    timelineView.selected.clear();
+    refreshStrips();
+    repaintTimeline();
+}
+
+bool MainComponent::keyPressed (const juce::KeyPress& key)
+{
+    if (key == juce::KeyPress ('a', juce::ModifierKeys::ctrlModifier, 0)
+        || key == juce::KeyPress ('a', juce::ModifierKeys::commandModifier, 0))
+    {
+        selectAllClips();
+        return true;
+    }
+    if (key == juce::KeyPress::deleteKey || key == juce::KeyPress::backspaceKey)
+    {
+        deleteSelectedClips();
+        return true;
+    }
+    if (key == juce::KeyPress::escapeKey)
+    {
+        timelineView.selected.clear();
+        repaintTimeline();
+        return true;
+    }
+    if (key == juce::KeyPress::spaceKey)
+    {
+        if (engine.isPlaying()) engine.pauseAll(); else engine.playAll();
+        return true;
+    }
+    return false;
 }

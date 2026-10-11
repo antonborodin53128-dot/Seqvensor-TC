@@ -251,6 +251,7 @@ public:
     void refreshAll();   // button captions from the track state
     void updateLive();   // meters (timer)
     void repaintLane() { lane.repaint(); }
+    LaneComponent& getLane() { return lane; }
 
     std::shared_ptr<Track> getTrack() const { return track; }
 
