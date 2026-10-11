@@ -1,0 +1,74 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: x64
+            runner: windows-latest
+            arch: x64
+          - name: arm64
+            runner: windows-11-arm
+            arch: ARM64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        shell: bash
+        run: |
+          set -o pipefail
+          cmake -S . -B build -G "Visual Studio 17 2022" -A ${{ matrix.arch }} 2>&1 | tee configure.log
+
+      - name: Build
+        shell: bash
+        run: |
+          set -o pipefail
+          cmake --build build --config Release --parallel 2>&1 | tee build.log
+
+      - name: Collect exe
+        shell: bash
+        run: |
+          mkdir -p out
+          cp build/TC_artefacts/Release/TC.exe out/TC-${{ matrix.name }}.exe
+          ls -la out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TC-${{ matrix.name }}
+          path: out/TC-${{ matrix.name }}.exe
+
+      - name: Publish to release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view latest >/dev/null 2>&1 || gh release create latest --title "TC (latest build)" --notes "Automatic builds from main. Files: TC-x64.exe (works everywhere), TC-arm64.exe (native for Windows on ARM)."
+          gh release upload latest out/TC-${{ matrix.name }}.exe --clobber
+
+      # Always push the tail of the logs to a branch so the author can read build errors without GitHub API access.
+      - name: Publish logs
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p logs
+          { echo "status: ${{ job.status }}"; echo "commit: ${{ github.sha }}"; echo; echo "== configure =="; tail -n 80 configure.log 2>/dev/null; echo; echo "== build =="; grep -E "error|Error|warning C4|fatal" build.log 2>/dev/null | head -n 120; echo; tail -n 40 build.log 2>/dev/null; } > logs/${{ matrix.name }}.txt
+          git config user.name "ci"
+          git config user.email "ci@users.noreply.github.com"
+          git fetch origin ci-logs 2>/dev/null && git checkout -B ci-logs origin/ci-logs || git checkout --orphan ci-logs
+          git rm -rf . >/dev/null 2>&1 || true
+          mkdir -p logs && cp -f ../logs/${{ matrix.name }}.txt logs/ 2>/dev/null || true
+          cp -f $GITHUB_WORKSPACE/logs/${{ matrix.name }}.txt logs/ 2>/dev/null || true
+          git add logs
+          git commit -m "logs ${{ matrix.name }} ${{ github.sha }}" || true
+          for i in 1 2 3; do git push origin ci-logs && break || (git pull --rebase origin ci-logs; sleep 3); done
