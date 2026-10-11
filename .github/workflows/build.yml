@@ -24,17 +24,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # No -G: CMake picks the newest Visual Studio installed on the runner.
       - name: Configure
         shell: bash
         run: |
-          set -o pipefail
-          cmake -S . -B build -G "Visual Studio 17 2022" -A ${{ matrix.arch }} 2>&1 | tee configure.log
+          set +e
+          cmake -S . -B build -A ${{ matrix.arch }} > configure.log 2>&1
+          code=$?
+          if [ $code -ne 0 ]; then
+            echo "::error title=configure failed::$(tail -n 40 configure.log | sed -e 's/%/%25/g' | awk '{printf "%s%%0A", $0}')"
+            exit $code
+          fi
+          tail -n 5 configure.log
 
       - name: Build
         shell: bash
         run: |
-          set -o pipefail
-          cmake --build build --config Release --parallel 2>&1 | tee build.log
+          set +e
+          cmake --build build --config Release --parallel > build.log 2>&1
+          code=$?
+          if [ $code -ne 0 ]; then
+            echo "::error title=build failed::$(grep -E 'error|fatal' build.log | head -n 25 | cut -c1-400 | sed -e 's/%/%25/g' | awk '{printf "%s%%0A", $0}')"
+            exit $code
+          fi
+          tail -n 5 build.log
 
       - name: Collect exe
         shell: bash
@@ -53,22 +66,5 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release view latest >/dev/null 2>&1 || gh release create latest --title "TC (latest build)" --notes "Automatic builds from main. Files: TC-x64.exe (works everywhere), TC-arm64.exe (native for Windows on ARM)."
+          gh release view latest >/dev/null 2>&1 || gh release create latest --title "TC (latest build)" --notes "Automatic builds from main. TC-x64.exe works everywhere, TC-arm64.exe is native for Windows on ARM."
           gh release upload latest out/TC-${{ matrix.name }}.exe --clobber
-
-      # Always push the tail of the logs to a branch so the author can read build errors without GitHub API access.
-      - name: Publish logs
-        if: always()
-        shell: bash
-        run: |
-          mkdir -p logs
-          { echo "status: ${{ job.status }}"; echo "commit: ${{ github.sha }}"; echo; echo "== configure =="; tail -n 80 configure.log 2>/dev/null; echo; echo "== build =="; grep -E "error|Error|warning C4|fatal" build.log 2>/dev/null | head -n 120; echo; tail -n 40 build.log 2>/dev/null; } > logs/${{ matrix.name }}.txt
-          git config user.name "ci"
-          git config user.email "ci@users.noreply.github.com"
-          git fetch origin ci-logs 2>/dev/null && git checkout -B ci-logs origin/ci-logs || git checkout --orphan ci-logs
-          git rm -rf . >/dev/null 2>&1 || true
-          mkdir -p logs && cp -f ../logs/${{ matrix.name }}.txt logs/ 2>/dev/null || true
-          cp -f $GITHUB_WORKSPACE/logs/${{ matrix.name }}.txt logs/ 2>/dev/null || true
-          git add logs
-          git commit -m "logs ${{ matrix.name }} ${{ github.sha }}" || true
-          for i in 1 2 3; do git push origin ci-logs && break || (git pull --rebase origin ci-logs; sleep 3); done
