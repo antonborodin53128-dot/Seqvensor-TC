@@ -459,8 +459,18 @@ void MainComponent::rebuildTracks()
     lane.emptyPressed = [this] (const juce::ModifierKeys& m) { emptyPressed (m); };
     lane.marquee = [this] (juce::Rectangle<int> r, bool finished) { marqueeSelect (r, finished); };
     lane.focus = [this] { grabKeyboardFocus(); };
-    lane.clipMenu = [this] (std::shared_ptr<Track> t, std::shared_ptr<Clip> c, juce::Point<int> p) { showClipMenu (t, c, p); };
-    lane.laneMenu = [this] (std::shared_ptr<Track> t, double time, juce::Point<int> p) { showLaneMenu (t, time, p); };
+    // A menu opened by the click that dismissed another menu would end up under the window that Windows raises
+    // at that moment, so it is shown a moment later, when the window order has settled.
+    lane.clipMenu = [this] (std::shared_ptr<Track> t, std::shared_ptr<Clip> c, juce::Point<int> p)
+    {
+        juce::Component::SafePointer<MainComponent> safe (this);
+        juce::Timer::callAfterDelay (70, [safe, t, c, p] { if (safe != nullptr) safe->showClipMenu (t, c, p); });
+    };
+    lane.laneMenu = [this] (std::shared_ptr<Track> t, double time, juce::Point<int> p)
+    {
+        juce::Component::SafePointer<MainComponent> safe (this);
+        juce::Timer::callAfterDelay (70, [safe, t, time, p] { if (safe != nullptr) safe->showLaneMenu (t, time, p); });
+    };
     lane.filesDropped = [this] (std::shared_ptr<Track> t, const juce::StringArray& f, double time) { addAudioFiles (t, f, time); };
     lane.changed = [this] { repaintTimeline(); };
 
