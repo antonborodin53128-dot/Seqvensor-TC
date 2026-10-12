@@ -1019,16 +1019,23 @@ void MainComponent::updateTimeline()
         engineClockStamp = now;
     }
 
+    const double frameDt = juce::jlimit (0.0, 0.1, now - lastFrameStamp);   // first frame: lastFrameStamp is 0
     if (engine.isPlaying() && ! engine.isPaused())
     {
-        const double predicted = engineClock + (now - engineClockStamp);
+        // the clock stamp must be fresh: right after Play the audio thread has not advanced the clock yet,
+        // and a stale stamp (0 = system start) would extrapolate the position by the whole uptime
+        const double predicted = engineClock + juce::jlimit (0.0, 0.1, now - engineClockStamp);
         if (std::abs (predicted - displayClock) > 0.25)
             displayClock = predicted;
         else
-            displayClock += (now - lastFrameStamp) + (predicted - displayClock - (now - lastFrameStamp)) * 0.1;
+            displayClock += frameDt + (predicted - displayClock - frameDt) * 0.1;
     }
     else
+    {
         displayClock = engineClock;
+        engineClockSeen = engineClock;
+        engineClockStamp = now;   // keep the stamp fresh while stopped / paused
+    }
 
     lastFrameStamp = now;
     timelineView.clock = displayClock;
