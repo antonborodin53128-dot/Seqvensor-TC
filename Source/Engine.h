@@ -116,7 +116,11 @@ public:
     float getCpuLoad() const { return (float) loadMeasure.getLoadAsProportion(); }
     juce::String describeDeviceLatency() const;
 
-    void setBpm (double newBpm) { playHead.bpm.store (juce::jlimit (20.0, 400.0, newBpm)); }
+    void setBpm (double newBpm) { playHead.bpm.store (juce::jlimit (20.0, 400.0, newBpm)); }   // plain value (loading a song)
+    // The user changes the tempo: the song position, the metronome and the clips keep their place in bars,
+    // the sounding audio does not jump.
+    void setTempo (double newBpm);
+    bool consumeTempoApplied() { return tempoApplied.exchange (false); }
     double getBpm() const { return playHead.bpm.load(); }
 
     // Persistence.
@@ -167,6 +171,10 @@ private:
     double clockSeconds = 0.0;                  // audio thread only
     int beatIndex = 0;
     double nextBeatIn = 0.0;
+    std::atomic<double> requestedBpm { 0.0 };   // set by the UI, applied by the audio thread between blocks
+    std::atomic<bool> tempoApplied { false };
+    std::atomic<bool> resetShifts { false };
+    void applyTempoChange (double newBpm);      // tracksLock held
     std::vector<Track*> order;
 
     std::map<juce::String, std::shared_ptr<Sequence>> sequenceCache;

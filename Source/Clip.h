@@ -16,6 +16,7 @@ struct ClipData
     juce::String name;
     juce::File file;
     double fileBpm = 0.0;                // tempo of the original file (0 = not detected)
+    double tempoConfidence = 0.0;        // 0..1, how sure the detector was
     double sampleRate = 44100.0;
     int numSamples = 0;
     juce::AudioBuffer<float> audio;      // 1 or 2 channels
@@ -43,6 +44,7 @@ struct Clip
     std::shared_ptr<ClipData> original;   // the file as decoded (never changed)
     std::atomic<double> start { 0.0 };   // seconds on the timeline (0 = bar 1, beat 1)
     std::atomic<bool> loop { false };    // repeat until the song ends
+    std::atomic<double> shift { 0.0 };   // playing only: keeps the audio continuous when the tempo changes (seconds)
 
     // tempo handling (the pitch always stays the same)
     std::atomic<bool> followTempo { false };      // re-stretch whenever the project tempo changes

@@ -207,6 +207,7 @@ void Engine::playAll()
     }
     else
     {
+        resetShifts.store (true);
         bool anyMetronome = false;
         double earliest = 0.0;
         for (auto& t : getTracks())
@@ -223,6 +224,48 @@ void Engine::playAll()
     paused.store (false);
     commandClock.store (start);
     command.store (1);
+}
+
+void Engine::setTempo (double newBpm)
+{
+    newBpm = juce::jlimit (20.0, 400.0, newBpm);
+    if (isAudioAlive())
+    {
+        requestedBpm.store (newBpm);   // the audio thread picks it up at the start of the next block
+        return;
+    }
+    const juce::ScopedLock sl (tracksLock);
+    applyTempoChange (newBpm);
+}
+
+void Engine::applyTempoChange (double newBpm)
+{
+    const double oldBpm = playHead.bpm.load();
+    if (std::abs (newBpm - oldBpm) < 1.0e-9)
+        return;
+
+    const double r = oldBpm / newBpm;
+    const bool live = clockRunning.load();
+    const double c = live ? clockSeconds : clockNow.load();
+
+    for (auto& t : tracks)
+        t->retempo (r, c);
+
+    if (live)
+    {
+        clockSeconds *= r;                    // the position in bars stays where it is
+        nextBeatIn *= r;                      // the running beat keeps its phase: no double or missing click
+        clockNow.store (clockSeconds);
+    }
+    else
+    {
+        clockNow.store (c * r);
+    }
+    if (command.load() == 1)
+        commandClock.store (commandClock.load() * r);
+
+    playHead.bpm.store (newBpm);
+    tempoApplied.store (true);
 }
 
 void Engine::pauseAll()
@@ -243,12 +286,14 @@ void Engine::stopAll()
     clockRunning.store (false);
     paused.store (false);
     clockNow.store (0.0);
+    resetShifts.store (true);
 }
 
 void Engine::seek (double clockSecondsTarget)
 {
     // from 4 beats before bar 1 (the count-in) to a little after the end of the song
     const double t = juce::jlimit (-4.0 * getBeatSeconds(), juce::jmax (60.0, songEnd.load() + 30.0), clockSecondsTarget);
+    resetShifts.store (true);
 
     if (clockRunning.load() || command.load() == 1)
     {
@@ -365,6 +410,13 @@ void Engine::audioDeviceIOCallbackWithContext (const float* const* inputChannelD
     }
 
     updateCompensation();
+
+    if (resetShifts.exchange (false))
+        for (auto& t : tracks)
+            t->clearShifts();
+
+    if (const double req = requestedBpm.exchange (0.0); req > 0.0)
+        applyTempoChange (req);
 
     // (re)start / jump of the global clock requested by the UI
     if (command.exchange (0) == 1)
@@ -551,7 +603,9 @@ void Engine::addClipFromFile (const std::shared_ptr<Track>& track, const juce::F
         {
             std::vector<float> mono;
             data->getMono (mono, (int) (data->sampleRate * 150.0));
-            data->fileBpm = detectTempo (mono, data->sampleRate);   // shown in the clip menu, used for the stretch
+            const auto found = detectTempoEx (mono, data->sampleRate);   // shown in the clip menu, used for the stretch
+            data->tempoConfidence = found.confidence;
+            data->fileBpm = found.confidence >= tempoMinConfidence ? found.bpm : 0.0;
         }
 
         juce::MessageManager::callAsync ([this, weak, data, error, startSeconds, done]
@@ -609,7 +663,7 @@ void Engine::stretchClip (const std::shared_ptr<Track>& track, const std::shared
             auto c = weakClip.lock();
             if (t == nullptr || c == nullptr || result == nullptr || c->stretchGen.load() != gen)
                 return;
-            t->replaceClipData (c, result);
+            t->replaceClipData (c, result, clockNow.load());
             c->stretchedToBpm.store (untouched ? 0.0 : targetBpm);
             c->stretchTarget.store (0.0);
             clipsChanged();

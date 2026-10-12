@@ -99,6 +99,7 @@ private:
     void deleteSelectedClips();
     void addTrack();
     void tapTempo();
+    void keepOnTop();
     void setPinned (bool pinned);
 
     void rebuildTracks();
@@ -150,7 +151,7 @@ private:
     juce::Array<juce::int64> tapTimes;
     bool pinned = true;
     int autosaveCounter = 0;
-    int slowCounter = 0;
+    int slowCounter = 0, followCounter = 0;
     double lastScroll = -1.0e18, lastSpan = 0.0, lastBpm = 0.0, followLastBpm = 0.0;
     double displayClock = 0.0, engineClockSeen = 0.0, engineClockStamp = 0.0, lastFrameStamp = 0.0;
     juce::VBlankAttachment vblank;

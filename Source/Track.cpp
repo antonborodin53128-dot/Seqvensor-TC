@@ -143,13 +143,46 @@ std::shared_ptr<Clip> Track::addClip (std::shared_ptr<ClipData> data, double sta
     return clip;
 }
 
-void Track::replaceClipData (const std::shared_ptr<Clip>& clip, std::shared_ptr<ClipData> newData)
+void Track::replaceClipData (const std::shared_ptr<Clip>& clip, std::shared_ptr<ClipData> newData, double clockNow)
 {
     {
         const juce::SpinLock::ScopedLockType sl (clipLock);
+
+        const double oldLen = clip->data->lengthSeconds(), newLen = newData->lengthSeconds();
+        const double rel = clockNow - clip->start.load();            // time since the clip's start on the timeline
+        double o = rel + clip->shift.load();                         // where the audio is right now
+        if (o < 0.0)
+            clip->shift.store (0.0);                                 // not started yet: starts on its bar
+        else if (oldLen > 0.0 && newLen > 0.0 && (clip->loop.load() || o < oldLen))
+        {
+            if (clip->loop.load())
+                o = std::fmod (o, oldLen);
+            clip->shift.store (o * newLen / oldLen - rel);           // same musical point in the new audio
+        }
         std::swap (clip->data, newData);
     }
     // newData now holds the previous audio and is released here, outside the lock and off the audio thread
+}
+
+void Track::retempo (double r, double clockNow)
+{
+    const juce::SpinLock::ScopedLockType sl (clipLock);
+    for (auto& c : clips)
+    {
+        const double s = c->start.load();
+        const double sh = c->shift.load();
+        const double o = (clockNow - s) + sh;
+        // audio that is sounding keeps its place; a clip that has not started yet will start on its bar
+        c->shift.store (o < 0.0 ? 0.0 : sh + (clockNow - s) * (1.0 - r));
+        c->start.store (s * r);
+    }
+}
+
+void Track::clearShifts()
+{
+    const juce::SpinLock::ScopedLockType sl (clipLock);
+    for (auto& c : clips)
+        c->shift.store (0.0);
 }
 
 void Track::removeClip (int clipId)
@@ -272,7 +305,7 @@ void Track::renderClips (int n, const ChunkClock& clock)
     for (auto& c : clips)
     {
         const ClipData& d = *c->data;
-        const double start = c->start.load();
+        const double start = c->start.load() - c->shift.load();
         const double len = d.lengthSeconds();
         const bool loop = c->loop.load();
         const double t0 = clock.startSeconds;

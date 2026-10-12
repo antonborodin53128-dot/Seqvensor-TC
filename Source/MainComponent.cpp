@@ -1,3 +1,9 @@
+#if defined (_WIN32)
+ #ifndef NOMINMAX
+  #define NOMINMAX
+ #endif
+ #include <windows.h>
+#endif
 #include "MainComponent.h"
 #include "TempoDetect.h"
 
@@ -185,7 +191,7 @@ MainComponent::MainComponent()
     bpmSlider.setTextBoxStyle (juce::Slider::TextBoxLeft, false, 86, 32);
     bpmSlider.setTextValueSuffix (" BPM");
     bpmSlider.setTooltip ("Темп проекта. Его получают плагины (дилей и др.) и метроном."_ru);
-    bpmSlider.onValueChange = [this] { engine.setBpm (bpmSlider.getValue()); };
+    bpmSlider.onValueChange = [this] { engine.setTempo (bpmSlider.getValue()); };
     addAndMakeVisible (bpmSlider);
 
     tapButton.onClick = [this] { tapTempo(); };
@@ -536,16 +542,44 @@ void MainComponent::addAudioFiles (const std::shared_ptr<Track>& track, const ju
     auto sorted = files;
     sorted.sort (true);
 
-    auto place = [this, safe, time] (const std::shared_ptr<Track>& target, const juce::String& path)
+    // A multitrack is one song: stems whose own tempo is unclear (vocals, pads) take the tempo of the surest stem.
+    struct Batch
+    {
+        std::vector<std::shared_ptr<Clip>> clips;
+        int pending = 0;
+    };
+    auto batch = std::make_shared<Batch>();
+    batch->pending = sorted.size();
+
+    auto place = [this, safe, time, batch] (const std::shared_ptr<Track>& target, const juce::String& path)
     {
         engine.addClipFromFile (target, juce::File (path), time,
-                                [safe, path] (std::shared_ptr<Clip> clip, const juce::String& error)
+                                [safe, path, batch] (std::shared_ptr<Clip> clip, const juce::String& error)
                                 {
                                     if (safe == nullptr)
                                         return;
                                     if (clip == nullptr)
                                         juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, "TC",
                                                                                 error + ":\n"_ru + path);
+                                    else
+                                        batch->clips.push_back (clip);
+
+                                    if (--batch->pending == 0 && batch->clips.size() > 1)
+                                    {
+                                        std::shared_ptr<Clip> best;
+                                        for (auto& c : batch->clips)
+                                            if (c->original != nullptr && c->original->fileBpm > 0.0
+                                                && (best == nullptr || c->original->tempoConfidence > best->original->tempoConfidence))
+                                                best = c;
+                                        if (best != nullptr && best->original->tempoConfidence >= 0.6)
+                                            for (auto& c : batch->clips)
+                                                if (c->original != nullptr && c->original->fileBpm <= 0.0)
+                                                {
+                                                    c->original->fileBpm = best->original->fileBpm;
+                                                    if (c->data != nullptr)
+                                                        c->data->fileBpm = best->original->fileBpm;
+                                                }
+                                    }
                                     safe->refreshStrips();
                                     safe->repaintTimeline();
                                 });
@@ -1083,8 +1117,8 @@ void MainComponent::showAnalysisSettings()
     juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon, "Темп и тональность"_ru,
                                             "Здесь будет выбор каналов-источников для автоматического определения "_ru
                                             "темпа и тональности. Эта функция появится в следующей версии.\n\n"_ru
-                                            "Пока темп задаётся вручную или кнопкой Tap; правая кнопка по клипу - "_ru
-                                            "Определить темп (только показывает значение)."_ru);
+                                            "Пока темп проекта задаётся вручную или кнопкой Tap. Темп каждого файла "_ru
+                                            "определяется при загрузке и показан в меню клипа (правая кнопка)."_ru);
 }
 
 void MainComponent::setPinned (bool shouldPin)
@@ -1109,8 +1143,9 @@ void MainComponent::tapTempo()
         const double avg = (double) (tapTimes.getLast() - tapTimes.getFirst()) / (double) (tapTimes.size() - 1);
         if (avg > 0.0)
         {
-            engine.setBpm (60000.0 / avg);
-            bpmSlider.setValue (engine.getBpm(), juce::dontSendNotification);
+            const double tapped = juce::jlimit (20.0, 400.0, 60000.0 / avg);
+            engine.setTempo (tapped);
+            bpmSlider.setValue (tapped, juce::dontSendNotification);
         }
     }
 }
@@ -1169,26 +1204,65 @@ void MainComponent::updateTimeline()
     }
 }
 
+// Menus popping up and being dismissed by a click elsewhere can make Windows drop the "topmost" state of the
+// window, which then sinks behind other programs. Check the real state and restore it.
+void MainComponent::keepOnTop()
+{
+    if (! pinned)
+        return;
+    auto* top = getTopLevelComponent();
+    if (top == nullptr)
+        return;
+    auto* peer = top->getPeer();
+    if (peer == nullptr)
+        return;
+
+   #if JUCE_WINDOWS
+    const auto hwnd = (HWND) peer->getNativeHandle();
+    const bool topmost = (GetWindowLongPtr (hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0;
+    if (! topmost || ! top->isAlwaysOnTop())
+    {
+        top->setAlwaysOnTop (false);
+        top->setAlwaysOnTop (true);
+        SetWindowPos (hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    }
+   #else
+    if (! top->isAlwaysOnTop())
+        top->setAlwaysOnTop (true);
+   #endif
+}
+
 void MainComponent::timerCallback()
 {
+    keepOnTop();
     for (auto* t : trackComponents)
         t->updateLive();
 
     playAllButton.setActive (engine.isPlaying());
     pauseAllButton.setActive (engine.isPaused());
+    if (engine.consumeTempoApplied())
+    {
+        engine.clipsChanged();   // clip positions moved with the tempo
+        repaintTimeline();
+    }
+
     if (std::abs (bpmSlider.getValue() - engine.getBpm()) > 0.001 && ! bpmSlider.isMouseButtonDown())
         bpmSlider.setValue (engine.getBpm(), juce::dontSendNotification);
+
+    if (++followCounter >= 6)   // five times a second
+    {
+        followCounter = 0;
+        // clips that follow the project tempo: act once the tempo has stopped changing
+        const double bpmNow = engine.getBpm();
+        if (bpmNow != followLastBpm)
+            followLastBpm = bpmNow;
+        else
+            applyTempoFollow();
+    }
 
     if (++slowCounter >= 15)   // twice a second
     {
         slowCounter = 0;
-        {   // clips that follow the project tempo: act once the tempo has stopped changing
-            const double bpmNow = engine.getBpm();
-            if (bpmNow != followLastBpm)
-                followLastBpm = bpmNow;
-            else
-                applyTempoFollow();
-        }
         {   // diagnostics: engine state to %APPDATA%\TC\log.txt while playing
             static juce::int64 lastLogged = -1;
             const auto cb = engine.getCallbackCount();
