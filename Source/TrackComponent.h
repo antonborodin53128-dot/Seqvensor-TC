@@ -195,19 +195,18 @@ private:
     float left = 0.0f, right = 0.0f;
 };
 
-// Numeric peak-hold readout (like Pro Tools). Click to reset.
+// Numeric readout of the fader position in dB (what the fader is set to, not the level of the audio).
 class PeakReadout : public juce::Component
 {
 public:
-    void update (float peakLinear)
+    void setFaderDb (double db)
     {
-        if (peakLinear > peak)
-            peak = peakLinear;
-        repaint();
+        if (db != faderDb)
+        {
+            faderDb = db;
+            repaint();
+        }
     }
-
-    void reset() { peak = 0.0f; repaint(); }
-    void mouseDown (const juce::MouseEvent&) override { reset(); }
 
     void paint (juce::Graphics& g) override
     {
@@ -215,15 +214,63 @@ public:
         g.setColour (Pal::sunken);
         g.fillRoundedRectangle (r, 6.0f);
 
-        const float db = juce::Decibels::gainToDecibels (peak, -100.0f);
-        juce::String text = peak <= 0.00001f ? juce::String ("-inf") : juce::String (db, 1);
-        g.setColour (db > -0.1f && peak > 0.0f ? Pal::red : db > -12.0f ? Pal::yellow : Pal::text);
+        const bool off = faderDb <= -59.9;
+        juce::String text = off ? juce::String ("-inf") : (faderDb > 0.05 ? "+" : juce::String()) + juce::String (faderDb, 1);
+        g.setColour (off ? Pal::textDim : faderDb > 0.05 ? Pal::yellow : Pal::text);
         g.setFont (juce::FontOptions (14.0f, juce::Font::bold));
         g.drawText (text, getLocalBounds(), juce::Justification::centred);
     }
 
 private:
-    float peak = 0.0f;
+    double faderDb = 0.0;
+};
+
+// Plugin slot: click opens the plugin, press and drag moves it (Ctrl while dropping = copy).
+class SlotButton : public juce::TextButton, public juce::DragAndDropTarget
+{
+public:
+    std::function<juce::var()> dragPayload;                                  // void = this slot cannot be dragged
+    std::function<void (const juce::String& payload, bool copy)> onDropped;
+
+    bool consumeDragFlag() { const bool d = justDragged; justDragged = false; return d; }
+
+    void mouseDown (const juce::MouseEvent& e) override { justDragged = false; juce::TextButton::mouseDown (e); }
+    void mouseDrag (const juce::MouseEvent& e) override
+    {
+        juce::TextButton::mouseDrag (e);
+        if (justDragged || e.getDistanceFromDragStart() < 8 || ! dragPayload)
+            return;
+        const auto payload = dragPayload();
+        if (payload.isVoid())
+            return;
+        if (auto* container = juce::DragAndDropContainer::findParentDragContainerFor (this))
+        {
+            justDragged = true;
+            container->startDragging (payload, this, juce::ScaledImage (createComponentSnapshot (getLocalBounds())), true);
+        }
+    }
+
+    bool isInterestedInDragSource (const SourceDetails& d) override { return d.description.toString().startsWith ("tcslot:"); }
+    void itemDragEnter (const SourceDetails&) override { dropHover = true; repaint(); }
+    void itemDragExit (const SourceDetails&) override { dropHover = false; repaint(); }
+    void itemDropped (const SourceDetails& d) override
+    {
+        dropHover = false;
+        repaint();
+        const auto mods = juce::ModifierKeys::currentModifiers;
+        if (onDropped)
+            onDropped (d.description.toString(), mods.isCtrlDown() || mods.isCommandDown());
+    }
+    void paintOverChildren (juce::Graphics& g) override
+    {
+        if (! dropHover)
+            return;
+        g.setColour (juce::Colour (0xffffa81f));
+        g.drawRoundedRectangle (getLocalBounds().toFloat().reduced (1.0f), 6.0f, 2.0f);
+    }
+
+private:
+    bool justDragged = false, dropHover = false;
 };
 
 // One timeline row: channel controls on the left, the audio lane on the right.
@@ -236,6 +283,7 @@ public:
         std::function<void (std::shared_ptr<Track>, juce::Component*)> inputMenu;
         std::function<void (std::shared_ptr<Track>, int, juce::Component*)> slotClick;   // name of a slot
         std::function<void (std::shared_ptr<Track>, int, juce::Component*)> slotMenu;    // arrow of a slot
+        std::function<void (std::shared_ptr<Track>, int, const juce::String&, bool)> slotDropped;   // plugin dropped on a slot (payload, copy)
         std::function<void (std::shared_ptr<Track>, juce::Component*)> outputMenu;
     };
 
@@ -265,7 +313,7 @@ private:
     juce::TextButton inputButton, outputButton;
     StateButton metroButton { "Метроном"_ru, StateButton::Style::Text };
 
-    juce::TextButton slotButtons[Track::numSlots];
+    SlotButton slotButtons[Track::numSlots];
     IconButton slotArrows[Track::numSlots] { IconButton (IconButton::Icon::Arrow), IconButton (IconButton::Icon::Arrow),
                                              IconButton (IconButton::Icon::Arrow), IconButton (IconButton::Icon::Arrow),
                                              IconButton (IconButton::Icon::Arrow) };

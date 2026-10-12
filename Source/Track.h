@@ -61,6 +61,8 @@ public:
     // Chain editing: message thread only.
     void setPlugin (int index, std::unique_ptr<juce::AudioPluginInstance> plugin, const juce::PluginDescription& description);
     void clearSlot (int index);
+    void moveSlot (int from, int to);                                  // inside this chain, the others shift
+    void swapSlotWith (int index, Track& other, int otherIndex);       // between two chains (or inside one)
     Slot* getSlot (int index) const;
     int findFreeSlot() const;
     int getNumPlugins() const;

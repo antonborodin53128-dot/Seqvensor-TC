@@ -92,6 +92,7 @@ public:
     bool isPlaying() const;
     bool isPaused() const { return paused.load(); }
     double getClockSeconds() const { return clockNow.load(); }
+    double getSongEnd() const { return songEnd.load(); }   // end of the last clip, seconds
     juce::String describeState() const;
     void logLine (const juce::String& m) const;
     bool isAudioAlive() const;                          // audio device open and delivering blocks

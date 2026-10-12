@@ -1,4 +1,6 @@
 #include "Track.h"
+
+#include <algorithm>
 #include "Text.h"
 
 Track::Track (juce::String trackName) : name (std::move (trackName))
@@ -32,6 +34,43 @@ void Track::setPlugin (int index, std::unique_ptr<juce::AudioPluginInstance> plu
         old->plugin->setPlayHead (nullptr);
     }
     refreshLatency();
+}
+
+void Track::moveSlot (int from, int to)
+{
+    if (! juce::isPositiveAndBelow (from, numSlots) || ! juce::isPositiveAndBelow (to, numSlots) || from == to)
+        return;
+
+    {
+        const juce::ScopedLock sl (chainLock);
+        if (from < to)
+            std::rotate (slots.begin() + from, slots.begin() + from + 1, slots.begin() + to + 1);
+        else
+            std::rotate (slots.begin() + to, slots.begin() + from, slots.begin() + from + 1);
+    }
+    refreshLatency();
+}
+
+void Track::swapSlotWith (int index, Track& other, int otherIndex)
+{
+    if (! juce::isPositiveAndBelow (index, numSlots) || ! juce::isPositiveAndBelow (otherIndex, numSlots))
+        return;
+
+    if (&other == this)
+    {
+        moveSlot (index, otherIndex);
+        return;
+    }
+
+    {
+        Track* first = this < &other ? this : &other;     // fixed lock order
+        Track* second = this < &other ? &other : this;
+        const juce::ScopedLock a (first->chainLock);
+        const juce::ScopedLock b (second->chainLock);
+        std::swap (slots[(size_t) index], other.slots[(size_t) otherIndex]);
+    }
+    refreshLatency();
+    other.refreshLatency();
 }
 
 void Track::clearSlot (int index)

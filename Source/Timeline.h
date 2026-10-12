@@ -112,6 +112,44 @@ private:
     juce::Rectangle<int> marquee;
 };
 
+// Elapsed / remaining time of the playing composition (top bar).
+class TimeReadout : public juce::Component
+{
+public:
+    void setTimes (double elapsedSeconds, double remainingSeconds);
+    void paint (juce::Graphics&) override;
+
+private:
+    static juce::String format (double seconds);
+    juce::String elapsedText { "0:00" }, remainingText { "-0:00" };
+};
+
+// Overview strip above the ruler: the whole song, the visible part as a draggable window, the playhead.
+// Drag the window / click / wheel = scroll the timeline.
+class TimelineScroller : public juce::Component
+{
+public:
+    TimelineScroller (Engine& e, TimelineView& v) : engine (e), view (v) { setMouseCursor (juce::MouseCursor::DraggingHandCursor); }
+
+    std::function<void (double newClock)> onSeek;
+
+    void paint (juce::Graphics&) override;
+    void mouseDown (const juce::MouseEvent&) override;
+    void mouseDrag (const juce::MouseEvent&) override;
+    void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails&) override;
+
+private:
+    double rangeStart() const;
+    double rangeEnd() const;
+    float timeToX (double t) const;
+    double xToTime (float x) const;
+    juce::Rectangle<float> windowRect() const;
+
+    Engine& engine;
+    TimelineView& view;
+    double dragClock0 = 0.0;
+};
+
 // Draws vertical grid lines (beats / bars) and the count-in shading; shared by ruler and lanes.
 void drawTimelineGrid (juce::Graphics& g, const TimelineView& view, double beatSeconds,
                        juce::Rectangle<int> area, bool withNumbers);

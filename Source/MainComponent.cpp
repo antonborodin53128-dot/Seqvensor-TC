@@ -238,6 +238,9 @@ MainComponent::MainComponent()
     ruler.onSeek = [this] (double t) { seekTimeline (t); };
     ruler.onZoom = [this] (float d) { zoomTimeline (d); };
     addAndMakeVisible (ruler);
+    scroller.onSeek = [this] (double t) { seekTimeline (t); };
+    addAndMakeVisible (scroller);
+    addAndMakeVisible (timeReadout);
     addAndMakeVisible (playhead);
 
     statusLabel.setColour (juce::Label::textColourId, juce::Colours::lightgrey);
@@ -335,6 +338,7 @@ void MainComponent::resized()
     // tempo, key, gear and the big transport buttons, centred in the whole window
     const int groupW = 170 + 8 + 56 + 20 + 110 + 8 + 44 + 30 + 72 + 6 + 64 + 6 + 64;
     auto group = juce::Rectangle<int> (groupW, rowA.getHeight()).withCentre ({ getWidth() / 2, rowA.getCentreY() });
+    const auto groupBox = group;
     bpmSlider.setBounds (group.removeFromLeft (170));
     group.removeFromLeft (8);
     tapButton.setBounds (group.removeFromLeft (56));
@@ -349,9 +353,17 @@ void MainComponent::resized()
     group.removeFromLeft (6);
     stopAllButton.setBounds (group.removeFromLeft (64));
 
+    // elapsed / remaining time: free space between the transport and the CPU readout
+    {
+        const int x = groupBox.getRight() + 24;
+        const int room = cpuLabel.getX() - 12 - x;
+        timeReadout.setVisible (room >= 150);
+        timeReadout.setBounds (x, rowA.getY(), juce::jmin (room, 230), rowA.getHeight());
+    }
+
     playerBar.setBounds (area.removeFromTop (playerBar.getPreferredHeight()));
 
-    area.removeFromTop (28);   // ruler row (placed in layoutTimelineParts)
+    area.removeFromTop (28 + scrollerH);   // scroller + ruler rows (placed in layoutTimelineParts)
     viewport.setBounds (area.reduced (6, 0).withTrimmedBottom (6));
     emptyHint.setBounds (area.reduced (40, 20).withTrimmedLeft (TrackComponent::headerWidth));
     layoutTracks();
@@ -367,23 +379,34 @@ void MainComponent::layoutTimelineParts()
 
     statusLabel.setBounds (viewport.getX() + 10, top, TrackComponent::headerWidth - 20, rulerH);
     ruler.setBounds (laneX, top, laneW, rulerH);
+    scroller.setBounds (laneX, top - scrollerH, laneW, scrollerH);
     playhead.setBounds (laneX, top, laneW, rulerH + viewport.getHeight());
     timelineDirty = true;
 }
 
 void MainComponent::layoutTracks()
 {
-    const int w = juce::jmax (TrackComponent::headerWidth + 100, viewport.getMaximumVisibleWidth());
-    int y = 0;
-    for (auto* t : trackComponents)
+    // the vertical scrollbar appears once the rows are taller than the viewport and takes some width:
+    // rows, ruler and playhead must all use the final width, or the grid drifts between ruler and lanes
+    int w = juce::jmax (TrackComponent::headerWidth + 100, viewport.getMaximumVisibleWidth());
+    for (int pass = 0; pass < 3; ++pass)
     {
-        t->setBounds (0, y, w, TrackComponent::rowHeight);
-        y += TrackComponent::rowHeight;
-    }
+        int y = 0;
+        for (auto* t : trackComponents)
+        {
+            t->setBounds (0, y, w, TrackComponent::rowHeight);
+            y += TrackComponent::rowHeight;
+        }
 
-    addTrackButton.setBounds (8, y + 8, TrackComponent::headerWidth - 20, 34);
-    y += 50;
-    trackList.setSize (w, juce::jmax (y, viewport.getHeight()));
+        addTrackButton.setBounds (8, y + 8, TrackComponent::headerWidth - 20, 34);
+        y += 50;
+        trackList.setSize (w, juce::jmax (y, viewport.getHeight()));
+
+        const int settled = juce::jmax (TrackComponent::headerWidth + 100, viewport.getMaximumVisibleWidth());
+        if (settled == w)
+            break;
+        w = settled;
+    }
     emptyHint.setVisible (trackComponents.isEmpty());
     layoutTimelineParts();
 }
@@ -419,6 +442,7 @@ void MainComponent::rebuildTracks()
     };
     cb.slotMenu = [this] (std::shared_ptr<Track> t, int i, juce::Component* c) { showSlotMenu (t, i, c); };
     cb.outputMenu = [this] (std::shared_ptr<Track> t, juce::Component* c) { showOutputMenu (t, c); };
+    cb.slotDropped = [this] (std::shared_ptr<Track> t, int i, const juce::String& payload, bool copy) { slotDropped (t, i, payload, copy); };
 
     LaneComponent::Callbacks lane;
     lane.seek = [this] (double t) { seekTimeline (t); };
@@ -464,6 +488,7 @@ void MainComponent::addTrack()
 void MainComponent::repaintTimeline()
 {
     ruler.repaint();
+    scroller.repaint();
     playhead.repaint();
     for (auto* t : trackComponents)
         t->repaintLane();
@@ -531,7 +556,8 @@ void MainComponent::addAudioFiles (const std::shared_ptr<Track>& track, const ju
         const juce::File f (sorted[i]);
         std::shared_ptr<Track> target = track;
 
-        if (i > 0 || target == nullptr)
+        // every file of a multitrack gets its own track; an existing lane is used only while it is still empty
+        if (target == nullptr || ! target->getClips().empty() || i > 0)
         {
             target = engine.addTrack (f.getFileNameWithoutExtension());   // one new track per extra file
             target->inputL = -1;
@@ -879,6 +905,60 @@ void MainComponent::loadPluginIntoSlot (const std::shared_ptr<Track>& track, int
     });
 }
 
+void MainComponent::slotDropped (const std::shared_ptr<Track>& target, int targetIndex, const juce::String& payload, bool copy)
+{
+    // payload: "tcslot:<track id>:<slot index>"
+    const auto parts = juce::StringArray::fromTokens (payload, ":", "");
+    if (parts.size() != 3 || target == nullptr)
+        return;
+
+    const int sourceId = parts[1].getIntValue(), sourceIndex = parts[2].getIntValue();
+    std::shared_ptr<Track> source;
+    for (auto& t : engine.getTracks())
+        if (t->id == sourceId)
+            source = t;
+
+    auto* sourceSlot = source != nullptr ? source->getSlot (sourceIndex) : nullptr;
+    if (sourceSlot == nullptr || sourceSlot->plugin == nullptr || (source == target && sourceIndex == targetIndex))
+        return;
+
+    if (copy)
+    {
+        // Ctrl: a new instance of the same plugin with the same settings; a busy slot is not overwritten
+        int index = targetIndex;
+        if (target->getSlot (index) != nullptr)
+            index = target->findFreeSlot();
+        if (index < 0)
+        {
+            say ("Нет свободного слота для копии плагина"_ru);
+            return;
+        }
+
+        juce::MemoryBlock state;
+        sourceSlot->plugin->getStateInformation (state);
+        const auto description = sourceSlot->description;
+        juce::Component::SafePointer<MainComponent> safe (this);
+        engine.addPluginToTrack (target, index, description,
+                                 [safe, description] (bool ok, const juce::String& error)
+                                 {
+                                     if (safe == nullptr)
+                                         return;
+                                     if (! ok)
+                                         juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, "TC",
+                                                                                 "Не удалось скопировать плагин \""_ru + description.name + "\":\n"_ru + error);
+                                     safe->refreshStrips();
+                                 },
+                                 juce::Base64::toBase64 (state.getData(), state.getSize()), sourceSlot->bypass.load());
+        return;
+    }
+
+    if (source == target)
+        source->moveSlot (sourceIndex, targetIndex);
+    else
+        source->swapSlotWith (sourceIndex, *target, targetIndex);   // an occupied target slot swaps places
+    refreshStrips();
+}
+
 void MainComponent::openPluginEditor (const std::shared_ptr<Track>& track, int slotIndex)
 {
     auto* slot = track->getSlot (slotIndex);
@@ -1049,6 +1129,7 @@ void MainComponent::updateTimeline()
 
     lastFrameStamp = now;
     timelineView.clock = displayClock;
+    timeReadout.setTimes (juce::jmax (0.0, displayClock), juce::jmax (0.0, engine.getSongEnd() - displayClock));
 
     const float laneW = (float) juce::jmax (1, ruler.getWidth());
     const double scroll = timelineView.scrollPx (laneW);

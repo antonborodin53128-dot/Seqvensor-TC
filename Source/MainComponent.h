@@ -21,6 +21,7 @@ private:
 };
 
 class MainComponent : public juce::Component,
+                      public juce::DragAndDropContainer,
                       public juce::FileDragAndDropTarget,
                       private juce::Timer,
                       private juce::ChangeListener
@@ -49,6 +50,7 @@ private:
     void showOutputMenu (const std::shared_ptr<Track>& track, juce::Component* anchor);
     void loadPluginIntoSlot (const std::shared_ptr<Track>& track, int slotIndex, const juce::PluginDescription& desc);
     void openPluginEditor (const std::shared_ptr<Track>& track, int slotIndex);
+    void slotDropped (const std::shared_ptr<Track>& target, int targetIndex, const juce::String& payload, bool copy);
     void closeEditorsFor (juce::AudioPluginInstance* plugin);
     void showClipMenu (const std::shared_ptr<Track>& track, const std::shared_ptr<Clip>& clip, juce::Point<int> screenPos);
     void showLaneMenu (const std::shared_ptr<Track>& track, double time, juce::Point<int> screenPos);
@@ -110,6 +112,9 @@ private:
     TimelineView timelineView;
     RulerComponent ruler { engine, timelineView };
     PlayheadOverlay playhead { engine, timelineView };
+    static constexpr int scrollerH = 30;
+    TimelineScroller scroller { engine, timelineView };
+    TimeReadout timeReadout;
     juce::Label statusLabel;
     Library library { engine.getDataDirectory() };
     Playlist playlist;

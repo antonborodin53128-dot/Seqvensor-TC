@@ -267,7 +267,8 @@ void LaneComponent::paint (juce::Graphics& g)
                                             (float) (juce::jmin (x1, bounds.getWidth() + 20) - juce::jmax (x0, -20)),
                                             (float) getHeight() - 8.0f);
         const bool isSelected = view.selected.count (c->id) > 0;
-        g.setColour (isSelected ? Pal::clipBody.brighter (0.35f) : Pal::clipBody);
+        // see-through body: the grid stays visible behind the clip
+        g.setColour (Pal::clip.withAlpha (isSelected ? 0.26f : 0.12f));
         g.fillRoundedRectangle (body, 8.0f);
 
         // waveform: columns are locked to absolute pixels, so scrolling only shifts them
@@ -362,4 +363,149 @@ void PlayheadOverlay::paint (juce::Graphics& g)
         g.setColour (Pal::accent.withAlpha (0.9f));
         g.drawRect (marquee, 1);
     }
+}
+
+// ---------------------------------------------------------------- time readout
+
+juce::String TimeReadout::format (double seconds)
+{
+    const int t = (int) std::floor (juce::jmax (0.0, seconds));
+    const int h = t / 3600, m = (t / 60) % 60, s = t % 60;
+    if (h > 0)
+        return juce::String (h) + ":" + juce::String (m).paddedLeft ('0', 2) + ":" + juce::String (s).paddedLeft ('0', 2);
+    return juce::String (m) + ":" + juce::String (s).paddedLeft ('0', 2);
+}
+
+void TimeReadout::setTimes (double elapsedSeconds, double remainingSeconds)
+{
+    const auto a = format (elapsedSeconds);
+    const auto b = "-" + format (remainingSeconds);
+    if (a != elapsedText || b != remainingText)
+    {
+        elapsedText = a;
+        remainingText = b;
+        repaint();
+    }
+}
+
+void TimeReadout::paint (juce::Graphics& g)
+{
+    auto r = getLocalBounds();
+    g.setColour (Pal::sunken);
+    g.fillRoundedRectangle (r.toFloat(), 10.0f);
+
+    auto left = r.removeFromLeft (r.getWidth() / 2);
+    auto draw = [&g] (juce::Rectangle<int> area, const juce::String& caption, const juce::String& value, juce::Colour colour)
+    {
+        g.setColour (Pal::textDim);
+        g.setFont (juce::FontOptions (10.5f, juce::Font::bold));
+        g.drawText (caption, area.removeFromTop (14).translated (0, 3), juce::Justification::centred);
+        g.setColour (colour);
+        g.setFont (juce::FontOptions (22.0f, juce::Font::bold));
+        g.drawText (value, area, juce::Justification::centred);
+    };
+    draw (left, "ПРОШЛО"_ru, elapsedText, juce::Colours::white);
+    draw (r, "ОСТАЛОСЬ"_ru, remainingText, Pal::accent);
+}
+
+// ---------------------------------------------------------------- scroller
+
+double TimelineScroller::rangeStart() const { return -4.0 * engine.getBeatSeconds(); }
+
+double TimelineScroller::rangeEnd() const
+{
+    const double beat = engine.getBeatSeconds();
+    const double windowEnd = view.clock + (1.0 - view.playheadFraction) * view.span;
+    return std::max ({ engine.getSongEnd() + 8.0 * beat, rangeStart() + view.span * 1.2, windowEnd });
+}
+
+float TimelineScroller::timeToX (double t) const
+{
+    const double a = rangeStart(), b = rangeEnd();
+    return (float) ((t - a) / juce::jmax (1.0e-6, b - a) * (double) getWidth());
+}
+
+double TimelineScroller::xToTime (float x) const
+{
+    const double a = rangeStart(), b = rangeEnd();
+    return a + (double) x / (double) juce::jmax (1, getWidth()) * (b - a);
+}
+
+juce::Rectangle<float> TimelineScroller::windowRect() const
+{
+    const double left = view.clock - view.playheadFraction * view.span;
+    const float x0 = juce::jlimit (0.0f, (float) getWidth() - 14.0f, timeToX (left));
+    const float x1 = juce::jlimit (x0 + 14.0f, (float) getWidth(), timeToX (left + view.span));
+    return { x0, 2.0f, x1 - x0, (float) getHeight() - 4.0f };
+}
+
+void TimelineScroller::paint (juce::Graphics& g)
+{
+    auto inner = getLocalBounds().toFloat().reduced (0.0f, 2.0f);
+    g.setColour (Pal::sunken);
+    g.fillRoundedRectangle (inner, 7.0f);
+
+    // overview of the clips: one thin row per track
+    const auto tracks = engine.getTracks();
+    if (! tracks.empty())
+    {
+        g.saveState();
+        g.reduceClipRegion (inner.toNearestInt());
+        const float pad = 5.0f;
+        const float rowH = juce::jmax (1.0f, (inner.getHeight() - 2.0f * pad) / (float) tracks.size());
+        for (size_t i = 0; i < tracks.size(); ++i)
+            for (auto& c : tracks[i]->getClips())
+            {
+                const double s = c->start.load();
+                const double e = c->loop.load() ? rangeEnd() : c->end();
+                const float x0 = timeToX (s), x1 = juce::jmax (x0 + 1.0f, timeToX (e));
+                g.setColour (Pal::clip.withAlpha (0.55f));
+                g.fillRect (x0, inner.getY() + pad + (float) i * rowH, x1 - x0, juce::jmax (1.0f, rowH - 1.0f));
+            }
+        g.restoreState();
+    }
+
+    // visible part of the timeline
+    const auto win = windowRect();
+    g.setColour (Pal::accent.withAlpha (0.20f));
+    g.fillRoundedRectangle (win, 6.0f);
+    g.setColour (Pal::accent);
+    g.drawRoundedRectangle (win.reduced (0.75f), 6.0f, 1.5f);
+    if (win.getWidth() > 40.0f)
+    {
+        const float cx = win.getCentreX(), cy = win.getCentreY();
+        for (int k = -1; k <= 1; ++k)
+            g.fillRect (cx + (float) k * 5.0f - 0.5f, cy - 5.0f, 1.0f, 10.0f);   // grip
+    }
+
+    // playhead
+    g.setColour (juce::Colours::white.withAlpha (0.92f));
+    g.fillRect (timeToX (view.clock) - 1.0f, 0.0f, 2.0f, (float) getHeight());
+}
+
+void TimelineScroller::mouseDown (const juce::MouseEvent& e)
+{
+    if (windowRect().contains (e.position))
+        dragClock0 = view.clock;
+    else
+    {
+        // jump: centre the visible part on the clicked place
+        dragClock0 = xToTime ((float) e.x) - (0.5 - view.playheadFraction) * view.span;
+        if (onSeek)
+            onSeek (dragClock0);
+    }
+}
+
+void TimelineScroller::mouseDrag (const juce::MouseEvent& e)
+{
+    const double dt = (double) e.getDistanceFromDragStartX() / (double) juce::jmax (1, getWidth()) * (rangeEnd() - rangeStart());
+    if (onSeek)
+        onSeek (dragClock0 + dt);
+}
+
+void TimelineScroller::mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails& w)
+{
+    const float d = w.deltaY != 0.0f ? -w.deltaY : -w.deltaX;
+    if (onSeek && d != 0.0f)
+        onSeek (view.clock + (double) d * view.span * 0.5);
 }

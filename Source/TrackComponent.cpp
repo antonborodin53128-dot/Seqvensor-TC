@@ -31,7 +31,24 @@ TrackComponent::TrackComponent (Engine& engineToUse, std::shared_ptr<Track> trac
 
     for (int i = 0; i < Track::numSlots; ++i)
     {
-        slotButtons[i].onClick = [this, i] { if (cb.slotClick) cb.slotClick (track, i, &slotButtons[i]); };
+        slotButtons[i].onClick = [this, i]
+        {
+            if (slotButtons[i].consumeDragFlag())
+                return;   // the press was a drag, not a click
+            if (cb.slotClick)
+                cb.slotClick (track, i, &slotButtons[i]);
+        };
+        slotButtons[i].dragPayload = [this, i]() -> juce::var
+        {
+            if (track->getSlot (i) == nullptr)
+                return {};
+            return juce::var ("tcslot:" + juce::String (track->id) + ":" + juce::String (i));
+        };
+        slotButtons[i].onDropped = [this, i] (const juce::String& payload, bool copy)
+        {
+            if (cb.slotDropped)
+                cb.slotDropped (track, i, payload, copy);
+        };
         addAndMakeVisible (slotButtons[i]);
 
         slotArrows[i].setTooltip ("Меню слота: обход, заменить, убрать"_ru);
@@ -62,11 +79,13 @@ TrackComponent::TrackComponent (Engine& engineToUse, std::shared_ptr<Track> trac
     fader.setSkewFactorFromMidPoint (-12.0);
     fader.setDoubleClickReturnValue (true, 0.0);
     fader.setValue (juce::Decibels::gainToDecibels (track->gainLinear.load(), -60.0f), juce::dontSendNotification);
+    readout.setFaderDb (fader.getValue());
     fader.onValueChange = [this]
     {
         const float db = (float) fader.getValue();
         track->gainLinear = db <= -59.9f ? 0.0f : juce::Decibels::decibelsToGain (db);
         fader.setTooltip (juce::String (db, 1) + " дБ"_ru);
+        readout.setFaderDb ((double) db);
     };
     addAndMakeVisible (fader);
     addAndMakeVisible (meter);
@@ -197,7 +216,6 @@ void TrackComponent::updateLive()
     const float pl = track->peakL.exchange (0.0f);
     const float pr = track->peakR.exchange (0.0f);
     meter.setLevels (pl, pr);
-    readout.update (juce::jmax (pl, pr));
 
     const double sr = juce::jmax (1.0, engine.getSampleRate());
     const double ms = track->getCachedLatencySamples() * 1000.0 / sr;
