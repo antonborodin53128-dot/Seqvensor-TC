@@ -1230,10 +1230,9 @@ void MainComponent::keepOnTop()
    #if JUCE_WINDOWS
     const auto hwnd = (HWND) peer->getNativeHandle();
     const bool topmost = (GetWindowLongPtr (hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0;
-    if (! topmost || ! top->isAlwaysOnTop())
+    if (! topmost)
     {
-        top->setAlwaysOnTop (false);
-        top->setAlwaysOnTop (true);
+        engine.logLine ("window lost topmost: restoring");
         SetWindowPos (hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     }
    #else
