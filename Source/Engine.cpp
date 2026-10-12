@@ -252,6 +252,21 @@ void Engine::seek (double clockSecondsTarget)
     }
 }
 
+juce::String Engine::describeState() const
+{
+    juce::String d;
+    if (auto* dev = deviceManager.getCurrentAudioDevice())
+        d << dev->getTypeName() << " / " << dev->getName() << " " << dev->getCurrentSampleRate() << "Hz blk "
+          << dev->getCurrentBufferSizeSamples() << " playing=" << (int) dev->isPlaying();
+    else
+        d << "NO DEVICE";
+    d << " | cb=" << (juce::int64) callbackCount.load() << " lockFail=" << (juce::int64) lockFailures.load()
+      << " clock=" << clockNow.load() << " running=" << (int) clockRunning.load() << " cmd=" << command.load()
+      << " paused=" << (int) paused.load() << " songEnd=" << songEnd.load() << " bpm=" << getBpm()
+      << " tracks=" << (int) tracks.size() << " engineRunning=" << (int) running;
+    return d;
+}
+
 bool Engine::isAudioAlive() const
 {
     auto* device = deviceManager.getCurrentAudioDevice();
@@ -334,7 +349,10 @@ void Engine::audioDeviceIOCallbackWithContext (const float* const* inputChannelD
 
     const juce::ScopedTryLock lock (tracksLock);
     if (! lock.isLocked())
+    {
+        lockFailures.fetch_add (1);
         return;
+    }
 
     updateCompensation();
 
