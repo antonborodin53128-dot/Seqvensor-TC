@@ -1078,13 +1078,11 @@ void MainComponent::timerCallback()
         {   // diagnostics: engine state to %APPDATA%\TC\log.txt while playing
             static juce::int64 lastLogged = -1;
             const auto cb = engine.getCallbackCount();
-            if (engine.isPlaying() || cb != lastLogged)
+            static int idleTicks = 0;
+            if (engine.isPlaying() || (++idleTicks % 10) == 1)
             {
                 lastLogged = cb;
-                if (engine.isPlaying())
-                    engine.getDataDirectory().getChildFile ("log.txt").appendText (
-                        juce::Time::getCurrentTime().toString (false, true) + " disp=" + juce::String (displayClock)
-                        + " | " + engine.describeState() + "\n");
+                engine.logLine ("tick disp=" + juce::String (displayClock) + " | " + engine.describeState());
             }
         }
         cpuLabel.setText ("CPU " + juce::String ((int) std::round (engine.getCpuLoad() * 100.0f)) + "%",

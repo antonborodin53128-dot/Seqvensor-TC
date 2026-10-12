@@ -187,8 +187,14 @@ void Engine::addPluginToTrack (const std::shared_ptr<Track>& track, int slotInde
 
 // ---------------------------------------------------------------- transport
 
+void Engine::logLine (const juce::String& m) const
+{
+    getDataDirectory().getChildFile ("log.txt").appendText (juce::Time::getCurrentTime().toString (false, true) + " " + m + "\n");
+}
+
 void Engine::playAll()
 {
+    logLine ("playAll: " + describeState());
     if (clockRunning.load() || command.load() == 1)
         return;   // already playing
 
@@ -219,6 +225,7 @@ void Engine::playAll()
 
 void Engine::pauseAll()
 {
+    logLine ("pauseAll: " + describeState());
     if (! (clockRunning.load() || command.load() == 1))
         return;
 
@@ -229,6 +236,7 @@ void Engine::pauseAll()
 
 void Engine::stopAll()
 {
+    logLine ("stopAll: " + describeState());
     command.store (0);
     clockRunning.store (false);
     paused.store (false);
@@ -263,7 +271,7 @@ juce::String Engine::describeState() const
     d << " | cb=" << (juce::int64) callbackCount.load() << " lockFail=" << (juce::int64) lockFailures.load()
       << " clock=" << clockNow.load() << " running=" << (int) clockRunning.load() << " cmd=" << command.load()
       << " paused=" << (int) paused.load() << " songEnd=" << songEnd.load() << " bpm=" << getBpm()
-      << " tracks=" << (int) tracks.size() << " engineRunning=" << (int) running;
+      << " stopReason=" << stopReason.load() << " stopClock=" << stopClock.load() << " tracks=" << (int) tracks.size() << " engineRunning=" << (int) running;
     return d;
 }
 
@@ -434,6 +442,8 @@ void Engine::audioDeviceIOCallbackWithContext (const float* const* inputChannelD
     const double end = songEnd.load();
     if (clockRunning.load() && end > 0.0 && clockSeconds > end + 0.3)
     {
+        stopReason.store (1);
+        stopClock.store (clockSeconds);
         clockRunning.store (false);
         clockNow.store (0.0);
     }

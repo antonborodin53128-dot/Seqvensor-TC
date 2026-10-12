@@ -93,6 +93,7 @@ public:
     bool isPaused() const { return paused.load(); }
     double getClockSeconds() const { return clockNow.load(); }
     juce::String describeState() const;
+    void logLine (const juce::String& m) const;
     bool isAudioAlive() const;                          // audio device open and delivering blocks
     juce::int64 getCallbackCount() const { return callbackCount.load(); }
     juce::String audioInitError;
@@ -174,6 +175,8 @@ private:
     bool running = false;
     std::atomic<juce::int64> callbackCount { 0 };
     std::atomic<juce::int64> lockFailures { 0 };
+    std::atomic<int> stopReason { 0 };
+    std::atomic<double> stopClock { 0.0 };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Engine)
 };
