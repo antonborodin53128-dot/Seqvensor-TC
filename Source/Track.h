@@ -73,6 +73,7 @@ public:
     // Timeline clips: message thread only (the audio thread reads them under clipLock).
     std::shared_ptr<Clip> addClip (std::shared_ptr<ClipData> data, double startSeconds, int clipId);
     void removeClip (int clipId);
+    void replaceClipData (const std::shared_ptr<Clip>& clip, std::shared_ptr<ClipData> newData);   // swaps the audio of a clip
     const std::vector<std::shared_ptr<Clip>>& getClips() const { return clips; }
     double getEndSeconds() const;          // end of the last non-looping clip
     double getEarliestStart() const;       // start of the first clip (0 if none)

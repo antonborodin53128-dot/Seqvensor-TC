@@ -610,6 +610,31 @@ void MainComponent::showLaneMenu (const std::shared_ptr<Track>& track, double ti
                      });
 }
 
+std::shared_ptr<Track> MainComponent::trackOf (const std::shared_ptr<Clip>& clip) const
+{
+    for (auto& t : engine.getTracks())
+        for (auto& c : t->getClips())
+            if (c == clip)
+                return t;
+    return nullptr;
+}
+
+// Re-stretch the clips that follow the project tempo (called once the tempo has stopped changing).
+void MainComponent::applyTempoFollow()
+{
+    const double bpm = engine.getBpm();
+    juce::Component::SafePointer<MainComponent> safe (this);
+    for (auto& t : engine.getTracks())
+        for (auto& c : t->getClips())
+        {
+            if (! c->followTempo.load() || c->original == nullptr || c->original->fileBpm <= 0.0)
+                continue;
+            if (std::abs (c->effectiveBpm() - bpm) < 0.005 || std::abs (c->stretchTarget.load() - bpm) < 0.005)
+                continue;   // already there, or on its way
+            engine.stretchClip (t, c, bpm, [safe] { if (safe != nullptr) safe->repaintTimeline(); });
+        }
+}
+
 void MainComponent::showClipMenu (const std::shared_ptr<Track>& track, const std::shared_ptr<Clip>& clip, juce::Point<int> screenPos)
 {
     if (timelineView.selected.count (clip->id) == 0)
@@ -618,26 +643,43 @@ void MainComponent::showClipMenu (const std::shared_ptr<Track>& track, const std
 
     const auto group = selectedClips();
     const bool many = group.size() > 1;
-    const int total = (int) clip->data->lengthSeconds();
+    const auto source = clip->original != nullptr ? clip->original : clip->data;
+
+    bool tempoKnown = true;
+    for (auto& c : group)
+        tempoKnown = tempoKnown && c->original != nullptr && c->original->fileBpm > 0.0;
+
+    // tempo line: the file's own tempo, and the one it was stretched to
+    juce::String tempoText;
+    if (many)
+        tempoText = "Выбрано клипов: "_ru + juce::String ((int) group.size());
+    else if (source->fileBpm <= 0.0)
+        tempoText = "Темп: не определён"_ru;
+    else
+    {
+        tempoText = "Темп: "_ru + juce::String (source->fileBpm, 2) + " BPM";
+        if (clip->stretchedToBpm.load() > 0.0)
+            tempoText += "  " + juce::String::fromUTF8 ("\xe2\x86\x92") + "  " + juce::String (clip->stretchedToBpm.load(), 2) + " BPM";
+        if (clip->stretchTarget.load() > 0.0)
+            tempoText += "  (растягиваю...)"_ru;
+    }
 
     juce::PopupMenu m;
-    m.addItem (100, many ? "Выбрано клипов: "_ru + juce::String ((int) group.size())
-                         : clip->data->name + "   ("_ru + juce::String (total / 60) + ":" + juce::String (total % 60).paddedLeft ('0', 2) + ")",
-               false);
+    m.addSectionHeader (many ? "Несколько клипов"_ru : source->file.getFileName());
+    m.addItem (100, tempoText, false);
     m.addSeparator();
-    m.addItem (1, "Определить темп (только показать)"_ru, ! many);
-    m.addItem (2, "Поставить на такт 1"_ru);
-    m.addItem (3, "Поставить на такт раньше (в отсчёт)"_ru);
-    m.addSeparator();
-    m.addItem (4, "Повтор"_ru, true, clip->loop.load());
-    m.addItem (5, "Привязка к сетке"_ru, true, timelineView.snap);
-    m.addItem (6, "Заменить файл..."_ru, ! many);
+    m.addItem (1, "Открыть в проводнике"_ru, ! many);
+    m.addItem (2, "Заменить..."_ru, ! many);
+    m.addItem (3, "Поставить на 1 такт"_ru);
+    m.addItem (4, "Привязка к сетке"_ru, true, timelineView.snap);
+    m.addItem (5, "Привязка к темпу"_ru, tempoKnown, clip->followTempo.load());
+    m.addItem (6, "Растянуть по темпу"_ru, tempoKnown);
     m.addSeparator();
     m.addItem (7, many ? "Удалить выбранные"_ru : "Удалить"_ru);
 
     juce::Component::SafePointer<MainComponent> safe (this);
     m.showMenuAsync (juce::PopupMenu::Options().withTargetScreenArea (juce::Rectangle<int> (screenPos.x, screenPos.y, 1, 1)),
-                     [safe, track, clip, group] (int r)
+                     [safe, track, clip, group, source] (int r)
                      {
                          if (safe == nullptr || r <= 0)
                              return;
@@ -645,18 +687,8 @@ void MainComponent::showClipMenu (const std::shared_ptr<Track>& track, const std
                          auto& eng = safe->engine;
                          switch (r)
                          {
-                             case 1: safe->detectClipTempo (clip); break;
-                             case 2: for (auto& c : group) c->start.store (0.0); eng.clipsChanged(); break;
-                             case 3: for (auto& c : group) c->start.store (-4.0 * eng.getBeatSeconds()); eng.clipsChanged(); break;
-                             case 4:
-                             {
-                                 const bool newValue = ! clip->loop.load();
-                                 for (auto& c : group) c->loop = newValue;
-                                 eng.clipsChanged();
-                                 break;
-                             }
-                             case 5: safe->timelineView.snap = ! safe->timelineView.snap; break;
-                             case 6:
+                             case 1: source->file.revealToUser(); break;
+                             case 2:
                              {
                                  safe->chooser = std::make_unique<juce::FileChooser> ("Выберите аудиофайл"_ru, juce::File(),
                                                                                       "*.wav;*.aif;*.aiff;*.flac;*.mp3;*.ogg");
@@ -667,12 +699,18 @@ void MainComponent::showClipMenu (const std::shared_ptr<Track>& track, const std
                                                                      return;
                                                                  const double start = clip->start.load();
                                                                  const bool loop = clip->loop.load();
+                                                                 const bool follow = clip->followTempo.load();
+                                                                 const double stretched = clip->stretchedToBpm.load();
                                                                  safe->engine.addClipFromFile (track, fc.getResult(), start,
-                                                                     [safe, track, clip, loop] (std::shared_ptr<Clip> fresh, const juce::String&)
+                                                                     [safe, track, clip, loop, follow, stretched] (std::shared_ptr<Clip> fresh, const juce::String&)
                                                                      {
                                                                          if (safe == nullptr || fresh == nullptr)
                                                                              return;
                                                                          fresh->loop = loop;
+                                                                         fresh->followTempo = follow;
+                                                                         if (stretched > 0.0)
+                                                                             safe->engine.stretchClip (track, fresh, stretched,
+                                                                                                       [safe] { if (safe != nullptr) safe->repaintTimeline(); });
                                                                          safe->engine.removeClip (track, clip->id);
                                                                          safe->timelineView.selected.clear();
                                                                          safe->repaintTimeline();
@@ -680,39 +718,27 @@ void MainComponent::showClipMenu (const std::shared_ptr<Track>& track, const std
                                                              });
                                  break;
                              }
+                             case 3: for (auto& c : group) c->start.store (0.0); eng.clipsChanged(); break;
+                             case 4: safe->timelineView.snap = ! safe->timelineView.snap; break;
+                             case 5:
+                             {
+                                 const bool newValue = ! clip->followTempo.load();
+                                 for (auto& c : group)
+                                     c->followTempo = newValue;
+                                 if (newValue)
+                                     safe->applyTempoFollow();   // match the project tempo right away
+                                 break;
+                             }
+                             case 6:
+                                 for (auto& c : group)
+                                     if (auto owner = safe->trackOf (c))
+                                         eng.stretchClip (owner, c, eng.getBpm(), [safe] { if (safe != nullptr) safe->repaintTimeline(); });
+                                 break;
                              case 7: safe->deleteSelectedClips(); break;
                              default: break;
                          }
                          safe->repaintTimeline();
                      });
-}
-
-void MainComponent::detectClipTempo (const std::shared_ptr<Clip>& clip)
-{
-    statusLabel.setText ("Определяю темп..."_ru, juce::dontSendNotification);
-    juce::Component::SafePointer<MainComponent> safe (this);
-    auto data = clip->data;
-
-    juce::Thread::launch ([safe, data]
-    {
-        std::vector<float> mono;
-        data->getMono (mono, (int) (data->sampleRate * 150.0));
-        const double bpm = detectTempo (mono, data->sampleRate);
-
-        juce::MessageManager::callAsync ([safe, bpm]
-        {
-            if (safe == nullptr)
-                return;
-            if (bpm > 0.0)
-            {
-                safe->statusLabel.setText ("Темп файла: "_ru + juce::String (bpm, 2) + " (темп проекта не изменён)"_ru,
-                                           juce::dontSendNotification);
-            }
-            else
-                safe->statusLabel.setText ("Темп определить не удалось"_ru, juce::dontSendNotification);
-            safe->repaintTimeline();
-        });
-    });
 }
 
 // ---------------------------------------------------------------- strip menus
@@ -1156,6 +1182,13 @@ void MainComponent::timerCallback()
     if (++slowCounter >= 15)   // twice a second
     {
         slowCounter = 0;
+        {   // clips that follow the project tempo: act once the tempo has stopped changing
+            const double bpmNow = engine.getBpm();
+            if (bpmNow != followLastBpm)
+                followLastBpm = bpmNow;
+            else
+                applyTempoFollow();
+        }
         {   // diagnostics: engine state to %APPDATA%\TC\log.txt while playing
             static juce::int64 lastLogged = -1;
             const auto cb = engine.getCallbackCount();

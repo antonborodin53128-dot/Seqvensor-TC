@@ -4,6 +4,7 @@
 #include "Text.h"
 
 #include <functional>
+#include <mutex>
 #include <map>
 #include <set>
 
@@ -105,6 +106,9 @@ public:
                           std::function<void (std::shared_ptr<Clip> clip, const juce::String& error)> done = {});
     void removeClip (const std::shared_ptr<Track>& track, int clipId);
     void clipsChanged();                                // recomputes the end of the song
+    // Time-stretch the audio of a clip to a project tempo (pitch unchanged), in the background. The newest request wins.
+    void stretchClip (const std::shared_ptr<Track>& track, const std::shared_ptr<Clip>& clip, double targetBpm,
+                      std::function<void()> done = {});
     int takeClipId() { return nextClipId++; }
 
     double getSampleRate() const { return currentSampleRate; }
@@ -157,6 +161,7 @@ private:
     std::atomic<bool> clockRunning { false };
     std::atomic<bool> paused { false };
     std::atomic<double> clockNow { 0.0 };       // clock time at the end of the last audio block
+    std::mutex stretchMutex;                    // one time-stretch job at a time
     std::atomic<int> command { 0 };             // 1 = (re)start the clock at commandClock
     std::atomic<double> commandClock { 0.0 };
     double clockSeconds = 0.0;                  // audio thread only

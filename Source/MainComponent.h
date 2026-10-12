@@ -56,7 +56,8 @@ private:
     void showLaneMenu (const std::shared_ptr<Track>& track, double time, juce::Point<int> screenPos);
     void chooseAudioFor (const std::shared_ptr<Track>& track, double time);
     void addAudioFiles (const std::shared_ptr<Track>& track, const juce::StringArray& files, double time);
-    void detectClipTempo (const std::shared_ptr<Clip>& clip);
+    std::shared_ptr<Track> trackOf (const std::shared_ptr<Clip>& clip) const;
+    void applyTempoFollow();
     void zoomTimeline (float wheelDelta);
     void seekTimeline (double clockSeconds);
     void repaintTimeline();
@@ -150,7 +151,7 @@ private:
     bool pinned = true;
     int autosaveCounter = 0;
     int slowCounter = 0;
-    double lastScroll = -1.0e18, lastSpan = 0.0, lastBpm = 0.0;
+    double lastScroll = -1.0e18, lastSpan = 0.0, lastBpm = 0.0, followLastBpm = 0.0;
     double displayClock = 0.0, engineClockSeen = 0.0, engineClockStamp = 0.0, lastFrameStamp = 0.0;
     juce::VBlankAttachment vblank;
     bool timelineDirty = true;

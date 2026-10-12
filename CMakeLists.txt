@@ -14,6 +14,20 @@ FetchContent_Declare(JUCE
     GIT_SHALLOW TRUE)
 FetchContent_MakeAvailable(JUCE)
 
+# Time-stretch without changing the pitch: Signalsmith Stretch + Signalsmith Linear (both MIT licensed).
+# Header-only: only fetched, their own CMake files are not used.
+FetchContent_Declare(signalsmith_linear
+    GIT_REPOSITORY https://github.com/Signalsmith-Audio/linear.git
+    GIT_TAG 0.6.4
+    GIT_SHALLOW TRUE
+    SOURCE_SUBDIR no-cmake-here)
+FetchContent_Declare(signalsmith_stretch
+    GIT_REPOSITORY https://github.com/Signalsmith-Audio/signalsmith-stretch.git
+    GIT_TAG 1.4.0
+    GIT_SHALLOW TRUE
+    SOURCE_SUBDIR no-cmake-here)
+FetchContent_MakeAvailable(signalsmith_linear signalsmith_stretch)
+
 juce_add_gui_app(TC
     PRODUCT_NAME "TC"
     COMPANY_NAME "TC"
@@ -28,7 +42,8 @@ target_sources(TC PRIVATE
     Source/Timeline.cpp
     Source/PlayerBar.cpp
     Source/Clip.cpp
-    Source/TempoDetect.cpp)
+    Source/TempoDetect.cpp
+    Source/Stretch.cpp)
 
 target_compile_definitions(TC PRIVATE
     JUCE_APPLICATION_NAME_STRING="TC"
@@ -45,8 +60,12 @@ target_compile_definitions(TC PRIVATE
     JUCE_MODAL_LOOPS_PERMITTED=1
     JUCE_STRICT_REFCOUNTEDPOINTER=1)
 
-# Source files are UTF-8 (Russian UI text).
-target_compile_options(TC PRIVATE "$<$<CXX_COMPILER_ID:MSVC>:/utf-8>")
+target_include_directories(TC PRIVATE
+    ${signalsmith_stretch_SOURCE_DIR}
+    ${signalsmith_linear_SOURCE_DIR}/include)
+
+# Source files are UTF-8 (Russian UI text); /bigobj for the template-heavy Signalsmith headers.
+target_compile_options(TC PRIVATE "$<$<CXX_COMPILER_ID:MSVC>:/utf-8>" "$<$<CXX_COMPILER_ID:MSVC>:/bigobj>")
 
 target_link_libraries(TC PRIVATE
     juce::juce_audio_basics

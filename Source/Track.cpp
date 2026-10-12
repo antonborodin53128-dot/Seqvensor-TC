@@ -132,6 +132,7 @@ std::shared_ptr<Clip> Track::addClip (std::shared_ptr<ClipData> data, double sta
 {
     auto clip = std::make_shared<Clip>();
     clip->id = clipId;
+    clip->original = data;
     clip->data = std::move (data);
     clip->start.store (startSeconds);
 
@@ -140,6 +141,15 @@ std::shared_ptr<Clip> Track::addClip (std::shared_ptr<ClipData> data, double sta
         clips.push_back (clip);
     }
     return clip;
+}
+
+void Track::replaceClipData (const std::shared_ptr<Clip>& clip, std::shared_ptr<ClipData> newData)
+{
+    {
+        const juce::SpinLock::ScopedLockType sl (clipLock);
+        std::swap (clip->data, newData);
+    }
+    // newData now holds the previous audio and is released here, outside the lock and off the audio thread
 }
 
 void Track::removeClip (int clipId)

@@ -1,4 +1,6 @@
 #include "Engine.h"
+#include "Stretch.h"
+#include "TempoDetect.h"
 
 Engine::Engine()
 {
@@ -545,6 +547,12 @@ void Engine::addClipFromFile (const std::shared_ptr<Track>& track, const juce::F
     {
         juce::String error;
         auto data = ClipData::load (file, error);
+        if (data != nullptr)
+        {
+            std::vector<float> mono;
+            data->getMono (mono, (int) (data->sampleRate * 150.0));
+            data->fileBpm = detectTempo (mono, data->sampleRate);   // shown in the clip menu, used for the stretch
+        }
 
         juce::MessageManager::callAsync ([this, weak, data, error, startSeconds, done]
         {
@@ -564,6 +572,49 @@ void Engine::addClipFromFile (const std::shared_ptr<Track>& track, const juce::F
             }
             if (done)
                 done (clip, error);
+        });
+    });
+}
+
+void Engine::stretchClip (const std::shared_ptr<Track>& track, const std::shared_ptr<Clip>& clip, double targetBpm,
+                          std::function<void()> done)
+{
+    const double sourceBpm = clip->original != nullptr ? clip->original->fileBpm : 0.0;
+    if (sourceBpm <= 0.0 || targetBpm <= 0.0)
+    {
+        if (done)
+            done();
+        return;
+    }
+
+    const double ratio = juce::jlimit (0.25, 4.0, sourceBpm / targetBpm);   // < 1: the file is slower than the project
+    const bool untouched = std::abs (ratio - 1.0) < 0.0005;
+    clip->stretchTarget.store (targetBpm);
+    const int gen = ++clip->stretchGen;
+
+    std::weak_ptr<Track> weakTrack = track;
+    std::weak_ptr<Clip> weakClip = clip;
+    juce::Thread::launch ([this, weakTrack, weakClip, original = clip->original, ratio, untouched, targetBpm, gen, done]
+    {
+        std::lock_guard<std::mutex> lock (stretchMutex);
+        auto isStale = [weakClip, gen] { auto c = weakClip.lock(); return c == nullptr || c->stretchGen.load() != gen; };
+        if (isStale())
+            return;
+
+        auto result = untouched ? original : stretchClipData (*original, ratio, isStale);
+
+        juce::MessageManager::callAsync ([this, weakTrack, weakClip, result, untouched, targetBpm, gen, done]
+        {
+            auto t = weakTrack.lock();
+            auto c = weakClip.lock();
+            if (t == nullptr || c == nullptr || result == nullptr || c->stretchGen.load() != gen)
+                return;
+            t->replaceClipData (c, result);
+            c->stretchedToBpm.store (untouched ? 0.0 : targetBpm);
+            c->stretchTarget.store (0.0);
+            clipsChanged();
+            if (done)
+                done();
         });
     });
 }
@@ -603,9 +654,11 @@ namespace
             for (auto& c : t->getClips())
             {
                 auto* ce = te->createNewChildElement ("CLIP");
-                ce->setAttribute ("file", c->data->file.getFullPathName());
+                ce->setAttribute ("file", (c->original != nullptr ? c->original : c->data)->file.getFullPathName());
                 ce->setAttribute ("start", c->start.load());
                 ce->setAttribute ("loop", c->loop.load());
+                ce->setAttribute ("follow", c->followTempo.load());
+                ce->setAttribute ("stretchBpm", c->stretchedToBpm.load());
             }
 
             for (int i = 0; i < Track::numSlots; ++i)
@@ -718,10 +771,17 @@ void Engine::fillSequence (const std::shared_ptr<Sequence>& seq)
                 continue;
             seq->pending++;
             addClipFromFile (track, f, ce->getDoubleAttribute ("start", 0.0),
-                             [finished, loop = ce->getBoolAttribute ("loop", false)] (std::shared_ptr<Clip> clip, const juce::String&)
+                             [this, track, finished, loop = ce->getBoolAttribute ("loop", false),
+                              follow = ce->getBoolAttribute ("follow", false), stretchBpm = ce->getDoubleAttribute ("stretchBpm", 0.0)]
+                             (std::shared_ptr<Clip> clip, const juce::String&)
                              {
                                  if (clip != nullptr)
+                                 {
                                      clip->loop = loop;
+                                     clip->followTempo = follow;
+                                     if (stretchBpm > 0.0)
+                                         stretchClip (track, clip, stretchBpm);   // restore the stretched audio
+                                 }
                                  finished();
                              });
         }

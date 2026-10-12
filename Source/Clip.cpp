@@ -35,24 +35,29 @@ std::shared_ptr<ClipData> ClipData::load (const juce::File& file, juce::String& 
         reader->read (&d->audio, (int) pos, n, pos, true, channels > 1);
     }
 
-    const int blocks = (d->numSamples + peakBlock - 1) / peakBlock;
-    d->peaks.assign ((size_t) blocks * 2, 0.0f);
-    const float* l = d->audio.getReadPointer (0);
-    const float* r = channels > 1 ? d->audio.getReadPointer (1) : nullptr;
+    d->buildPeaks();
+    return d;
+}
+
+void ClipData::buildPeaks()
+{
+    const int blocks = (numSamples + peakBlock - 1) / peakBlock;
+    peaks.assign ((size_t) blocks * 2, 0.0f);
+    const float* l = audio.getReadPointer (0);
+    const float* r = audio.getNumChannels() > 1 ? audio.getReadPointer (1) : nullptr;
     for (int b = 0; b < blocks; ++b)
     {
         float lo = 1.0e9f, hi = -1.0e9f;
-        const int s0 = b * peakBlock, s1 = juce::jmin (d->numSamples, s0 + peakBlock);
+        const int s0 = b * peakBlock, s1 = juce::jmin (numSamples, s0 + peakBlock);
         for (int i = s0; i < s1; ++i)
         {
             const float v = r != nullptr ? 0.5f * (l[i] + r[i]) : l[i];
             lo = juce::jmin (lo, v);
             hi = juce::jmax (hi, v);
         }
-        d->peaks[(size_t) b * 2] = lo;
-        d->peaks[(size_t) b * 2 + 1] = hi;
+        peaks[(size_t) b * 2] = lo;
+        peaks[(size_t) b * 2 + 1] = hi;
     }
-    return d;
 }
 
 void ClipData::draw (juce::Graphics& g, juce::Rectangle<int> area, double t0, double t1) const
