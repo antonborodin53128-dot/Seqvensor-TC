@@ -459,18 +459,8 @@ void MainComponent::rebuildTracks()
     lane.emptyPressed = [this] (const juce::ModifierKeys& m) { emptyPressed (m); };
     lane.marquee = [this] (juce::Rectangle<int> r, bool finished) { marqueeSelect (r, finished); };
     lane.focus = [this] { grabKeyboardFocus(); };
-    // A menu opened by the click that dismissed another menu would end up under the window that Windows raises
-    // at that moment, so it is shown a moment later, when the window order has settled.
-    lane.clipMenu = [this] (std::shared_ptr<Track> t, std::shared_ptr<Clip> c, juce::Point<int> p)
-    {
-        juce::Component::SafePointer<MainComponent> safe (this);
-        juce::Timer::callAfterDelay (70, [safe, t, c, p] { if (safe != nullptr) safe->showClipMenu (t, c, p); });
-    };
-    lane.laneMenu = [this] (std::shared_ptr<Track> t, double time, juce::Point<int> p)
-    {
-        juce::Component::SafePointer<MainComponent> safe (this);
-        juce::Timer::callAfterDelay (70, [safe, t, time, p] { if (safe != nullptr) safe->showLaneMenu (t, time, p); });
-    };
+    lane.clipMenu = [this] (std::shared_ptr<Track> t, std::shared_ptr<Clip> c, juce::Point<int> p) { showClipMenu (t, c, p); raiseMenus(); };
+    lane.laneMenu = [this] (std::shared_ptr<Track> t, double time, juce::Point<int> p) { showLaneMenu (t, time, p); raiseMenus(); };
     lane.filesDropped = [this] (std::shared_ptr<Track> t, const juce::StringArray& f, double time) { addAudioFiles (t, f, time); };
     lane.changed = [this] { repaintTimeline(); };
 
@@ -1216,6 +1206,24 @@ void MainComponent::updateTimeline()
 
 // Menus popping up and being dismissed by a click elsewhere can make Windows drop the "topmost" state of the
 // window, which then sinks behind other programs. Check the real state and restore it.
+// A menu opened by the click that dismissed another menu can end up under the window Windows raises at that
+// moment. Bring every other (popup) window of the program in front of the main one shortly afterwards.
+void MainComponent::raiseMenus()
+{
+    juce::Component::SafePointer<MainComponent> safe (this);
+    juce::Timer::callAfterDelay (40, [safe]
+    {
+        if (safe == nullptr)
+            return;
+        auto* top = safe->getTopLevelComponent();
+        auto& desktop = juce::Desktop::getInstance();
+        for (int i = 0; i < desktop.getNumComponents(); ++i)
+            if (auto* c = desktop.getComponent (i))
+                if (c != top && c->isVisible() && c->isAlwaysOnTop())
+                    c->toFront (false);
+    });
+}
+
 void MainComponent::keepOnTop()
 {
     if (! pinned)
@@ -1279,7 +1287,7 @@ void MainComponent::timerCallback()
             if (engine.isPlaying() || (++idleTicks % 10) == 1)
             {
                 lastLogged = cb;
-                engine.logLine ("tick disp=" + juce::String (displayClock) + " | " + engine.describeState());
+                engine.logLine ("tick disp=" + juce::String (displayClock) + " main=" + getBounds().toString() + " top=" + (getTopLevelComponent() != nullptr ? getTopLevelComponent()->getBounds().toString() : juce::String()) + " | " + engine.describeState());
             }
         }
         cpuLabel.setText ("CPU " + juce::String ((int) std::round (engine.getCpuLoad() * 100.0f)) + "%",

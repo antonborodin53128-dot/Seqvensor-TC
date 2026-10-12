@@ -100,6 +100,7 @@ private:
     void addTrack();
     void tapTempo();
     void keepOnTop();
+    void raiseMenus();
     void setPinned (bool pinned);
 
     void rebuildTracks();
