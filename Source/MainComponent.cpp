@@ -201,7 +201,17 @@ MainComponent::MainComponent()
     addAndMakeVisible (analysisButton);
 
     playAllButton.setTooltip ("Играть. Если метроном включён хотя бы на одной дорожке - сначала 4 удара отсчёта (такт перед первым)."_ru);
-    playAllButton.onClick = [this] { engine.playAll(); };
+    playAllButton.onClick = [this]
+    {
+        if (! engine.isAudioAlive())
+        {
+            say ("Аудиоустройство не запущено - выберите драйвер и устройство вывода"_ru
+                 + (engine.audioInitError.isNotEmpty() ? " (" + engine.audioInitError + ")" : juce::String()));
+            showAudioSettings();
+            return;
+        }
+        engine.playAll();
+    };
     addAndMakeVisible (playAllButton);
     pauseAllButton.setTooltip ("Пауза: всё замирает, Play продолжит с этого места"_ru);
     pauseAllButton.onClick = [this] { engine.pauseAll(); };

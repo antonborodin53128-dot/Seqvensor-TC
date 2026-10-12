@@ -92,6 +92,9 @@ public:
     bool isPlaying() const;
     bool isPaused() const { return paused.load(); }
     double getClockSeconds() const { return clockNow.load(); }
+    bool isAudioAlive() const;                          // audio device open and delivering blocks
+    juce::int64 getCallbackCount() const { return callbackCount.load(); }
+    juce::String audioInitError;
     double getBeatSeconds() const { return 60.0 / getBpm(); }
 
     // Audio clips (message thread). The file is decoded on a background thread.
@@ -168,6 +171,7 @@ private:
     double currentSampleRate = 48000.0;
     int currentBlockSize = 512;
     bool running = false;
+    std::atomic<juce::int64> callbackCount { 0 };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Engine)
 };

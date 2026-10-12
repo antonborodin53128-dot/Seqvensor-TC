@@ -29,9 +29,16 @@ void Engine::initialise()
 
     // saved audio setup
     std::unique_ptr<juce::XmlElement> audioState = juce::XmlDocument::parse (getDataDirectory().getChildFile ("audio.xml"));
-    const auto error = deviceManager.initialise (64, 64, audioState.get(), true);
-    if (error.isNotEmpty())
+    auto error = deviceManager.initialise (64, 64, audioState.get(), true);
+    if (error.isNotEmpty() || deviceManager.getCurrentAudioDevice() == nullptr)
+    {
+        // saved / requested setup did not open: fall back to the system default, then to output only
         juce::Logger::writeToLog ("Audio init: " + error);
+        error = deviceManager.initialise (2, 2, nullptr, true);
+        if (deviceManager.getCurrentAudioDevice() == nullptr)
+            error = deviceManager.initialise (0, 2, nullptr, true);
+    }
+    audioInitError = error;
 
     deviceManager.addAudioCallback (this);
 }
@@ -245,6 +252,12 @@ void Engine::seek (double clockSecondsTarget)
     }
 }
 
+bool Engine::isAudioAlive() const
+{
+    auto* device = deviceManager.getCurrentAudioDevice();
+    return device != nullptr && device->isPlaying() && running;
+}
+
 bool Engine::isPlaying() const
 {
     return clockRunning.load() || command.load() == 1;
@@ -312,6 +325,7 @@ void Engine::audioDeviceIOCallbackWithContext (const float* const* inputChannelD
                                                const juce::AudioIODeviceCallbackContext&)
 {
     juce::ScopedNoDenormals noDenormals;
+    callbackCount.fetch_add (1);
     const juce::AudioProcessLoadMeasurer::ScopedTimer timer (loadMeasure, numSamples);
 
     for (int c = 0; c < numOutputChannels; ++c)
