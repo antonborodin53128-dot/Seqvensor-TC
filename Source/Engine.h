@@ -158,6 +158,7 @@ public:
     void dropSequences (const std::vector<juce::File>& keep);              // frees cached sequences (the active one stays)
     void renameSequenceFile (const juce::File& from, const juce::File& to);
     void forgetSequence (const juce::File& file);
+    void pruneAnalysisCacheSoon();   // drops cached analyses of audio files no project uses any more (background)
     void relocateSequences (const juce::File& oldDir, const juce::File& newDir);   // a folder was renamed
 
     std::function<void()> onTracksChanged;
@@ -215,6 +216,8 @@ private:
     bool findCached (const juce::String& key, FileAnalysis& out);
     void storeCached (const juce::String& key, const FileAnalysis& a);
     void loadAnalysisCache();
+    void pruneAnalysisCache();
+    std::atomic<bool> pruning { false };
     static void applyAnalysis (ClipData& d, const FileAnalysis& a);
 
     double currentSampleRate = 48000.0;

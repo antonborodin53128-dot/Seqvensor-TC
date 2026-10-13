@@ -1834,20 +1834,37 @@ void MainComponent::deletePlaylistConfirm()
 void MainComponent::preloadNeighbours()
 {
     std::vector<juce::File> keep;
-    if (auto seq = engine.getActiveSequence())
-        keep.push_back (seq->file);
+    auto addKeep = [&keep] (const juce::File& f)
+    {
+        if (std::find (keep.begin(), keep.end(), f) == keep.end())
+            keep.push_back (f);
+    };
 
+    if (auto seq = engine.getActiveSequence())
+    {
+        addKeep (seq->file);
+        // the songs visited last stay in memory: going back is instant
+        recentSongs.erase (std::remove (recentSongs.begin(), recentSongs.end(), seq->file), recentSongs.end());
+        recentSongs.insert (recentSongs.begin(), seq->file);
+        if (recentSongs.size() > 5)
+            recentSongs.resize (5);
+    }
+    for (auto& f : recentSongs)
+        addKeep (f);
+
+    // the next / previous songs of the playlist are loaded in the background, the nearest first
     if (playlistIndex >= 0)
-        for (int i : { playlistIndex - 1, playlistIndex + 1 })
-            if (i >= 0 && i < playlist.items.size())
-            {
-                auto f = library.sequenceFile (playlist.items[i]);
-                if (f.existsAsFile())
+        for (int d = 1; d <= 3; ++d)
+            for (int i : { playlistIndex + d, playlistIndex - d })
+                if (i >= 0 && i < playlist.items.size())
                 {
-                    engine.obtainSequence (f);   // loads clips and plugins in the background
-                    keep.push_back (f);
+                    auto f = library.sequenceFile (playlist.items[i]);
+                    if (f.existsAsFile())
+                    {
+                        engine.obtainSequence (f);
+                        addKeep (f);
+                    }
                 }
-            }
 
     engine.dropSequences (keep);
 }
@@ -2068,6 +2085,7 @@ void MainComponent::showDeleteMenu()
                                                       safe->switchToSequence (next, safe->playlist.items.indexOf (next));
                                                       safe->engine.forgetSequence (file);
                                                       file.deleteFile();
+                                                      safe->engine.pruneAnalysisCacheSoon();
                                                       if (others.isEmpty())
                                                           safe->engine.saveActiveSequence();
                                                       safe->refreshPlayerBar();
