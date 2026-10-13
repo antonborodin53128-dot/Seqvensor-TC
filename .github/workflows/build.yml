@@ -62,10 +62,10 @@ jobs:
           path: out/TC-${{ matrix.name }}.exe
 
       - name: Publish to release
-        if: github.ref_name == 'main'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release view latest >/dev/null 2>&1 || gh release create latest --title "TC (latest build)" --notes "Automatic builds from main. TC-x64.exe works everywhere, TC-arm64.exe is native for Windows on ARM."
-          gh release upload latest out/TC-${{ matrix.name }}.exe --clobber
+          if [ "${{ github.ref_name }}" = "main" ]; then tag=latest; else tag=preview; fi
+          gh release view $tag >/dev/null 2>&1 || gh release create $tag --title "TC ($tag build)" --notes "Automatic builds. 'latest' = main, 'preview' = test branches." $( [ $tag = preview ] && echo --prerelease )
+          gh release upload $tag out/TC-${{ matrix.name }}.exe --clobber
