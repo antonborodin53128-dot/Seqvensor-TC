@@ -1164,7 +1164,7 @@ void MainComponent::showAnalysisSettings()
     for (auto& t : engine.getTracks())
     {
         const bool hasIn = t->inputL.load() >= 0;
-        trackMenu.addItem (1001 + idx, t->name + (hasIn ? juce::String() : " ("_ru + "нет входа"_ru + ")"), hasIn, curTrack == t->id);
+        trackMenu.addItem (1001 + idx, t->name + (hasIn ? juce::String() : "  (нет входа: задайте на дорожке)"_ru), true, curTrack == t->id);
         if (curTrack == t->id)
             trackText = t->name;
         ++idx;
@@ -1181,7 +1181,6 @@ void MainComponent::showAnalysisSettings()
     m.addItem (22, "Определять Live (по входу дорожки)"_ru, true, tm == 2);
     m.addSectionHeader ("Live слушает вход дорожки"_ru);
     m.addSubMenu ("Дорожка: "_ru + trackText, trackMenu);
-    m.addItem (3, "Забыть накопленное (новая песня)"_ru);
 
     juce::Component::SafePointer<MainComponent> safe (this);
     m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&analysisButton),
