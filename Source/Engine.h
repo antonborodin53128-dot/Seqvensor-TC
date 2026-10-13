@@ -224,7 +224,7 @@ private:
     std::atomic<double> stopClock { 0.0 };
 
     // one background thread for the (slow) analysis of new files; declared last: stopped first
-    juce::ThreadPool analysisPool { juce::ThreadPoolOptions{}.withNumberOfThreads (1).withThreadName ("TC analysis").withThreadPriority (juce::Thread::Priority::low) };
+    juce::ThreadPool analysisPool { juce::ThreadPoolOptions{}.withNumberOfThreads (1).withThreadName ("TC analysis").withDesiredThreadPriority (juce::Thread::Priority::low) };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Engine)
 };
