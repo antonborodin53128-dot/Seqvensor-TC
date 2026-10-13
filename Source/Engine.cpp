@@ -51,7 +51,8 @@ void Engine::initialise()
         {
             keyMode = juce::jlimit (0, 2, parts[0].getIntValue());
             tempoMode = juce::jlimit (0, 2, parts[1].getIntValue());
-            liveKey.setChannels (parts[2].getIntValue(), parts[3].getIntValue());
+            if (parts.size() >= 5)
+                liveTrackId = parts[4].getIntValue();
             applyAnalysisModes();
         }
     }
@@ -61,10 +62,31 @@ void Engine::initialise()
 
 void Engine::saveLiveKeySettings() const
 {
-    int l = -1, r = -1;
-    liveKey.getChannels (l, r);
     getDataDirectory().getChildFile ("analysis.txt").replaceWithText (juce::String (keyMode.load()) + " " + juce::String (tempoMode.load())
-                                                                      + " " + juce::String (l) + " " + juce::String (r));
+                                                                      + " -1 -1 " + juce::String (liveTrackId.load()));
+}
+
+void Engine::syncLiveSource()
+{
+    int l = -1, r = -1;
+    for (auto& t : getTracks())
+    {
+        if (t->inputL.load() < 0 || t->busId.load() >= 0)
+            continue;
+        if (liveTrackId.load() < 0 || t->id == liveTrackId.load())
+        {
+            l = t->inputL.load();
+            r = t->inputR.load();
+            break;
+        }
+    }
+    int cl = -1, cr = -1;
+    liveKey.getChannels (cl, cr);
+    if (cl != l || cr != r)
+    {
+        liveKey.setChannels (l, r);
+        liveKey.reset();
+    }
 }
 
 void Engine::shutdown()

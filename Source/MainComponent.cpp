@@ -1154,49 +1154,34 @@ void MainComponent::showPluginScanner()
 
 void MainComponent::showAnalysisSettings()
 {
-    // input channels as the audio callback numbers them: only the active ones, in order
-    juce::StringArray names;
-    if (auto* dev = engine.deviceManager.getCurrentAudioDevice())
-    {
-        const auto all = dev->getInputChannelNames();
-        const auto active = dev->getActiveInputChannels();
-        for (int i = 0; i < all.size(); ++i)
-            if (active[i])
-                names.add (all[i]);
-    }
-
-    int curL = -1, curR = -1;
-    engine.liveKey.getChannels (curL, curR);
     const int km = engine.keyMode.load(), tm = engine.tempoMode.load();
+    const int curTrack = engine.liveTrackId.load();
 
-    juce::PopupMenu mono, pairs;
-    for (int i = 0; i < names.size() && i < 64; ++i)
-        mono.addItem (1000 + i, juce::String (i + 1) + ": " + names[i], true, curL == i && curR < 0);
-    for (int i = 0; i + 1 < names.size() && i < 64; i += 2)
-        pairs.addItem (2000 + i, juce::String (i + 1) + "+" + juce::String (i + 2), true, curL == i && curR == i + 1);
-
-    juce::String channelText = "не выбран"_ru;
-    if (curL >= 0)
-        channelText = curR >= 0 ? juce::String (curL + 1) + "+" + juce::String (curR + 1) : juce::String (curL + 1);
+    juce::PopupMenu trackMenu;
+    juce::String trackText = "первая дорожка со входом"_ru;
+    trackMenu.addItem (1000, "Первая дорожка со входом (авто)"_ru, true, curTrack < 0);
+    int idx = 0;
+    for (auto& t : engine.getTracks())
+    {
+        const bool hasIn = t->inputL.load() >= 0;
+        trackMenu.addItem (1001 + idx, t->name + (hasIn ? juce::String() : " ("_ru + "нет входа"_ru + ")"), hasIn, curTrack == t->id);
+        if (curTrack == t->id)
+            trackText = t->name;
+        ++idx;
+    }
 
     juce::PopupMenu m;
     m.addSectionHeader ("Тональность"_ru);
     m.addItem (10, "Вручную (без определения)"_ru, true, km == 0);
     m.addItem (11, "Определять по миксу"_ru, true, km == 1);
-    m.addItem (12, "Определять Live (по входному каналу)"_ru, true, km == 2);
+    m.addItem (12, "Определять Live (по входу дорожки)"_ru, true, km == 2);
     m.addSectionHeader ("Темп"_ru);
     m.addItem (20, "Вручную"_ru, true, tm == 0);
     m.addItem (21, "Определять по миксу"_ru, true, tm == 1);
-    m.addItem (22, "Определять Live (по входному каналу)"_ru, true, tm == 2);
-    m.addSectionHeader ("Входной канал для Live: "_ru + channelText);
-    if (names.isEmpty())
-        m.addItem (99, "Нет входных каналов: включите их в настройках аудио"_ru, false);
-    else
-    {
-        m.addSubMenu ("Моно-канал"_ru, mono, true, nullptr, curL >= 0 && curR < 0);
-        m.addSubMenu ("Стерео-пара"_ru, pairs, true, nullptr, curL >= 0 && curR >= 0);
-    }
-    m.addItem (3, "Забыть накопленное (новая песня)"_ru, curL >= 0);
+    m.addItem (22, "Определять Live (по входу дорожки)"_ru, true, tm == 2);
+    m.addSectionHeader ("Live слушает вход дорожки"_ru);
+    m.addSubMenu ("Дорожка: "_ru + trackText, trackMenu);
+    m.addItem (3, "Забыть накопленное (новая песня)"_ru);
 
     juce::Component::SafePointer<MainComponent> safe (this);
     m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&analysisButton),
@@ -1205,34 +1190,29 @@ void MainComponent::showAnalysisSettings()
                          if (safe == nullptr || r <= 0)
                              return;
                          auto& eng = safe->engine;
-                         bool askChannel = false;
                          if (r >= 10 && r <= 12)
                          {
                              eng.keyMode = r - 10;
-                             askChannel = r == 12;
                          }
                          else if (r >= 20 && r <= 22)
                          {
                              eng.tempoMode = r - 20;
                              safe->mixSignature = -1;   // the mix tempo is applied once right away
-                             askChannel = r == 22;
                          }
                          else if (r == 3)
                              eng.liveKey.reset();
-                         else if (r >= 2000)
-                             eng.liveKey.setChannels (r - 2000, r - 2000 + 1);
                          else if (r >= 1000)
-                             eng.liveKey.setChannels (r - 1000, -1);
+                         {
+                             const auto& tr = eng.getTracks();
+                             eng.liveTrackId = r == 1000 ? -1 : (r - 1001 < (int) tr.size() ? tr[(size_t) (r - 1001)]->id : -1);
+                             eng.liveKey.reset();
+                         }
 
                          eng.applyAnalysisModes();
                          eng.saveLiveKeySettings();
                          safe->updateKeyDisplay();
                          safe->raiseMenus();
 
-                         int l = -1, rr = -1;
-                         eng.liveKey.getChannels (l, rr);
-                         if (askChannel && l < 0)
-                             juce::MessageManager::callAsync ([safe] { if (safe != nullptr) safe->showAnalysisSettings(); });   // choose the channel
                      });
     raiseMenus();
 }
@@ -1240,6 +1220,7 @@ void MainComponent::showAnalysisSettings()
 // Called twice a second: tempo from the mix / from the input, when those modes are on.
 void MainComponent::updateAutoTempo()
 {
+    engine.syncLiveSource();
     const int tm = engine.tempoMode.load();
     if (tm == 1)
     {
@@ -1286,6 +1267,7 @@ void MainComponent::updateAutoTempo()
 // Text of the key button: the key of the live input if one is listened to, otherwise the key of the mix.
 void MainComponent::updateKeyDisplay()
 {
+    engine.syncLiveSource();
     juce::String text = "Тон: -"_ru, tip;
     const int mode = engine.keyMode.load();
     const int shift = engine.getTranspose();

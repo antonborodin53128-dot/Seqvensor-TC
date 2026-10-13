@@ -131,6 +131,8 @@ public:
     // Transposition of the whole mix in semitones (-12..12), live and without changing the tempo.
     void setTranspose (int semitones);
     int getTranspose() const { return transposeSemis.load(); }
+    std::atomic<int> liveTrackId { -1 };         // track whose input Live analysis listens to (-1 = first track with an input)
+    void syncLiveSource();                       // message thread: point liveKey at that track's input channels
     LiveKeyAnalyzer liveKey;                     // key from a live input channel (no audio track needed)
     void saveLiveKeySettings() const;            // modes and the input channel -> analysis.txt
     // How the key / the tempo are found: 0 = by hand (default, nothing is detected), 1 = from the clips of the mix,
