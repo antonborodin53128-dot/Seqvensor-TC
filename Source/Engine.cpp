@@ -1,6 +1,7 @@
 #include "Engine.h"
 #include "Stretch.h"
 #include "TempoDetect.h"
+#include "LiveStretch.h"
 
 Engine::Engine()
 {
@@ -249,7 +250,7 @@ void Engine::applyTempoChange (double newBpm)
     const double c = live ? clockSeconds : clockNow.load();
 
     for (auto& t : tracks)
-        t->retempo (r, c);
+        t->retempo (r, c, newBpm);
 
     if (live)
     {
@@ -366,6 +367,21 @@ void Engine::audioDeviceAboutToStart (juce::AudioIODevice* device)
         for (auto& t : kv.second->tracks)
             t->prepare (currentSampleRate, currentBlockSize, &playHead);
     running = true;
+
+    // live stretchers are built for one device rate: rebuild the ones that no longer match
+    juce::MessageManager::callAsync ([this]
+    {
+        std::vector<std::shared_ptr<Track>> all = getTracks();
+        {
+            const juce::ScopedLock sl (tracksLock);
+            for (auto& kv : sequenceCache)
+                for (auto& t : kv.second->tracks)
+                    all.push_back (t);
+        }
+        for (auto& t : all)
+            for (auto& c : t->getClips())
+                ensureLive (t, c);
+    });
 }
 
 void Engine::audioDeviceStopped()
@@ -599,6 +615,7 @@ void Engine::addClipFromFile (const std::shared_ptr<Track>& track, const juce::F
     {
         juce::String error;
         auto data = ClipData::load (file, error);
+        std::shared_ptr<LiveStretch> live;
         if (data != nullptr)
         {
             std::vector<float> mono;
@@ -606,9 +623,10 @@ void Engine::addClipFromFile (const std::shared_ptr<Track>& track, const juce::F
             const auto found = detectTempoEx (mono, data->sampleRate);   // shown in the clip menu, used for the stretch
             data->tempoConfidence = found.confidence;
             data->fileBpm = found.confidence >= tempoMinConfidence ? found.bpm : 0.0;
+            live = std::make_shared<LiveStretch> (data, currentSampleRate, data->fileBpm > 0.0);   // for following the tempo
         }
 
-        juce::MessageManager::callAsync ([this, weak, data, error, startSeconds, done]
+        juce::MessageManager::callAsync ([this, weak, data, live, error, startSeconds, done]
         {
             auto t = weak.lock();
             if (t == nullptr)
@@ -621,13 +639,48 @@ void Engine::addClipFromFile (const std::shared_ptr<Track>& track, const juce::F
                 // a playback track has no live input: the default input would only add noise
                 if (! t->inputChosenByUser)
                     t->inputL = -1;
-                clip = t->addClip (data, startSeconds, takeClipId());
+                clip = t->addClip (data, startSeconds, takeClipId(), live);
+                clip->updateSpeed (getBpm());
                 clipsChanged();
             }
             if (done)
                 done (clip, error);
         });
     });
+}
+
+// Makes sure a clip has a live stretcher for the current device rate (built in the background).
+void Engine::ensureLive (const std::shared_ptr<Track>& track, const std::shared_ptr<Clip>& clip)
+{
+    if (clip->original == nullptr || clip->original->fileBpm <= 0.0
+        || (clip->live != nullptr && clip->live->isReady (currentSampleRate)))
+        return;
+    if (clip->liveBuilding.exchange (true))
+        return;
+
+    std::weak_ptr<Track> weakTrack = track;
+    std::weak_ptr<Clip> weakClip = clip;
+    juce::Thread::launch ([this, weakTrack, weakClip, original = clip->original, rate = currentSampleRate]
+    {
+        auto fresh = std::make_shared<LiveStretch> (original, rate, true);
+        juce::MessageManager::callAsync ([weakTrack, weakClip, fresh]
+        {
+            auto c = weakClip.lock();
+            if (c == nullptr)
+                return;
+            if (auto t = weakTrack.lock())
+                t->setLive (c, fresh);
+            c->liveBuilding.store (false);
+        });
+    });
+}
+
+void Engine::refreshClipSpeeds()
+{
+    const double bpm = getBpm();
+    for (auto& t : getTracks())
+        for (auto& c : t->getClips())
+            c->updateSpeed (bpm);
 }
 
 void Engine::stretchClip (const std::shared_ptr<Track>& track, const std::shared_ptr<Clip>& clip, double targetBpm,
@@ -826,14 +879,16 @@ void Engine::fillSequence (const std::shared_ptr<Sequence>& seq)
             seq->pending++;
             addClipFromFile (track, f, ce->getDoubleAttribute ("start", 0.0),
                              [this, track, finished, loop = ce->getBoolAttribute ("loop", false),
-                              follow = ce->getBoolAttribute ("follow", false), stretchBpm = ce->getDoubleAttribute ("stretchBpm", 0.0)]
+                              follow = ce->getBoolAttribute ("follow", false), stretchBpm = ce->getDoubleAttribute ("stretchBpm", 0.0),
+                              seqBpm = seq->bpm]
                              (std::shared_ptr<Clip> clip, const juce::String&)
                              {
                                  if (clip != nullptr)
                                  {
                                      clip->loop = loop;
                                      clip->followTempo = follow;
-                                     if (stretchBpm > 0.0)
+                                     clip->updateSpeed (seqBpm);
+                                     if (stretchBpm > 0.0 && ! follow)
                                          stretchClip (track, clip, stretchBpm);   // restore the stretched audio
                                  }
                                  finished();
@@ -895,6 +950,7 @@ void Engine::activateSequence (const std::shared_ptr<Sequence>& seq)
 
     nextTrackId = maxId + 1;
     setBpm (seq->bpm);
+    refreshClipSpeeds();
     clipsChanged();
     if (onTracksChanged)
         onTracksChanged();

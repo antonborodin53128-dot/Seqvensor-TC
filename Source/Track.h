@@ -71,12 +71,14 @@ public:
     void refreshLatency() { cachedLatency.store (computeLatencySamples()); }
 
     // Timeline clips: message thread only (the audio thread reads them under clipLock).
-    std::shared_ptr<Clip> addClip (std::shared_ptr<ClipData> data, double startSeconds, int clipId);
+    std::shared_ptr<Clip> addClip (std::shared_ptr<ClipData> data, double startSeconds, int clipId,
+                                   std::shared_ptr<LiveStretch> live = nullptr);
+    void setLive (const std::shared_ptr<Clip>& clip, std::shared_ptr<LiveStretch> live);
     void removeClip (int clipId);
     // swaps the audio of a clip; if it is sounding right now, it carries on at the same musical point
     void replaceClipData (const std::shared_ptr<Clip>& clip, std::shared_ptr<ClipData> newData, double clockNow);
     // tempo changed by factor r = oldBpm / newBpm: clips stay on their bars, sounding audio stays continuous
-    void retempo (double r, double clockNow);
+    void retempo (double r, double clockNow, double newBpm);
     void clearShifts();
     const std::vector<std::shared_ptr<Clip>>& getClips() const { return clips; }
     double getEndSeconds() const;          // end of the last non-looping clip

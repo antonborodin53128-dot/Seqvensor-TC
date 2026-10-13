@@ -1,4 +1,5 @@
 #include "Track.h"
+#include "LiveStretch.h"
 
 #include <algorithm>
 #include "Text.h"
@@ -128,12 +129,14 @@ int Track::computeLatencySamples() const
 
 // ---------------------------------------------------------------- clips
 
-std::shared_ptr<Clip> Track::addClip (std::shared_ptr<ClipData> data, double startSeconds, int clipId)
+std::shared_ptr<Clip> Track::addClip (std::shared_ptr<ClipData> data, double startSeconds, int clipId,
+                                      std::shared_ptr<LiveStretch> live)
 {
     auto clip = std::make_shared<Clip>();
     clip->id = clipId;
     clip->original = data;
     clip->data = std::move (data);
+    clip->live = std::move (live);
     clip->start.store (startSeconds);
 
     {
@@ -164,17 +167,35 @@ void Track::replaceClipData (const std::shared_ptr<Clip>& clip, std::shared_ptr<
     // newData now holds the previous audio and is released here, outside the lock and off the audio thread
 }
 
-void Track::retempo (double r, double clockNow)
+void Track::setLive (const std::shared_ptr<Clip>& clip, std::shared_ptr<LiveStretch> live)
+{
+    {
+        const juce::SpinLock::ScopedLockType sl (clipLock);
+        std::swap (clip->live, live);
+    }
+    // the previous stretcher is released here, outside the lock and off the audio thread
+}
+
+void Track::retempo (double r, double clockNow, double newBpm)
 {
     const juce::SpinLock::ScopedLockType sl (clipLock);
     for (auto& c : clips)
     {
         const double s = c->start.load();
-        const double sh = c->shift.load();
-        const double o = (clockNow - s) + sh;
-        // audio that is sounding keeps its place; a clip that has not started yet will start on its bar
-        c->shift.store (o < 0.0 ? 0.0 : sh + (clockNow - s) * (1.0 - r));
+        if (c->follows())
+        {
+            // a following clip is positioned from the bars alone: nothing to keep continuous
+            c->shift.store (0.0);
+        }
+        else
+        {
+            const double sh = c->shift.load();
+            const double o = (clockNow - s) + sh;
+            // audio that is sounding keeps its place; a clip that has not started yet will start on its bar
+            c->shift.store (o < 0.0 ? 0.0 : sh + (clockNow - s) * (1.0 - r));
+        }
         c->start.store (s * r);
+        c->updateSpeed (newBpm);
     }
 }
 
@@ -302,23 +323,48 @@ void Track::renderClips (int n, const ChunkClock& clock)
     auto* l = stereoBuf.getWritePointer (0);
     auto* r = stereoBuf.getWritePointer (1);
 
+    const double bpm = bpmSource != nullptr ? bpmSource->load() : 120.0;
+
     for (auto& c : clips)
     {
-        const ClipData& d = *c->data;
-        const double start = c->start.load() - c->shift.load();
-        const double len = d.lengthSeconds();
+        // A clip that follows the project tempo plays its original through the live stretcher: where it is in
+        // the file follows from the position in bars, so it cannot drift from the metronome.
+        const bool follow = c->follows();
+        const double rho = follow ? bpm / c->original->fileBpm : 1.0;   // file seconds per project second
+        const bool rhoOk = follow && rho >= 0.25 && rho <= 4.0;
+        const bool useLive = rhoOk && std::abs (rho - 1.0) > 0.0005 && c->live != nullptr && c->live->isReady (sampleRate);
+
+        // speed actually played: the stretched one, or the file's own if the stretcher is not available
+        const double sp = (useLive || (rhoOk && std::abs (rho - 1.0) <= 0.0005)) ? rho : 1.0;
+
+        const ClipData& d = follow ? *c->original : *c->data;
+        const double start = c->start.load() - (follow ? 0.0 : c->shift.load());
+        const double len = d.lengthSeconds() / sp;
         const bool loop = c->loop.load();
         const double t0 = clock.startSeconds;
 
         const int i0 = juce::jmax (0, (int) std::ceil ((start - t0) * sampleRate));
         const int i1 = loop ? n : juce::jmin (n, (int) std::ceil ((start + len - t0) * sampleRate));
         if (i0 >= i1 || len <= 0.0)
+        {
+            if (c->live != nullptr)
+                c->live->idle();
             continue;
+        }
+
+        if (useLive)
+        {
+            const double posStart = (t0 + (double) i0 / sampleRate - start) * rho * sampleRate;   // file samples
+            c->live->render (l + i0, r + i0, i1 - i0, posStart, rho, loop);
+            continue;
+        }
+        if (c->live != nullptr)
+            c->live->idle();
 
         const float* L = d.audio.getReadPointer (0);
         const float* R = d.audio.getNumChannels() > 1 ? d.audio.getReadPointer (1) : L;
         const double ratio = d.sampleRate / sampleRate;
-        double pos = (t0 + (double) i0 / sampleRate - start) * d.sampleRate;
+        double pos = (t0 + (double) i0 / sampleRate - start) * sp * d.sampleRate;
         const double total = (double) d.numSamples;
 
         for (int i = i0; i < i1; ++i)

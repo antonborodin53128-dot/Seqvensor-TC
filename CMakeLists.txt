@@ -43,7 +43,8 @@ target_sources(TC PRIVATE
     Source/PlayerBar.cpp
     Source/Clip.cpp
     Source/TempoDetect.cpp
-    Source/Stretch.cpp)
+    Source/Stretch.cpp
+    Source/LiveStretch.cpp)
 
 target_compile_definitions(TC PRIVATE
     JUCE_APPLICATION_NAME_STRING="TC"

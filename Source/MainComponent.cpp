@@ -184,13 +184,7 @@ MainComponent::MainComponent()
     menuButton.onClick = [this] { showMainMenu(); };
     addAndMakeVisible (menuButton);
 
-    bpmSlider.setSliderStyle (juce::Slider::IncDecButtons);
-    bpmSlider.setIncDecButtonsMode (juce::Slider::incDecButtonsDraggable_Vertical);
-    bpmSlider.setRange (20.0, 400.0, 0.1);
     bpmSlider.setValue (engine.getBpm(), juce::dontSendNotification);
-    bpmSlider.setTextBoxStyle (juce::Slider::TextBoxLeft, false, 86, 32);
-    bpmSlider.setTextValueSuffix (" BPM");
-    bpmSlider.setTooltip ("Темп проекта. Его получают плагины (дилей и др.) и метроном."_ru);
     bpmSlider.onValueChange = [this] { engine.setTempo (bpmSlider.getValue()); };
     addAndMakeVisible (bpmSlider);
 
@@ -578,6 +572,8 @@ void MainComponent::addAudioFiles (const std::shared_ptr<Track>& track, const ju
                                                     c->original->fileBpm = best->original->fileBpm;
                                                     if (c->data != nullptr)
                                                         c->data->fileBpm = best->original->fileBpm;
+                                                    if (auto owner = safe->trackOf (c))
+                                                        safe->engine.ensureLive (owner, c);
                                                 }
                                     }
                                     safe->refreshStrips();
@@ -654,21 +650,6 @@ std::shared_ptr<Track> MainComponent::trackOf (const std::shared_ptr<Clip>& clip
 }
 
 // Re-stretch the clips that follow the project tempo (called once the tempo has stopped changing).
-void MainComponent::applyTempoFollow()
-{
-    const double bpm = engine.getBpm();
-    juce::Component::SafePointer<MainComponent> safe (this);
-    for (auto& t : engine.getTracks())
-        for (auto& c : t->getClips())
-        {
-            if (! c->followTempo.load() || c->original == nullptr || c->original->fileBpm <= 0.0)
-                continue;
-            if (std::abs (c->effectiveBpm() - bpm) < 0.005 || std::abs (c->stretchTarget.load() - bpm) < 0.005)
-                continue;   // already there, or on its way
-            engine.stretchClip (t, c, bpm, [safe] { if (safe != nullptr) safe->repaintTimeline(); });
-        }
-}
-
 void MainComponent::showClipMenu (const std::shared_ptr<Track>& track, const std::shared_ptr<Clip>& clip, juce::Point<int> screenPos)
 {
     if (timelineView.selected.count (clip->id) == 0)
@@ -692,8 +673,11 @@ void MainComponent::showClipMenu (const std::shared_ptr<Track>& track, const std
     else
     {
         tempoText = "Темп: "_ru + juce::String (source->fileBpm, 2) + " BPM";
-        if (clip->stretchedToBpm.load() > 0.0)
-            tempoText += "  " + juce::String::fromUTF8 ("\xe2\x86\x92") + "  " + juce::String (clip->stretchedToBpm.load(), 2) + " BPM";
+        const auto arrow = "  " + juce::String::fromUTF8 ("\xe2\x86\x92") + "  ";
+        if (clip->follows())
+            tempoText += arrow + juce::String (engine.getBpm(), 2) + " BPM";   // follows the project tempo live
+        else if (clip->stretchedToBpm.load() > 0.0)
+            tempoText += arrow + juce::String (clip->stretchedToBpm.load(), 2) + " BPM";
         if (clip->stretchTarget.load() > 0.0)
             tempoText += "  (растягиваю...)"_ru;
     }
@@ -707,7 +691,10 @@ void MainComponent::showClipMenu (const std::shared_ptr<Track>& track, const std
     m.addItem (3, "Поставить на 1 такт"_ru);
     m.addItem (4, "Привязка к сетке"_ru, true, timelineView.snap);
     m.addItem (5, "Привязка к темпу"_ru, tempoKnown, clip->followTempo.load());
-    m.addItem (6, "Растянуть по темпу"_ru, tempoKnown);
+    bool anyFollow = false;
+    for (auto& c : group)
+        anyFollow = anyFollow || c->followTempo.load();
+    m.addItem (6, "Растянуть по темпу"_ru, tempoKnown && ! anyFollow);   // a following clip is already at the project tempo
     m.addSeparator();
     m.addItem (7, many ? "Удалить выбранные"_ru : "Удалить"_ru);
 
@@ -742,7 +729,8 @@ void MainComponent::showClipMenu (const std::shared_ptr<Track>& track, const std
                                                                              return;
                                                                          fresh->loop = loop;
                                                                          fresh->followTempo = follow;
-                                                                         if (stretched > 0.0)
+                                                                         fresh->updateSpeed (safe->engine.getBpm());
+                                                                         if (stretched > 0.0 && ! follow)
                                                                              safe->engine.stretchClip (track, fresh, stretched,
                                                                                                        [safe] { if (safe != nullptr) safe->repaintTimeline(); });
                                                                          safe->engine.removeClip (track, clip->id);
@@ -758,9 +746,20 @@ void MainComponent::showClipMenu (const std::shared_ptr<Track>& track, const std
                              {
                                  const bool newValue = ! clip->followTempo.load();
                                  for (auto& c : group)
+                                 {
                                      c->followTempo = newValue;
-                                 if (newValue)
-                                     safe->applyTempoFollow();   // match the project tempo right away
+                                     if (auto owner = safe->trackOf (c))
+                                     {
+                                         if (newValue)
+                                         {
+                                             eng.ensureLive (owner, c);   // the real-time stretcher for this clip
+                                             if (c->stretchedToBpm.load() > 0.0 && c->original != nullptr)
+                                                 eng.stretchClip (owner, c, c->original->fileBpm);   // back to the untouched file
+                                         }
+                                     }
+                                 }
+                                 eng.refreshClipSpeeds();
+                                 eng.clipsChanged();
                                  break;
                              }
                              case 6:
@@ -1265,17 +1264,6 @@ void MainComponent::timerCallback()
 
     if (std::abs (bpmSlider.getValue() - engine.getBpm()) > 0.001 && ! bpmSlider.isMouseButtonDown())
         bpmSlider.setValue (engine.getBpm(), juce::dontSendNotification);
-
-    if (++followCounter >= 6)   // five times a second
-    {
-        followCounter = 0;
-        // clips that follow the project tempo: act once the tempo has stopped changing
-        const double bpmNow = engine.getBpm();
-        if (bpmNow != followLastBpm)
-            followLastBpm = bpmNow;
-        else
-            applyTempoFollow();
-    }
 
     if (++slowCounter >= 15)   // twice a second
     {

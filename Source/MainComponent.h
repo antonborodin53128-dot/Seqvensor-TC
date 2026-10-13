@@ -2,6 +2,7 @@
 
 #include "Engine.h"
 #include "TrackComponent.h"
+#include "TempoControl.h"
 #include "Timeline.h"
 #include "Style.h"
 #include "PlayerBar.h"
@@ -57,7 +58,6 @@ private:
     void chooseAudioFor (const std::shared_ptr<Track>& track, double time);
     void addAudioFiles (const std::shared_ptr<Track>& track, const juce::StringArray& files, double time);
     std::shared_ptr<Track> trackOf (const std::shared_ptr<Clip>& clip) const;
-    void applyTempoFollow();
     void zoomTimeline (float wheelDelta);
     void seekTimeline (double clockSeconds);
     void repaintTimeline();
@@ -131,7 +131,7 @@ private:
 
     // top bar
     IconButton menuButton { IconButton::Icon::Menu };
-    juce::Slider bpmSlider;
+    TempoControl bpmSlider;
     juce::TextButton tapButton { "Tap" };
     juce::Label keyLabel { {}, "Тон: -"_ru };
     IconButton analysisButton { IconButton::Icon::Gear };
@@ -152,8 +152,8 @@ private:
     juce::Array<juce::int64> tapTimes;
     bool pinned = true;
     int autosaveCounter = 0;
-    int slowCounter = 0, followCounter = 0;
-    double lastScroll = -1.0e18, lastSpan = 0.0, lastBpm = 0.0, followLastBpm = 0.0;
+    int slowCounter = 0;
+    double lastScroll = -1.0e18, lastSpan = 0.0, lastBpm = 0.0;
     double displayClock = 0.0, engineClockSeen = 0.0, engineClockStamp = 0.0, lastFrameStamp = 0.0;
     juce::VBlankAttachment vblank;
     bool timelineDirty = true;

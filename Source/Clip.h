@@ -36,6 +36,8 @@ struct ClipData
     void getMono (std::vector<float>& out, int maxSamples) const;
 };
 
+class LiveStretch;
+
 // A clip placed on a track.
 struct Clip
 {
@@ -52,11 +54,37 @@ struct Clip
     std::atomic<double> stretchTarget { 0.0 };    // tempo of the stretch in progress (0 = none)
     std::atomic<int> stretchGen { 0 };            // newest request wins
 
+    // Live following: while followTempo is on, the original is played through a real-time stretcher at the
+    // project tempo. `speed` = project tempo / file tempo; the clip lasts file length / speed.
+    std::shared_ptr<LiveStretch> live;            // replaced only under the track's clipLock
+    std::atomic<bool> liveBuilding { false };
+    std::atomic<double> speed { 1.0 };
+
+    bool follows() const { return followTempo.load() && original != nullptr && original->fileBpm > 0.0; }
+
+    void updateSpeed (double projectBpm)
+    {
+        double s = 1.0;
+        if (follows() && projectBpm > 0.0)
+        {
+            s = projectBpm / original->fileBpm;
+            if (s < 0.25 || s > 4.0)
+                s = 1.0;
+        }
+        speed.store (s);
+    }
+
     double effectiveBpm() const
     {
         const double s = stretchedToBpm.load();
         return s > 0.0 ? s : (original != nullptr ? original->fileBpm : 0.0);
     }
 
-    double end() const { return start.load() + (data != nullptr ? data->lengthSeconds() : 0.0); }
+    double lengthSeconds() const
+    {
+        const ClipData* d = follows() ? original.get() : data.get();
+        return d != nullptr ? d->lengthSeconds() / speed.load() : 0.0;
+    }
+
+    double end() const { return start.load() + lengthSeconds(); }
 };

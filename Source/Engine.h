@@ -120,8 +120,10 @@ public:
     // The user changes the tempo: the song position, the metronome and the clips keep their place in bars,
     // the sounding audio does not jump.
     void setTempo (double newBpm);
+    void ensureLive (const std::shared_ptr<Track>& track, const std::shared_ptr<Clip>& clip);   // live stretcher for the device rate
+    void refreshClipSpeeds();                   // after the tempo or a follow switch changed
     bool consumeTempoApplied() { return tempoApplied.exchange (false); }
-    double getBpm() const { return playHead.bpm.load(); }
+    double getBpm() const { const double req = requestedBpm.load(); return req > 0.0 ? req : playHead.bpm.load(); }
 
     // Persistence.
     juce::File getDataDirectory() const;

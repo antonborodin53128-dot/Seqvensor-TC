@@ -250,7 +250,8 @@ void LaneComponent::paint (juce::Graphics& g)
     for (auto& c : track->getClips())
     {
         const double start = c->start.load();
-        const double len = c->data->lengthSeconds();
+        const double len = c->lengthSeconds();   // on the timeline (a following clip is stretched with the tempo)
+        const double speed = c->follows() ? c->speed.load() : 1.0;
         const double tLeft = view.xToTime (0.0f, w), tRight = view.xToTime (w, w);
         const double end = c->loop.load() ? juce::jmax (tRight, start + len) : start + len;
         if (end < tLeft || start > tRight)
@@ -278,7 +279,8 @@ void LaneComponent::paint (juce::Graphics& g)
             if (xb <= xa)
                 return;
             const double t0 = view.xToTime ((float) xa, w) - origin;
-            c->data->draw (g, juce::Rectangle<int> (xa, 4 + 20, xb - xa, getHeight() - 8 - 24), t0, t0 + (xb - xa) * secPerPx);
+            const auto& shown = c->follows() ? *c->original : *c->data;
+            shown.draw (g, juce::Rectangle<int> (xa, 4 + 20, xb - xa, getHeight() - 8 - 24), t0 * speed, (t0 + (xb - xa) * secPerPx) * speed);
         };
 
         g.setColour (Pal::clip);
