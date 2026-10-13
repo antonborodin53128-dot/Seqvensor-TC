@@ -30,6 +30,7 @@ void Engine::initialise()
         knownPlugins.recreateFromXml (*xml);
 
     loadEnabledPlugins();
+    loadAnalysisCache();
 
     // saved audio setup
     std::unique_ptr<juce::XmlElement> audioState = juce::XmlDocument::parse (getDataDirectory().getChildFile ("audio.xml"));
@@ -629,35 +630,87 @@ void Engine::clipsChanged()
     songEnd.store (end);
 }
 
+juce::String Engine::cacheKey (const juce::File& f)
+{
+    return "v1|" + f.getFullPathName() + "|" + juce::String (f.getSize()) + "|" + juce::String (f.getLastModificationTime().toMilliseconds());
+}
+
+bool Engine::findCached (const juce::String& key, FileAnalysis& out)
+{
+    const juce::ScopedLock sl (cacheLock);
+    auto it = analysisCache.find (key);
+    if (it == analysisCache.end())
+        return false;
+    out = it->second;
+    return true;
+}
+
+void Engine::storeCached (const juce::String& key, const FileAnalysis& a)
+{
+    juce::String line = key + "\t" + juce::String (a.bpm, 4) + "\t" + juce::String (a.confidence, 4) + "\t" + juce::String (a.mass, 4);
+    for (float h : a.hist)
+        line += "\t" + juce::String (h, 4);
+
+    const juce::ScopedLock sl (cacheLock);
+    analysisCache[key] = a;
+    if (auto out = getDataDirectory().getChildFile ("analysis-cache.txt").createOutputStream())
+    {
+        out->writeText (line + "\n", false, false, nullptr);
+    }
+}
+
+void Engine::loadAnalysisCache()
+{
+    auto file = getDataDirectory().getChildFile ("analysis-cache.txt");
+    // append mode: reopen at the end when writing; reading is a plain pass
+    juce::StringArray lines;
+    file.readLines (lines);
+    const juce::ScopedLock sl (cacheLock);
+    for (auto& l : lines)
+    {
+        const auto f = juce::StringArray::fromTokens (l, "\t", "");
+        if (f.size() < 16)
+            continue;
+        FileAnalysis a;
+        a.bpm = f[1].getDoubleValue();
+        a.confidence = f[2].getDoubleValue();
+        a.mass = (float) f[3].getDoubleValue();
+        for (int i = 0; i < 12; ++i)
+            a.hist[i] = (float) f[4 + i].getDoubleValue();
+        analysisCache[f[0]] = a;
+    }
+}
+
+void Engine::applyAnalysis (ClipData& d, const FileAnalysis& a)
+{
+    d.tempoConfidence = a.confidence;
+    d.fileBpm = a.confidence >= tempoMinConfidence ? a.bpm : 0.0;
+    d.keyMass = a.mass;
+    std::copy (a.hist, a.hist + 12, d.keyHist);
+}
+
 void Engine::addClipFromFile (const std::shared_ptr<Track>& track, const juce::File& file, double startSeconds,
-                              std::function<void (std::shared_ptr<Clip>, const juce::String&)> done)
+                              std::function<void (std::shared_ptr<Clip>, const juce::String&)> done,
+                              std::function<void (std::shared_ptr<Clip>)> analysed)
 {
     track->loadingClips++;
     std::weak_ptr<Track> weak = track;
 
-    juce::Thread::launch ([this, weak, file, startSeconds, done]
+    juce::Thread::launch ([this, weak, file, startSeconds, done, analysed]
     {
         juce::String error;
         auto data = ClipData::load (file, error);
         std::shared_ptr<LiveStretch> live;
-        if (data != nullptr)
+        const auto key = cacheKey (file);
+        FileAnalysis cached;
+        const bool hit = data != nullptr && findCached (key, cached);
+        if (hit)
         {
-            std::vector<float> mono;
-            data->getMono (mono, (int) (data->sampleRate * 150.0));
-            const auto found = detectTempoEx (mono, data->sampleRate);   // shown in the clip menu, used for the stretch
-            data->tempoConfidence = found.confidence;
-            data->fileBpm = found.confidence >= tempoMinConfidence ? found.bpm : 0.0;
-
-            const KeyHist kh = computeKeyHist (mono, data->sampleRate);   // the neural network: notes -> pitch classes
-            if (kh.valid)
-            {
-                std::copy (kh.v, kh.v + 12, data->keyHist);
-                data->keyMass = kh.mass;
-            }
-            live = std::make_shared<LiveStretch> (data, currentSampleRate, data->fileBpm > 0.0 || transposeSemis.load() != 0);   // for following the tempo
+            applyAnalysis (*data, cached);   // seen before: no waiting
+            live = std::make_shared<LiveStretch> (data, currentSampleRate, data->fileBpm > 0.0 || transposeSemis.load() != 0);
         }
 
-        juce::MessageManager::callAsync ([this, weak, data, live, error, startSeconds, done]
+        juce::MessageManager::callAsync ([this, weak, data, live, error, startSeconds, done, analysed, hit, key, file]
         {
             auto t = weak.lock();
             if (t == nullptr)
@@ -676,6 +729,67 @@ void Engine::addClipFromFile (const std::shared_ptr<Track>& track, const juce::F
             }
             if (done)
                 done (clip, error);
+            if (clip == nullptr)
+                return;
+            if (hit)
+            {
+                if (analysed)
+                    analysed (clip);
+                if (onAnalysisDone)
+                    onAnalysisDone();
+                return;
+            }
+
+            // tempo and key: slow, so the clip is already on the track while they are computed
+            std::weak_ptr<Clip> weakClip = clip;
+            analysisPool.addJob ([this, weak, weakClip, data, key, analysed]
+            {
+                const auto t0 = juce::Time::getMillisecondCounterHiRes();
+                std::vector<float> mono;
+                data->getMono (mono, (int) (data->sampleRate * 150.0));
+                const auto found = detectTempoEx (mono, data->sampleRate);
+                const auto t1 = juce::Time::getMillisecondCounterHiRes();
+
+                // the key is judged from up to 90 s from the middle of the file
+                const size_t keep = (size_t) (data->sampleRate * 90.0);
+                KeyHist kh;
+                if (mono.size() > keep)
+                {
+                    const auto from = mono.begin() + (long) ((mono.size() - keep) / 2);
+                    kh = computeKeyHist (std::vector<float> (from, from + (long) keep), data->sampleRate);
+                }
+                else
+                    kh = computeKeyHist (mono, data->sampleRate);
+                const auto t2 = juce::Time::getMillisecondCounterHiRes();
+
+                FileAnalysis a;
+                a.bpm = found.bpm;
+                a.confidence = found.confidence;
+                if (kh.valid)
+                {
+                    a.mass = kh.mass;
+                    std::copy (kh.v, kh.v + 12, a.hist);
+                }
+                if (kh.valid || keyEngineError().isEmpty())
+                    storeCached (key, a);   // a failed network must not be remembered as "no notes"
+                logLine ("analysis " + data->name + ": tempo " + juce::String ((int) (t1 - t0)) + " ms, key " + juce::String ((int) (t2 - t1))
+                         + " ms (" + keyEngineError() + ")");
+
+                juce::MessageManager::callAsync ([this, weak, weakClip, data, a, analysed]
+                {
+                    auto c = weakClip.lock();
+                    if (c == nullptr)
+                        return;
+                    applyAnalysis (*data, a);
+                    c->updateSpeed (getBpm());
+                    if (auto owner = weak.lock())
+                        ensureLive (owner, c);
+                    if (analysed)
+                        analysed (c);
+                    if (onAnalysisDone)
+                        onAnalysisDone();
+                });
+            });
         });
     });
 }
@@ -994,10 +1108,15 @@ void Engine::fillSequence (const std::shared_ptr<Sequence>& seq)
                                      clip->loop = loop;
                                      clip->followTempo = follow;
                                      clip->updateSpeed (seqBpm);
-                                     if (stretchBpm > 0.0 && ! follow)
-                                         stretchClip (track, clip, stretchBpm);   // restore the stretched audio
                                  }
                                  finished();
+                             },
+                             [this, track, follow = ce->getBoolAttribute ("follow", false), stretchBpm = ce->getDoubleAttribute ("stretchBpm", 0.0)]
+                             (std::shared_ptr<Clip> clip)
+                             {
+                                 // the file's tempo is known now: restore the stretched audio of the clip
+                                 if (stretchBpm > 0.0 && ! follow)
+                                     stretchClip (track, clip, stretchBpm);
                              });
         }
 

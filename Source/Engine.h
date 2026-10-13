@@ -105,8 +105,12 @@ public:
     double getBeatSeconds() const { return 60.0 / getBpm(); }
 
     // Audio clips (message thread). The file is decoded on a background thread.
+    // `done`: the clip is on the track (right after decoding). `analysed`: tempo and key of the file are known
+    // (a background job; instant for files seen before, the results are cached).
     void addClipFromFile (const std::shared_ptr<Track>& track, const juce::File& file, double startSeconds,
-                          std::function<void (std::shared_ptr<Clip> clip, const juce::String& error)> done = {});
+                          std::function<void (std::shared_ptr<Clip> clip, const juce::String& error)> done = {},
+                          std::function<void (std::shared_ptr<Clip> clip)> analysed = {});
+    std::function<void()> onAnalysisDone;               // after any clip got its tempo / key
     void removeClip (const std::shared_ptr<Track>& track, int clipId);
     void clipsChanged();                                // recomputes the end of the song
     // Time-stretch the audio of a clip to a project tempo (pitch unchanged), in the background. The newest request wins.
@@ -201,6 +205,16 @@ private:
     std::vector<std::shared_ptr<Track>> tracks;
     juce::AudioProcessLoadMeasurer loadMeasure;
 
+    // tempo / key of files already analysed: path | size | modification time -> results
+    struct FileAnalysis { double bpm = 0.0, confidence = 0.0; float mass = 0.0f; float hist[12] = {}; };
+    std::map<juce::String, FileAnalysis> analysisCache;
+    juce::CriticalSection cacheLock;
+    static juce::String cacheKey (const juce::File& f);
+    bool findCached (const juce::String& key, FileAnalysis& out);
+    void storeCached (const juce::String& key, const FileAnalysis& a);
+    void loadAnalysisCache();
+    static void applyAnalysis (ClipData& d, const FileAnalysis& a);
+
     double currentSampleRate = 48000.0;
     int currentBlockSize = 512;
     bool running = false;
@@ -208,6 +222,9 @@ private:
     std::atomic<juce::int64> lockFailures { 0 };
     std::atomic<int> stopReason { 0 };
     std::atomic<double> stopClock { 0.0 };
+
+    // one background thread for the (slow) analysis of new files; declared last: stopped first
+    juce::ThreadPool analysisPool { juce::ThreadPoolOptions{}.withNumberOfThreads (1).withThreadName ("TC analysis").withThreadPriority (juce::Thread::Priority::low) };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Engine)
 };

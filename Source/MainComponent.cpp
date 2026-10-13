@@ -209,6 +209,7 @@ MainComponent::MainComponent()
     analysisButton.setTooltip ("Определение темпа и тональности: вручную, по миксу или Live (входной канал)"_ru);
     analysisButton.onClick = [this] { showAnalysisSettings(); };
     addAndMakeVisible (analysisButton);
+    engine.onAnalysisDone = [safe = juce::Component::SafePointer<MainComponent> (this)] { if (safe != nullptr) { safe->updateKeyDisplay(); safe->refreshStrips(); safe->repaintTimeline(); } };
 
     playAllButton.setTooltip ("Играть. Если метроном включён хотя бы на одной дорожке - сначала 4 удара отсчёта (такт перед первым)."_ru);
     playAllButton.onClick = [this]
@@ -320,6 +321,7 @@ MainComponent::~MainComponent()
     engine.deviceManager.removeChangeListener (this);
     engine.knownPlugins.removeChangeListener (this);
     engine.onTracksChanged = nullptr;
+    engine.onAnalysisDone = nullptr;
     pluginWindows.clear();
     trackComponents.clear();
     engine.shutdown();
@@ -567,10 +569,19 @@ void MainComponent::addAudioFiles (const std::shared_ptr<Track>& track, const ju
                                     if (safe == nullptr)
                                         return;
                                     if (clip == nullptr)
+                                    {
                                         juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, "TC",
                                                                                 error + ":\n"_ru + path);
-                                    else
-                                        batch->clips.push_back (clip);
+                                        --batch->pending;   // nothing to analyse
+                                    }
+                                    safe->refreshStrips();
+                                    safe->repaintTimeline();
+                                },
+                                [safe, batch] (std::shared_ptr<Clip> clip)
+                                {
+                                    if (safe == nullptr)
+                                        return;
+                                    batch->clips.push_back (clip);
 
                                     if (--batch->pending == 0 && batch->clips.size() > 1)
                                     {
@@ -756,12 +767,16 @@ void MainComponent::showClipMenu (const std::shared_ptr<Track>& track, const std
                                                                          fresh->loop = loop;
                                                                          fresh->followTempo = follow;
                                                                          fresh->updateSpeed (safe->engine.getBpm());
-                                                                         if (stretched > 0.0 && ! follow)
-                                                                             safe->engine.stretchClip (track, fresh, stretched,
-                                                                                                       [safe] { if (safe != nullptr) safe->repaintTimeline(); });
                                                                          safe->engine.removeClip (track, clip->id);
                                                                          safe->timelineView.selected.clear();
                                                                          safe->repaintTimeline();
+                                                                     },
+                                                                     [safe, track, follow, stretched] (std::shared_ptr<Clip> fresh)
+                                                                     {
+                                                                         // the tempo of the new file is known now
+                                                                         if (safe != nullptr && stretched > 0.0 && ! follow)
+                                                                             safe->engine.stretchClip (track, fresh, stretched,
+                                                                                                       [safe] { if (safe != nullptr) safe->repaintTimeline(); });
                                                                      });
                                                              });
                                  break;
