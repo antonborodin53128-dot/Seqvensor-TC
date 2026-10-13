@@ -827,6 +827,9 @@ KeyGuess Engine::getProjectKey (int* clipsUsed)
     float sum[12] = {};
     int used = 0;
     for (auto& t : getTracks())
+    {
+        if (t->muted.load())
+            continue;   // a switched-off track does not take part in the key
         for (auto& c : t->getClips())
         {
             const ClipData* d = c->original.get();
@@ -842,6 +845,7 @@ KeyGuess Engine::getProjectKey (int* clipsUsed)
                 sum[i] += h[i] * (float) g.corr;
             ++used;
         }
+    }
     if (clipsUsed != nullptr)
         *clipsUsed = used;
     return used > 0 ? guessKey (sum) : KeyGuess {};

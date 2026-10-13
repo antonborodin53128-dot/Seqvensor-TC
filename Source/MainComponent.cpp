@@ -1319,6 +1319,16 @@ void MainComponent::updateKeyDisplay()
             tip = "Тональность микса по нейросети: "_ru + keyNameFull (proj.tonic, proj.minor)
                   + (shift != 0 ? ", сдвиг "_ru + juce::String (shift) + " -> " + keyNameFull (t, proj.minor) : juce::String())
                   + ", по клипам: "_ru + juce::String (used);
+            for (auto& tr : engine.getTracks())
+                for (auto& cl : tr->getClips())
+                {
+                    const ClipData* d = cl->original.get();
+                    if (d == nullptr || d->keyMass <= 1.0f)
+                        continue;
+                    const KeyGuess kg = guessKey (d->keyHist);
+                    tip += "\n"_ru + (tr->muted.load() ? "(выкл) "_ru : juce::String()) + d->file.getFileName() + ": "
+                           + (kg.corr >= 0.5 ? keyName (kg.tonic, kg.minor) : "нет тональности"_ru);
+                }
         }
         else
             tip = "Тональность ещё не определена: нужны клипы с выраженными нотами"_ru;
