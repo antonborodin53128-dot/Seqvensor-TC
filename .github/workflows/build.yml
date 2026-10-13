@@ -2,7 +2,7 @@ name: build
 
 on:
   push:
-    branches: [main]
+    branches: ['**']
   workflow_dispatch:
 
 permissions:
@@ -62,6 +62,7 @@ jobs:
           path: out/TC-${{ matrix.name }}.exe
 
       - name: Publish to release
+        if: github.ref_name == 'main'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}

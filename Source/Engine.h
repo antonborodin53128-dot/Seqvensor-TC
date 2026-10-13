@@ -2,6 +2,8 @@
 
 #include "Track.h"
 #include "Text.h"
+#include "KeyDetect.h"
+#include "LiveKey.h"
 
 #include <functional>
 #include <mutex>
@@ -46,6 +48,7 @@ struct Sequence
     juce::String name;
     juce::File file;
     double bpm = 120.0;
+    int semitones = 0;                            // transposition of the mix
     std::vector<std::shared_ptr<Track>> tracks;   // while the sequence is not the active one
     std::atomic<int> pending { 0 };               // clips / plugins that are still loading
 };
@@ -121,6 +124,12 @@ public:
     // the sounding audio does not jump.
     void setTempo (double newBpm);
     void ensureLive (const std::shared_ptr<Track>& track, const std::shared_ptr<Clip>& clip);   // live stretcher for the device rate
+    // Transposition of the whole mix in semitones (-12..12), live and without changing the tempo.
+    void setTranspose (int semitones);
+    int getTranspose() const { return transposeSemis.load(); }
+    LiveKeyAnalyzer liveKey;                     // key from a live input channel (no audio track needed)
+    void saveLiveKeySettings() const;
+    KeyGuess getProjectKey (int* clipsUsed = nullptr);   // from the notes of all tonal clips
     void refreshClipSpeeds();                   // after the tempo or a follow switch changed
     bool consumeTempoApplied() { return tempoApplied.exchange (false); }
     double getBpm() const { const double req = requestedBpm.load(); return req > 0.0 ? req : playHead.bpm.load(); }
@@ -173,6 +182,7 @@ private:
     double clockSeconds = 0.0;                  // audio thread only
     int beatIndex = 0;
     double nextBeatIn = 0.0;
+    std::atomic<int> transposeSemis { 0 };
     std::atomic<double> requestedBpm { 0.0 };   // set by the UI, applied by the audio thread between blocks
     std::atomic<bool> tempoApplied { false };
     std::atomic<bool> resetShifts { false };

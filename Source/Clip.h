@@ -17,6 +17,8 @@ struct ClipData
     juce::File file;
     double fileBpm = 0.0;                // tempo of the original file (0 = not detected)
     double tempoConfidence = 0.0;        // 0..1, how sure the detector was
+    float keyHist[12] = {};              // notes of the file per pitch class (key detection), mass 0 = unknown
+    float keyMass = 0.0f;
     double sampleRate = 44100.0;
     int numSamples = 0;
     juce::AudioBuffer<float> audio;      // 1 or 2 channels

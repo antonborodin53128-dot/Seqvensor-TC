@@ -1,0 +1,3 @@
+#include "@CMAKE_SOURCE_DIR@/Source/EmbeddedIds.h"
+IDR_ORT_DLL RCDATA "@ORT_DLL_PATH@"
+IDR_MODEL RCDATA "@MODEL_PATH@"

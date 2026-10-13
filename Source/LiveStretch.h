@@ -21,7 +21,7 @@ public:
     // Audio thread. Adds n stretched samples to outL / outR. posStart = position in the file (in samples at the
     // device rate) of the first output sample, rho = file samples consumed per output sample (1 = original tempo),
     // 0.25 <= rho <= 4.
-    void render (float* outL, float* outR, int n, double posStart, double rho, bool loop);
+    void render (float* outL, float* outR, int n, double posStart, double rho, bool loop, double semitones = 0.0);
 
     // The clip is not sounding right now: the next render starts from a fresh position.
     void idle() { primed = false; }
@@ -33,6 +33,6 @@ private:
     std::atomic<bool> ready { false };
     bool primed = false;
 
-    void renderPiece (float* outL, float* outR, int n, double posStart, double rho, bool loop);
+    void renderPiece (float* outL, float* outR, int n, double posStart, double rho, bool loop, double semitones);
     void reseek (double posStart, double rho, bool loop);
 };

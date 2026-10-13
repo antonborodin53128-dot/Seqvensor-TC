@@ -44,6 +44,9 @@ private:
     void showPluginChooser();
     void showPluginScanner();
     void showAnalysisSettings();
+    void showKeyMenu();
+    void updateKeyDisplay();
+    int keyTextCounter = 0;
 
     // strip menus
     void showInputMenu (const std::shared_ptr<Track>& track, juce::Component* anchor);
@@ -133,7 +136,8 @@ private:
     IconButton menuButton { IconButton::Icon::Menu };
     TempoControl bpmSlider;
     juce::TextButton tapButton { "Tap" };
-    juce::Label keyLabel { {}, "Тон: -"_ru };
+    juce::TextButton keyLabel { "key" };                       // click: menu with the key of the mix
+    juce::TextButton keyDown { "-" }, keyUp { "+" };           // transposition of the whole mix, semitones
     IconButton analysisButton { IconButton::Icon::Gear };
     juce::Label cpuLabel;
     IconButton playAllButton { IconButton::Icon::Play }, pauseAllButton { IconButton::Icon::Pause },

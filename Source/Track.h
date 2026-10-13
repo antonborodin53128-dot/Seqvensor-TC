@@ -88,6 +88,9 @@ public:
     void prepare (double sampleRate, int maxBlockSize, juce::AudioPlayHead* playHead);
     void release();
     void setTempoSource (const std::atomic<double>* bpm) { bpmSource = bpm; }
+    void setPitchSource (const std::atomic<int>* semitones) { pitchSource = semitones; }   // project transposition
+    std::atomic<bool> transposeOn { true };    // off for drums etc.: the project transposition does not touch the track
+    bool isTransposed() const { return transposeOn.load() && pitchSource != nullptr && pitchSource->load() != 0; }
     void setExtraDelay (int samples) { extraDelay.store (juce::jmax (0, samples)); }
     void processChunk (const float* const* inputs, int numInputs,
                        float* const* outputs, int numOutputs, int offset, int n,
@@ -112,6 +115,7 @@ private:
     int clickPos = -1;
     bool clickAccent = false;
     const std::atomic<double>* bpmSource = nullptr;
+    const std::atomic<int>* pitchSource = nullptr;
 
     // audio state
     double sampleRate = 48000.0;

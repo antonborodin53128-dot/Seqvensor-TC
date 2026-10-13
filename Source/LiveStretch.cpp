@@ -15,6 +15,7 @@ struct LiveStretch::Impl
     long long numSamples = 0;
     int inLatency = 0, outLatency = 0;
     long long feedPos = 0;   // next input sample (at the device rate) the stretcher will get
+    double semis = 1000.0;   // transposition currently set in the stretcher (impossible value = not set yet)
 
     static constexpr int piece = 1024;
     int inCap = 0, outCap = 0;
@@ -128,9 +129,16 @@ void LiveStretch::reseek (double posStart, double rho, bool loop)
     primed = true;
 }
 
-void LiveStretch::renderPiece (float* outL, float* outR, int n, double posStart, double rho, bool loop)
+void LiveStretch::renderPiece (float* outL, float* outR, int n, double posStart, double rho, bool loop, double semitones)
 {
     auto& m = *impl;
+
+    if (m.semis != semitones)
+    {
+        m.semis = semitones;
+        m.stretch.setTransposeSemitones ((float) semitones);
+        m.stretch.setFormantFactor (1.0f, true);   // the voice keeps its character while the pitch moves
+    }
 
     // the stretcher is ahead of its output by its latency: feed it that far in advance
     const double target = posStart + (double) m.inLatency + (double) m.outLatency * rho;
@@ -159,13 +167,13 @@ void LiveStretch::renderPiece (float* outL, float* outR, int n, double posStart,
     }
 }
 
-void LiveStretch::render (float* outL, float* outR, int n, double posStart, double rho, bool loop)
+void LiveStretch::render (float* outL, float* outR, int n, double posStart, double rho, bool loop, double semitones)
 {
     if (! ready.load())
         return;
     for (int done = 0; done < n; done += Impl::piece)
     {
         const int m = std::min (Impl::piece, n - done);
-        renderPiece (outL + done, outR + done, m, posStart + (double) done * rho, rho, loop);
+        renderPiece (outL + done, outR + done, m, posStart + (double) done * rho, rho, loop, semitones);
     }
 }

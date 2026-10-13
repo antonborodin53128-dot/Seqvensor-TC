@@ -330,14 +330,25 @@ void Track::renderClips (int n, const ChunkClock& clock)
         // A clip that follows the project tempo plays its original through the live stretcher: where it is in
         // the file follows from the position in bars, so it cannot drift from the metronome.
         const bool follow = c->follows();
-        const double rho = follow ? bpm / c->original->fileBpm : 1.0;   // file seconds per project second
-        const bool rhoOk = follow && rho >= 0.25 && rho <= 4.0;
-        const bool useLive = rhoOk && std::abs (rho - 1.0) > 0.0005 && c->live != nullptr && c->live->isReady (sampleRate);
+        const double semis = isTransposed() ? (double) pitchSource->load() : 0.0;
+
+        // rho = file seconds per project second. A clip that does not follow the tempo plays at the file's own
+        // speed (a stretched copy lasts shorter or longer than the original: that ratio is its rho).
+        double rho = 1.0;
+        if (follow)
+            rho = bpm / c->original->fileBpm;
+        else if (semis != 0.0 && c->original != nullptr && c->data != nullptr && c->data != c->original && c->data->numSamples > 0)
+            rho = c->original->lengthSeconds() / c->data->lengthSeconds();
+        const bool rhoOk = rho >= 0.25 && rho <= 4.0;
+        const bool needLive = rhoOk && (semis != 0.0 || (follow && std::abs (rho - 1.0) > 0.0005));
+        const bool useLive = needLive && c->live != nullptr && c->live->isReady (sampleRate);
 
         // speed actually played: the stretched one, or the file's own if the stretcher is not available
-        const double sp = (useLive || (rhoOk && std::abs (rho - 1.0) <= 0.0005)) ? rho : 1.0;
+        const bool liveBase = follow || (semis != 0.0 && c->data != c->original && c->original != nullptr);
+        const double sp = follow ? ((useLive || (rhoOk && std::abs (rho - 1.0) <= 0.0005)) ? rho : 1.0)
+                                 : (useLive ? rho : 1.0);
 
-        const ClipData& d = follow ? *c->original : *c->data;
+        const ClipData& d = (follow || (useLive && liveBase)) ? *c->original : *c->data;
         const double start = c->start.load() - (follow ? 0.0 : c->shift.load());
         const double len = d.lengthSeconds() / sp;
         const bool loop = c->loop.load();
@@ -355,7 +366,7 @@ void Track::renderClips (int n, const ChunkClock& clock)
         if (useLive)
         {
             const double posStart = (t0 + (double) i0 / sampleRate - start) * rho * sampleRate;   // file samples
-            c->live->render (l + i0, r + i0, i1 - i0, posStart, rho, loop);
+            c->live->render (l + i0, r + i0, i1 - i0, posStart, rho, loop, semis);
             continue;
         }
         if (c->live != nullptr)

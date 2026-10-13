@@ -191,10 +191,20 @@ MainComponent::MainComponent()
     tapButton.onClick = [this] { tapTempo(); };
     addAndMakeVisible (tapButton);
 
-    keyLabel.setFont (juce::FontOptions (20.0f, juce::Font::bold));
-    keyLabel.setJustificationType (juce::Justification::centred);
-    keyLabel.setTooltip ("Автоматическое определение тональности появится в следующей версии."_ru);
+    keyLabel.setButtonText ("Тон: -"_ru);
+    keyLabel.setColour (juce::TextButton::buttonColourId, juce::Colours::transparentBlack);
+    keyLabel.setColour (juce::TextButton::buttonOnColourId, juce::Colours::transparentBlack);
+    keyLabel.setColour (juce::TextButton::textColourOffId, juce::Colours::white);
+    keyLabel.setTooltip ("Тональность микса. Клик: сдвиг до нужной тональности, сброс"_ru);
+    keyLabel.onClick = [this] { showKeyMenu(); };
     addAndMakeVisible (keyLabel);
+
+    keyDown.setTooltip ("Тональность всего микса на полтона ниже (без изменения темпа)"_ru);
+    keyDown.onClick = [this] { engine.setTranspose (engine.getTranspose() - 1); updateKeyDisplay(); };
+    addAndMakeVisible (keyDown);
+    keyUp.setTooltip ("Тональность всего микса на полтона выше (без изменения темпа)"_ru);
+    keyUp.onClick = [this] { engine.setTranspose (engine.getTranspose() + 1); updateKeyDisplay(); };
+    addAndMakeVisible (keyUp);
 
     analysisButton.setTooltip ("Настройки определения темпа и тональности (каналы-источники)"_ru);
     analysisButton.onClick = [this] { showAnalysisSettings(); };
@@ -336,14 +346,18 @@ void MainComponent::resized()
     cpuLabel.setBounds (rowA.removeFromRight (110));
 
     // tempo, key, gear and the big transport buttons, centred in the whole window
-    const int groupW = 170 + 8 + 56 + 20 + 110 + 8 + 44 + 30 + 72 + 6 + 64 + 6 + 64;
+    const int groupW = 170 + 8 + 56 + 20 + 34 + 2 + 124 + 2 + 34 + 8 + 44 + 30 + 72 + 6 + 64 + 6 + 64;
     auto group = juce::Rectangle<int> (groupW, rowA.getHeight()).withCentre ({ getWidth() / 2, rowA.getCentreY() });
     const auto groupBox = group;
     bpmSlider.setBounds (group.removeFromLeft (170));
     group.removeFromLeft (8);
     tapButton.setBounds (group.removeFromLeft (56));
     group.removeFromLeft (20);
-    keyLabel.setBounds (group.removeFromLeft (110));
+    keyDown.setBounds (group.removeFromLeft (34));
+    group.removeFromLeft (2);
+    keyLabel.setBounds (group.removeFromLeft (124));
+    group.removeFromLeft (2);
+    keyUp.setBounds (group.removeFromLeft (34));
     group.removeFromLeft (8);
     analysisButton.setBounds (group.removeFromLeft (44));
     group.removeFromLeft (30);
@@ -626,6 +640,7 @@ void MainComponent::showLaneMenu (const std::shared_ptr<Track>& track, double ti
     m.addItem (1, "Добавить аудио сюда..."_ru);
     m.addSeparator();
     m.addItem (2, "Привязка к сетке"_ru, true, timelineView.snap);
+    m.addItem (3, "Не менять тональность этой дорожки (ударные)"_ru, true, ! track->transposeOn.load());
 
     juce::Component::SafePointer<MainComponent> safe (this);
     m.showMenuAsync (juce::PopupMenu::Options().withTargetScreenArea (juce::Rectangle<int> (screenPos.x, screenPos.y, 1, 1)),
@@ -637,6 +652,8 @@ void MainComponent::showLaneMenu (const std::shared_ptr<Track>& track, double ti
                              safe->chooseAudioFor (track, time);
                          else if (r == 2)
                              safe->timelineView.snap = ! safe->timelineView.snap;
+                         else if (r == 3)
+                             track->transposeOn.store (! track->transposeOn.load());
                      });
 }
 
@@ -685,6 +702,15 @@ void MainComponent::showClipMenu (const std::shared_ptr<Track>& track, const std
     juce::PopupMenu m;
     m.addSectionHeader (many ? "Несколько клипов"_ru : source->file.getFileName());
     m.addItem (100, tempoText, false);
+    if (! many && source->keyMass > 1.0f)
+    {
+        float h[12];
+        for (int i = 0; i < 12; ++i)
+            h[i] = source->keyHist[i];
+        const KeyGuess kg = guessKey (h);
+        m.addItem (101, kg.corr >= 0.5 ? "Тональность: "_ru + keyNameFull (kg.tonic, kg.minor)
+                                       : "Тональность: не выражена (ударные или шум)"_ru, false);
+    }
     m.addSeparator();
     m.addItem (1, "Открыть в проводнике"_ru, ! many);
     m.addItem (2, "Заменить..."_ru, ! many);
@@ -1113,11 +1139,141 @@ void MainComponent::showPluginScanner()
 
 void MainComponent::showAnalysisSettings()
 {
-    juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon, "Темп и тональность"_ru,
-                                            "Здесь будет выбор каналов-источников для автоматического определения "_ru
-                                            "темпа и тональности. Эта функция появится в следующей версии.\n\n"_ru
-                                            "Пока темп проекта задаётся вручную или кнопкой Tap. Темп каждого файла "_ru
-                                            "определяется при загрузке и показан в меню клипа (правая кнопка)."_ru);
+    // input channels as the audio callback numbers them: only the active ones, in order
+    juce::StringArray names;
+    if (auto* dev = engine.deviceManager.getCurrentAudioDevice())
+    {
+        const auto all = dev->getInputChannelNames();
+        const auto active = dev->getActiveInputChannels();
+        for (int i = 0; i < all.size(); ++i)
+            if (active[i])
+                names.add (all[i]);
+    }
+
+    int curL = -1, curR = -1;
+    engine.liveKey.getChannels (curL, curR);
+
+    juce::PopupMenu mono, pairs;
+    for (int i = 0; i < names.size() && i < 64; ++i)
+        mono.addItem (1000 + i, juce::String (i + 1) + ": " + names[i], true, curL == i && curR < 0);
+    for (int i = 0; i + 1 < names.size() && i < 64; i += 2)
+        pairs.addItem (2000 + i, juce::String (i + 1) + "+" + juce::String (i + 2), true, curL == i && curR == i + 1);
+
+    juce::PopupMenu m;
+    m.addSectionHeader ("Тональность по входному каналу"_ru);
+    m.addItem (1, "Выключено"_ru, true, curL < 0);
+    if (names.isEmpty())
+        m.addItem (99, "Нет входных каналов: включите их в настройках аудио"_ru, false);
+    else
+    {
+        m.addSubMenu ("Моно-канал"_ru, mono, true, nullptr, curL >= 0 && curR < 0);
+        m.addSubMenu ("Стерео-пара"_ru, pairs, true, nullptr, curL >= 0 && curR >= 0);
+    }
+    m.addSeparator();
+    m.addItem (3, "Забыть накопленное (новая песня)"_ru, curL >= 0);
+
+    juce::Component::SafePointer<MainComponent> safe (this);
+    m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&analysisButton),
+                     [safe] (int r)
+                     {
+                         if (safe == nullptr || r <= 0)
+                             return;
+                         auto& eng = safe->engine;
+                         if (r == 1)
+                             eng.liveKey.setChannels (-1, -1);
+                         else if (r == 3)
+                             eng.liveKey.reset();
+                         else if (r >= 2000)
+                             eng.liveKey.setChannels (r - 2000, r - 2000 + 1);
+                         else if (r >= 1000)
+                             eng.liveKey.setChannels (r - 1000, -1);
+                         eng.saveLiveKeySettings();
+                         safe->updateKeyDisplay();
+                         safe->raiseMenus();
+                     });
+    raiseMenus();
+}
+
+// Text of the key button: the key of the live input if one is listened to, otherwise the key of the mix.
+void MainComponent::updateKeyDisplay()
+{
+    const auto live = engine.liveKey.getState();
+    juce::String text = "Тон: -"_ru, tip;
+    int used = 0;
+    const KeyGuess proj = engine.getProjectKey (&used);
+    const int shift = engine.getTranspose();
+
+    if (live.active && live.valid)
+    {
+        text = "Вход: "_ru + keyName (live.key.tonic, live.key.minor);
+        tip = "Тональность по входному каналу: "_ru + keyNameFull (live.key.tonic, live.key.minor)
+              + ", по последним "_ru + juce::String ((int) live.seconds) + " с"_ru;
+    }
+    else if (live.active)
+    {
+        text = "Вход: ..."_ru;
+        tip = "Слушаю входной канал, нужно несколько секунд музыки"_ru;
+    }
+    else if (proj.tonic >= 0)
+    {
+        const int t = ((proj.tonic + shift) % 12 + 12) % 12;
+        text = "Тон: "_ru + keyName (t, proj.minor);
+        if (shift != 0)
+            text += juce::String (shift > 0 ? " +" : " ") + juce::String (shift);
+        tip = "Тональность микса по нейросети: "_ru + keyNameFull (proj.tonic, proj.minor)
+              + (shift != 0 ? ", сдвиг "_ru + juce::String (shift) + " -> " + keyNameFull (t, proj.minor) : juce::String())
+              + ", по клипам: "_ru + juce::String (used);
+    }
+    else if (shift != 0)
+        text = "Тон: "_ru + (shift > 0 ? "+" : "") + juce::String (shift);
+
+    if (keyEngineError().isNotEmpty())
+        tip += "\nНейросеть недоступна: "_ru + keyEngineError();
+
+    if (keyLabel.getButtonText() != text)
+        keyLabel.setButtonText (text);
+    keyLabel.setTooltip (tip.isNotEmpty() ? tip + "\nКлик: сдвиг до нужной тональности, сброс"_ru : "Тональность микса. Клик: сдвиг, сброс"_ru);
+}
+
+void MainComponent::showKeyMenu()
+{
+    int used = 0;
+    const KeyGuess proj = engine.getProjectKey (&used);
+    const int shift = engine.getTranspose();
+
+    juce::PopupMenu m;
+    if (proj.tonic >= 0)
+        m.addItem (200, "Тональность микса: "_ru + keyNameFull (proj.tonic, proj.minor), false);
+    else
+        m.addItem (200, "Тональность ещё не определена"_ru, false);
+    m.addItem (1, "Сбросить сдвиг (0)"_ru, shift != 0);
+    if (proj.tonic >= 0)
+    {
+        juce::PopupMenu to;
+        for (int t = 0; t < 12; ++t)
+            to.addItem (300 + t, keyNameFull (t, proj.minor), true, ((proj.tonic + shift) % 12 + 12) % 12 == t);
+        m.addSubMenu ("Перейти в тональность"_ru, to);
+    }
+
+    juce::Component::SafePointer<MainComponent> safe (this);
+    m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&keyLabel),
+                     [safe, proj] (int r)
+                     {
+                         if (safe == nullptr || r <= 0)
+                             return;
+                         if (r == 1)
+                             safe->engine.setTranspose (0);
+                         else if (r >= 300 && r < 312)
+                         {
+                             int d = (r - 300 - proj.tonic + 12) % 12;   // 0..11 semitones up
+                             if (d > 6)
+                                 d -= 12;                                  // the nearer way
+                             safe->engine.setTranspose (d);
+                         }
+                         safe->updateKeyDisplay();
+                         safe->raiseMenus();
+                     });
+    raiseMenus();
 }
 
 void MainComponent::setPinned (bool shouldPin)
@@ -1268,6 +1424,7 @@ void MainComponent::timerCallback()
     if (++slowCounter >= 15)   // twice a second
     {
         slowCounter = 0;
+        updateKeyDisplay();
         {   // diagnostics: engine state to %APPDATA%\TC\log.txt while playing
             static juce::int64 lastLogged = -1;
             const auto cb = engine.getCallbackCount();

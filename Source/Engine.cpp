@@ -2,6 +2,7 @@
 #include "Stretch.h"
 #include "TempoDetect.h"
 #include "LiveStretch.h"
+#include "KeyDetect.h"
 
 Engine::Engine()
 {
@@ -43,7 +44,20 @@ void Engine::initialise()
     }
     audioInitError = error;
 
+    {   // input channel the live key detection listens to ("left right", -1 = off)
+        const auto parts = juce::StringArray::fromTokens (getDataDirectory().getChildFile ("livekey.txt").loadFileAsString().trim(), " ", "");
+        if (parts.size() >= 2)
+            liveKey.setChannels (parts[0].getIntValue(), parts[1].getIntValue());
+    }
+
     deviceManager.addAudioCallback (this);
+}
+
+void Engine::saveLiveKeySettings() const
+{
+    int l = -1, r = -1;
+    liveKey.getChannels (l, r);
+    getDataDirectory().getChildFile ("livekey.txt").replaceWithText (juce::String (l) + " " + juce::String (r));
 }
 
 void Engine::shutdown()
@@ -80,6 +94,7 @@ std::shared_ptr<Track> Engine::makeTrack (const juce::String& name, int id)
     auto track = std::make_shared<Track> (name);
     track->id = id;
     track->setTempoSource (&playHead.bpm);
+    track->setPitchSource (&transposeSemis);
     track->prepare (currentSampleRate, currentBlockSize, &playHead);
     return track;
 }
@@ -359,6 +374,7 @@ void Engine::audioDeviceAboutToStart (juce::AudioIODevice* device)
     currentBlockSize = device->getCurrentBufferSizeSamples();
     playHead.sampleRate.store (currentSampleRate);
     loadMeasure.reset (currentSampleRate, currentBlockSize);
+    liveKey.prepare (currentSampleRate);
 
     const juce::ScopedLock sl (tracksLock);
     for (auto& t : tracks)
@@ -417,6 +433,8 @@ void Engine::audioDeviceIOCallbackWithContext (const float* const* inputChannelD
     for (int c = 0; c < numOutputChannels; ++c)
         if (outputChannelData[c] != nullptr)
             juce::FloatVectorOperations::clear (outputChannelData[c], numSamples);
+
+    liveKey.push (inputChannelData, numInputChannels, numSamples);
 
     const juce::ScopedTryLock lock (tracksLock);
     if (! lock.isLocked())
@@ -623,7 +641,14 @@ void Engine::addClipFromFile (const std::shared_ptr<Track>& track, const juce::F
             const auto found = detectTempoEx (mono, data->sampleRate);   // shown in the clip menu, used for the stretch
             data->tempoConfidence = found.confidence;
             data->fileBpm = found.confidence >= tempoMinConfidence ? found.bpm : 0.0;
-            live = std::make_shared<LiveStretch> (data, currentSampleRate, data->fileBpm > 0.0);   // for following the tempo
+
+            const KeyHist kh = computeKeyHist (mono, data->sampleRate);   // the neural network: notes -> pitch classes
+            if (kh.valid)
+            {
+                std::copy (kh.v, kh.v + 12, data->keyHist);
+                data->keyMass = kh.mass;
+            }
+            live = std::make_shared<LiveStretch> (data, currentSampleRate, data->fileBpm > 0.0 || transposeSemis.load() != 0);   // for following the tempo
         }
 
         juce::MessageManager::callAsync ([this, weak, data, live, error, startSeconds, done]
@@ -652,7 +677,8 @@ void Engine::addClipFromFile (const std::shared_ptr<Track>& track, const juce::F
 // Makes sure a clip has a live stretcher for the current device rate (built in the background).
 void Engine::ensureLive (const std::shared_ptr<Track>& track, const std::shared_ptr<Clip>& clip)
 {
-    if (clip->original == nullptr || clip->original->fileBpm <= 0.0
+    // needed for tempo following (tempo known) or for the transposition of the mix
+    if (clip->original == nullptr || (clip->original->fileBpm <= 0.0 && transposeSemis.load() == 0)
         || (clip->live != nullptr && clip->live->isReady (currentSampleRate)))
         return;
     if (clip->liveBuilding.exchange (true))
@@ -673,6 +699,47 @@ void Engine::ensureLive (const std::shared_ptr<Track>& track, const std::shared_
             c->liveBuilding.store (false);
         });
     });
+}
+
+// Key of the whole mix: the note histograms of all tonal clips add up (drums and noise are left out).
+KeyGuess Engine::getProjectKey (int* clipsUsed)
+{
+    float sum[12] = {};
+    int used = 0;
+    for (auto& t : getTracks())
+        for (auto& c : t->getClips())
+        {
+            const ClipData* d = c->original.get();
+            if (d == nullptr || d->keyMass <= 1.0f)
+                continue;
+            float h[12];
+            for (int i = 0; i < 12; ++i)
+                h[i] = d->keyHist[i] / d->keyMass;
+            const KeyGuess g = guessKey (h);
+            if (g.corr < 0.5)
+                continue;   // not tonal enough: percussion, noise
+            for (int i = 0; i < 12; ++i)
+                sum[i] += h[i] * (float) g.corr;
+            ++used;
+        }
+    if (clipsUsed != nullptr)
+        *clipsUsed = used;
+    return used > 0 ? guessKey (sum) : KeyGuess {};
+}
+
+void Engine::setTranspose (int semitones)
+{
+    semitones = juce::jlimit (-12, 12, semitones);
+    if (semitones == transposeSemis.load())
+        return;
+    transposeSemis.store (semitones);
+    if (semitones != 0)
+        for (auto& t : getTracks())
+            for (auto& c : t->getClips())
+                ensureLive (t, c);   // the real-time stretcher is also what shifts the pitch
+    if (activeSequence != nullptr)
+        activeSequence->semitones = semitones;
+    clipsChanged();
 }
 
 void Engine::refreshClipSpeeds()
@@ -736,11 +803,12 @@ void Engine::removeClip (const std::shared_ptr<Track>& track, int clipId)
 
 namespace
 {
-    void writeSequenceFile (const juce::File& file, const std::vector<std::shared_ptr<Track>>& list, double bpm)
+    void writeSequenceFile (const juce::File& file, const std::vector<std::shared_ptr<Track>>& list, double bpm, int semitones)
     {
         juce::XmlElement root ("TC_PROJECT");
         root.setAttribute ("version", 3);
         root.setAttribute ("bpm", bpm);
+        root.setAttribute ("semis", semitones);
 
         for (auto& t : list)
         {
@@ -753,6 +821,7 @@ namespace
             te->setAttribute ("out", t->outputPair.load());
             te->setAttribute ("gain", (double) t->gainLinear.load());
             te->setAttribute ("mute", t->muted.load());
+            te->setAttribute ("transpose", t->transposeOn.load());
             te->setAttribute ("rec", t->recArmed.load());
             te->setAttribute ("comp", t->compensate.load());
             te->setAttribute ("metro", t->metronomeOn.load());
@@ -797,7 +866,7 @@ void Engine::saveActiveSequence()
     // never write a half-loaded sequence: its missing clips / plugins would be lost
     if (activeSequence == nullptr || activeSequence->pending.load() > 0)
         return;
-    writeSequenceFile (activeSequence->file, getTracks(), getBpm());
+    writeSequenceFile (activeSequence->file, getTracks(), getBpm(), transposeSemis.load());
 }
 
 void Engine::sequenceProgress (const std::shared_ptr<Sequence>& seq)
@@ -837,6 +906,7 @@ void Engine::fillSequence (const std::shared_ptr<Sequence>& seq)
         return;
 
     seq->bpm = xml->getDoubleAttribute ("bpm", 120.0);
+    seq->semitones = xml->getIntAttribute ("semis", 0);
     const int version = xml->getIntAttribute ("version", 1);
     std::weak_ptr<Sequence> weakSeq = seq;
 
@@ -865,6 +935,7 @@ void Engine::fillSequence (const std::shared_ptr<Sequence>& seq)
         track->outputPair = te->getIntAttribute ("out", 0);
         track->gainLinear = (float) te->getDoubleAttribute ("gain", 1.0);
         track->muted = te->getBoolAttribute ("mute", false);
+        track->transposeOn = te->getBoolAttribute ("transpose", true);
         track->recArmed = te->getBoolAttribute ("rec", false);
         track->compensate = te->getBoolAttribute ("comp", false);
         track->inputChosenByUser = te->getBoolAttribute ("inputSet", true);
@@ -950,6 +1021,10 @@ void Engine::activateSequence (const std::shared_ptr<Sequence>& seq)
 
     nextTrackId = maxId + 1;
     setBpm (seq->bpm);
+    transposeSemis.store (seq->semitones);
+    for (auto& t : seq->tracks)
+        for (auto& c : t->getClips())
+            ensureLive (t, c);
     refreshClipSpeeds();
     clipsChanged();
     if (onTracksChanged)
