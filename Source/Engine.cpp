@@ -1,4 +1,5 @@
 #include "Engine.h"
+#include <set>
 #include "Stretch.h"
 #include "TempoDetect.h"
 #include "LiveStretch.h"
@@ -31,6 +32,7 @@ void Engine::initialise()
 
     loadEnabledPlugins();
     loadAnalysisCache();
+    pruneAnalysisCacheSoon();
 
     // saved audio setup
     std::unique_ptr<juce::XmlElement> audioState = juce::XmlDocument::parse (getDataDirectory().getChildFile ("audio.xml"));
@@ -51,7 +53,8 @@ void Engine::initialise()
         {
             keyMode = juce::jlimit (0, 2, parts[0].getIntValue());
             tempoMode = juce::jlimit (0, 2, parts[1].getIntValue());
-            liveKey.setChannels (parts[2].getIntValue(), parts[3].getIntValue());
+            if (parts.size() >= 5)
+                liveTrackId = parts[4].getIntValue();
             applyAnalysisModes();
         }
     }
@@ -61,10 +64,31 @@ void Engine::initialise()
 
 void Engine::saveLiveKeySettings() const
 {
-    int l = -1, r = -1;
-    liveKey.getChannels (l, r);
     getDataDirectory().getChildFile ("analysis.txt").replaceWithText (juce::String (keyMode.load()) + " " + juce::String (tempoMode.load())
-                                                                      + " " + juce::String (l) + " " + juce::String (r));
+                                                                      + " -1 -1 " + juce::String (liveTrackId.load()));
+}
+
+void Engine::syncLiveSource()
+{
+    int l = -1, r = -1;
+    for (auto& t : getTracks())
+    {
+        if (t->inputL.load() < 0 || t->busId.load() >= 0)
+            continue;
+        if (liveTrackId.load() < 0 || t->id == liveTrackId.load())
+        {
+            l = t->inputL.load();
+            r = t->inputR.load();
+            break;
+        }
+    }
+    int cl = -1, cr = -1;
+    liveKey.getChannels (cl, cr);
+    if (cl != l || cr != r)
+    {
+        liveKey.setChannels (l, r);
+        liveKey.reset();
+    }
 }
 
 void Engine::shutdown()
@@ -153,6 +177,7 @@ void Engine::removeTrack (const std::shared_ptr<Track>& track)
                 t->busId = -1;
     }
     clipsChanged();
+    pruneAnalysisCacheSoon();
     if (onTracksChanged)
         onTracksChanged();
 }
@@ -681,6 +706,57 @@ void Engine::loadAnalysisCache()
     }
 }
 
+void Engine::pruneAnalysisCacheSoon()
+{
+    if (pruning.exchange (true))
+        return;
+    juce::Thread::launch ([this] { pruneAnalysisCache(); pruning = false; });
+}
+
+void Engine::pruneAnalysisCache()
+{
+    // audio files still used: by every saved project file, and by the tracks open right now
+    std::set<juce::String> used;
+    for (auto& t : getTracks())
+        for (auto& c : t->getClips())
+            if (c->original != nullptr)
+                used.insert (c->original->file.getFullPathName());
+    for (auto& kv : [this] { const juce::ScopedLock sl (tracksLock); return sequenceCache; }())
+        for (auto& t : kv.second->tracks)
+            for (auto& c : t->getClips())
+                if (c->original != nullptr)
+                    used.insert (c->original->file.getFullPathName());
+
+    for (auto& f : getDataDirectory().findChildFiles (juce::File::findFiles, true, "*.xml"))
+        if (auto xml = juce::XmlDocument::parse (f); xml != nullptr && xml->hasTagName ("TC_PROJECT"))
+            for (auto* te : xml->getChildWithTagNameIterator ("TRACK"))
+                for (auto* ce : te->getChildWithTagNameIterator ("CLIP"))
+                    used.insert (ce->getStringAttribute ("file"));
+
+    const juce::ScopedLock sl (cacheLock);
+    juce::String text;
+    bool removed = false;
+    for (auto it = analysisCache.begin(); it != analysisCache.end();)
+    {
+        const auto parts = juce::StringArray::fromTokens (it->first, "|", "");
+        const juce::String path = parts.size() >= 2 ? parts[1] : juce::String();
+        if (used.count (path) == 0)
+        {
+            it = analysisCache.erase (it);
+            removed = true;
+            continue;
+        }
+        juce::String line = it->first + "\t" + juce::String (it->second.bpm, 4) + "\t" + juce::String (it->second.confidence, 4)
+                            + "\t" + juce::String (it->second.mass, 4);
+        for (float h : it->second.hist)
+            line += "\t" + juce::String (h, 4);
+        text += line + "\n";
+        ++it;
+    }
+    if (removed)
+        getDataDirectory().getChildFile ("analysis-cache.txt").replaceWithText (text);
+}
+
 void Engine::applyAnalysis (ClipData& d, const FileAnalysis& a)
 {
     d.tempoConfidence = a.confidence;
@@ -827,6 +903,9 @@ KeyGuess Engine::getProjectKey (int* clipsUsed)
     float sum[12] = {};
     int used = 0;
     for (auto& t : getTracks())
+    {
+        if (t->muted.load())
+            continue;   // a switched-off track does not take part in the key
         for (auto& c : t->getClips())
         {
             const ClipData* d = c->original.get();
@@ -842,6 +921,7 @@ KeyGuess Engine::getProjectKey (int* clipsUsed)
                 sum[i] += h[i] * (float) g.corr;
             ++used;
         }
+    }
     if (clipsUsed != nullptr)
         *clipsUsed = used;
     return used > 0 ? guessKey (sum) : KeyGuess {};
@@ -945,6 +1025,7 @@ void Engine::stretchClip (const std::shared_ptr<Track>& track, const std::shared
 void Engine::removeClip (const std::shared_ptr<Track>& track, int clipId)
 {
     track->removeClip (clipId);
+    pruneAnalysisCacheSoon();
     clipsChanged();
 }
 

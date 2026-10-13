@@ -131,6 +131,8 @@ public:
     // Transposition of the whole mix in semitones (-12..12), live and without changing the tempo.
     void setTranspose (int semitones);
     int getTranspose() const { return transposeSemis.load(); }
+    std::atomic<int> liveTrackId { -1 };         // track whose input Live analysis listens to (-1 = first track with an input)
+    void syncLiveSource();                       // message thread: point liveKey at that track's input channels
     LiveKeyAnalyzer liveKey;                     // key from a live input channel (no audio track needed)
     void saveLiveKeySettings() const;            // modes and the input channel -> analysis.txt
     // How the key / the tempo are found: 0 = by hand (default, nothing is detected), 1 = from the clips of the mix,
@@ -156,6 +158,7 @@ public:
     void dropSequences (const std::vector<juce::File>& keep);              // frees cached sequences (the active one stays)
     void renameSequenceFile (const juce::File& from, const juce::File& to);
     void forgetSequence (const juce::File& file);
+    void pruneAnalysisCacheSoon();   // drops cached analyses of audio files no project uses any more (background)
     void relocateSequences (const juce::File& oldDir, const juce::File& newDir);   // a folder was renamed
 
     std::function<void()> onTracksChanged;
@@ -213,6 +216,8 @@ private:
     bool findCached (const juce::String& key, FileAnalysis& out);
     void storeCached (const juce::String& key, const FileAnalysis& a);
     void loadAnalysisCache();
+    void pruneAnalysisCache();
+    std::atomic<bool> pruning { false };
     static void applyAnalysis (ClipData& d, const FileAnalysis& a);
 
     double currentSampleRate = 48000.0;

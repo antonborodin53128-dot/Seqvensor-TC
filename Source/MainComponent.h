@@ -129,6 +129,7 @@ private:
     Library library { engine.getDataDirectory() };
     Playlist playlist;
     int playlistIndex = -1;
+    std::vector<juce::File> recentSongs;   // last visited songs, kept loaded
     int anchorRow = -1;
     std::set<int> marqueeBase;
     std::vector<std::pair<std::shared_ptr<Clip>, double>> dragOrigins;
