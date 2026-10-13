@@ -13,6 +13,7 @@
   #define NOMINMAX
  #endif
  #include <windows.h>
+ #define ORT_API_MANUAL_INIT   // the API pointer is fetched by Ort::InitApi() after our DLL is loaded, not at program start
  #include <onnxruntime_cxx_api.h>
  #include "EmbeddedIds.h"
 #endif
@@ -87,6 +88,7 @@ namespace
                     return;
                 }
 
+                Ort::InitApi();
                 env = std::make_unique<Ort::Env> (ORT_LOGGING_LEVEL_ERROR, "tc");
                 Ort::SessionOptions opts;
                 opts.SetIntraOpNumThreads (2);
