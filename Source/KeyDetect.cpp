@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <memory>
 #include <mutex>
 
 #if JUCE_WINDOWS
@@ -48,8 +49,9 @@ namespace
 
     struct Net
     {
-        Ort::Env env { ORT_LOGGING_LEVEL_ERROR, "tc" };
-        Ort::Session session { nullptr };
+        // created only after our onnxruntime.dll is loaded (the first call into the runtime resolves its import)
+        std::unique_ptr<Ort::Env> env;
+        std::unique_ptr<Ort::Session> session;
         std::mutex runLock;
         bool ok = false;
 
@@ -85,10 +87,11 @@ namespace
                     return;
                 }
 
+                env = std::make_unique<Ort::Env> (ORT_LOGGING_LEVEL_ERROR, "tc");
                 Ort::SessionOptions opts;
                 opts.SetIntraOpNumThreads (2);
                 opts.SetGraphOptimizationLevel (GraphOptimizationLevel::ORT_ENABLE_ALL);
-                session = Ort::Session (env, model, modelSize, opts);
+                session = std::make_unique<Ort::Session> (*env, model, modelSize, opts);
                 ok = true;
             }
             catch (const std::exception& e)
@@ -116,7 +119,7 @@ namespace
             auto input = Ort::Value::CreateTensor<float> (mem, const_cast<float*> (audio), (size_t) windowLen, shape, 3);
 
             std::lock_guard<std::mutex> sl (n.runLock);
-            auto out = n.session.Run (Ort::RunOptions { nullptr }, &inName, &input, 1, &outName, 1);
+            auto out = n.session->Run (Ort::RunOptions { nullptr }, &inName, &input, 1, &outName, 1);
             const float* p = out[0].GetTensorData<float>();
             const size_t count = out[0].GetTensorTypeAndShapeInfo().GetElementCount();
             if (count < (size_t) framesPerWindow * numPitches)
