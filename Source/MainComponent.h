@@ -46,6 +46,10 @@ private:
     void showAnalysisSettings();
     void showKeyMenu();
     void updateKeyDisplay();
+    void updateAutoTempo();
+    long long mixSignature = 0, liveBpmStamp = 0;
+    double liveBpmCandidate = 0.0;
+    int liveBpmAgree = 0;
     int keyTextCounter = 0;
 
     // strip menus

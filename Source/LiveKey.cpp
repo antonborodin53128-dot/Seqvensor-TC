@@ -84,7 +84,7 @@ void LiveKeyAnalyzer::run()
         wait (4000);
         if (threadShouldExit())
             break;
-        if (chanL.load() < 0)
+        if (chanL.load() < 0 || (! wantKey.load() && ! wantTempo.load()))
             continue;
 
         const double sr = rate.load();
@@ -110,21 +110,48 @@ void LiveKeyAnalyzer::run()
             e += (double) x * x;
         const float rms = (float) std::sqrt (e / (double) count);
 
-        const KeyHist h = computeKeyHist (chunk, sr);
         State s;
         s.active = true;
         s.level = rms;
         s.seconds = (double) count / sr;
-        if (h.valid)
+
+        if (wantKey.load())
         {
-            s.key = guessKey (h.v);
-            s.valid = s.key.tonic >= 0 && s.key.corr >= 0.4;
+            const KeyHist h = computeKeyHist (chunk, sr);
+            if (h.valid)
+            {
+                s.key = guessKey (h.v);
+                s.valid = s.key.tonic >= 0 && s.key.corr >= 0.4;
+            }
+        }
+
+        TempoResult tempo;
+        const bool tempoRun = wantTempo.load() && rms >= 0.0015f;
+        if (tempoRun)
+        {
+            const size_t keep = std::min ((size_t) count, (size_t) (sr * 20.0));
+            std::vector<float> tail (chunk.end() - (long) keep, chunk.end());
+            tempo = detectTempoEx (tail, sr);
         }
 
         const juce::ScopedLock sl (stateLock);
-        if (s.valid || ! state.valid || rms < 0.0015f)
+        if (wantKey.load() && (s.valid || ! state.valid || rms < 0.0015f))
+        {
+            const double bpm = state.bpm, conf = state.bpmConfidence;
+            const long long stamp = state.bpmStamp;
             state = s;           // silence or noise keeps showing the last good key
+            state.bpm = bpm;
+            state.bpmConfidence = conf;
+            state.bpmStamp = stamp;
+        }
         else
             state.level = rms;
+
+        if (tempoRun && tempo.confidence >= tempoMinConfidence)
+        {
+            state.bpm = tempo.bpm;
+            state.bpmConfidence = tempo.confidence;
+            ++state.bpmStamp;
+        }
     }
 }

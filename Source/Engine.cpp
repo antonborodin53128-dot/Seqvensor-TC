@@ -44,10 +44,15 @@ void Engine::initialise()
     }
     audioInitError = error;
 
-    {   // input channel the live key detection listens to ("left right", -1 = off)
-        const auto parts = juce::StringArray::fromTokens (getDataDirectory().getChildFile ("livekey.txt").loadFileAsString().trim(), " ", "");
-        if (parts.size() >= 2)
-            liveKey.setChannels (parts[0].getIntValue(), parts[1].getIntValue());
+    {   // "keyMode tempoMode left right": how key and tempo are found, and the input channel for the live mode
+        const auto parts = juce::StringArray::fromTokens (getDataDirectory().getChildFile ("analysis.txt").loadFileAsString().trim(), " ", "");
+        if (parts.size() >= 4)
+        {
+            keyMode = juce::jlimit (0, 2, parts[0].getIntValue());
+            tempoMode = juce::jlimit (0, 2, parts[1].getIntValue());
+            liveKey.setChannels (parts[2].getIntValue(), parts[3].getIntValue());
+            applyAnalysisModes();
+        }
     }
 
     deviceManager.addAudioCallback (this);
@@ -57,7 +62,8 @@ void Engine::saveLiveKeySettings() const
 {
     int l = -1, r = -1;
     liveKey.getChannels (l, r);
-    getDataDirectory().getChildFile ("livekey.txt").replaceWithText (juce::String (l) + " " + juce::String (r));
+    getDataDirectory().getChildFile ("analysis.txt").replaceWithText (juce::String (keyMode.load()) + " " + juce::String (tempoMode.load())
+                                                                      + " " + juce::String (l) + " " + juce::String (r));
 }
 
 void Engine::shutdown()
@@ -725,6 +731,35 @@ KeyGuess Engine::getProjectKey (int* clipsUsed)
     if (clipsUsed != nullptr)
         *clipsUsed = used;
     return used > 0 ? guessKey (sum) : KeyGuess {};
+}
+
+// The tempo most clips agree on (files within 1.5 % count as the same tempo), weighted by the detector's confidence.
+double Engine::getMixTempo()
+{
+    struct Vote { double bpm, weight; };
+    std::vector<Vote> votes;
+    for (auto& t : getTracks())
+        for (auto& c : t->getClips())
+            if (c->original != nullptr && c->original->fileBpm > 0.0)
+                votes.push_back ({ c->original->fileBpm, juce::jmax (0.05, c->original->tempoConfidence) });
+
+    double best = 0.0, bestWeight = 0.0;
+    for (auto& a : votes)
+    {
+        double w = 0.0, sum = 0.0;
+        for (auto& b : votes)
+            if (std::abs (b.bpm / a.bpm - 1.0) < 0.015)
+            {
+                w += b.weight;
+                sum += b.bpm * b.weight;
+            }
+        if (w > bestWeight)
+        {
+            bestWeight = w;
+            best = sum / w;
+        }
+    }
+    return best > 0.0 ? std::round (best * 10.0) / 10.0 : 0.0;
 }
 
 void Engine::setTranspose (int semitones)

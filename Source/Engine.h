@@ -128,7 +128,12 @@ public:
     void setTranspose (int semitones);
     int getTranspose() const { return transposeSemis.load(); }
     LiveKeyAnalyzer liveKey;                     // key from a live input channel (no audio track needed)
-    void saveLiveKeySettings() const;
+    void saveLiveKeySettings() const;            // modes and the input channel -> analysis.txt
+    // How the key / the tempo are found: 0 = by hand (default, nothing is detected), 1 = from the clips of the mix,
+    // 2 = live from the input channel.
+    std::atomic<int> keyMode { 0 }, tempoMode { 0 };
+    void applyAnalysisModes() { liveKey.setWanted (keyMode.load() == 2, tempoMode.load() == 2); }
+    double getMixTempo();                        // tempo the clips agree on, 0 = unknown
     KeyGuess getProjectKey (int* clipsUsed = nullptr);   // from the notes of all tonal clips
     void refreshClipSpeeds();                   // after the tempo or a follow switch changed
     bool consumeTempoApplied() { return tempoApplied.exchange (false); }

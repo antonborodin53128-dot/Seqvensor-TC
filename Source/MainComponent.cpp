@@ -206,7 +206,7 @@ MainComponent::MainComponent()
     keyUp.onClick = [this] { engine.setTranspose (engine.getTranspose() + 1); updateKeyDisplay(); };
     addAndMakeVisible (keyUp);
 
-    analysisButton.setTooltip ("Настройки определения темпа и тональности (каналы-источники)"_ru);
+    analysisButton.setTooltip ("Определение темпа и тональности: вручную, по миксу или Live (входной канал)"_ru);
     analysisButton.onClick = [this] { showAnalysisSettings(); };
     addAndMakeVisible (analysisButton);
 
@@ -1152,6 +1152,7 @@ void MainComponent::showAnalysisSettings()
 
     int curL = -1, curR = -1;
     engine.liveKey.getChannels (curL, curR);
+    const int km = engine.keyMode.load(), tm = engine.tempoMode.load();
 
     juce::PopupMenu mono, pairs;
     for (int i = 0; i < names.size() && i < 64; ++i)
@@ -1159,9 +1160,20 @@ void MainComponent::showAnalysisSettings()
     for (int i = 0; i + 1 < names.size() && i < 64; i += 2)
         pairs.addItem (2000 + i, juce::String (i + 1) + "+" + juce::String (i + 2), true, curL == i && curR == i + 1);
 
+    juce::String channelText = "не выбран"_ru;
+    if (curL >= 0)
+        channelText = curR >= 0 ? juce::String (curL + 1) + "+" + juce::String (curR + 1) : juce::String (curL + 1);
+
     juce::PopupMenu m;
-    m.addSectionHeader ("Тональность по входному каналу"_ru);
-    m.addItem (1, "Выключено"_ru, true, curL < 0);
+    m.addSectionHeader ("Тональность"_ru);
+    m.addItem (10, "Вручную (без определения)"_ru, true, km == 0);
+    m.addItem (11, "Определять по миксу"_ru, true, km == 1);
+    m.addItem (12, "Определять Live (по входному каналу)"_ru, true, km == 2);
+    m.addSectionHeader ("Темп"_ru);
+    m.addItem (20, "Вручную"_ru, true, tm == 0);
+    m.addItem (21, "Определять по миксу"_ru, true, tm == 1);
+    m.addItem (22, "Определять Live (по входному каналу)"_ru, true, tm == 2);
+    m.addSectionHeader ("Входной канал для Live: "_ru + channelText);
     if (names.isEmpty())
         m.addItem (99, "Нет входных каналов: включите их в настройках аудио"_ru, false);
     else
@@ -1169,7 +1181,6 @@ void MainComponent::showAnalysisSettings()
         m.addSubMenu ("Моно-канал"_ru, mono, true, nullptr, curL >= 0 && curR < 0);
         m.addSubMenu ("Стерео-пара"_ru, pairs, true, nullptr, curL >= 0 && curR >= 0);
     }
-    m.addSeparator();
     m.addItem (3, "Забыть накопленное (новая песня)"_ru, curL >= 0);
 
     juce::Component::SafePointer<MainComponent> safe (this);
@@ -1179,60 +1190,136 @@ void MainComponent::showAnalysisSettings()
                          if (safe == nullptr || r <= 0)
                              return;
                          auto& eng = safe->engine;
-                         if (r == 1)
-                             eng.liveKey.setChannels (-1, -1);
+                         bool askChannel = false;
+                         if (r >= 10 && r <= 12)
+                         {
+                             eng.keyMode = r - 10;
+                             askChannel = r == 12;
+                         }
+                         else if (r >= 20 && r <= 22)
+                         {
+                             eng.tempoMode = r - 20;
+                             safe->mixSignature = -1;   // the mix tempo is applied once right away
+                             askChannel = r == 22;
+                         }
                          else if (r == 3)
                              eng.liveKey.reset();
                          else if (r >= 2000)
                              eng.liveKey.setChannels (r - 2000, r - 2000 + 1);
                          else if (r >= 1000)
                              eng.liveKey.setChannels (r - 1000, -1);
+
+                         eng.applyAnalysisModes();
                          eng.saveLiveKeySettings();
                          safe->updateKeyDisplay();
                          safe->raiseMenus();
+
+                         int l = -1, rr = -1;
+                         eng.liveKey.getChannels (l, rr);
+                         if (askChannel && l < 0)
+                             juce::MessageManager::callAsync ([safe] { if (safe != nullptr) safe->showAnalysisSettings(); });   // choose the channel
                      });
     raiseMenus();
+}
+
+// Called twice a second: tempo from the mix / from the input, when those modes are on.
+void MainComponent::updateAutoTempo()
+{
+    const int tm = engine.tempoMode.load();
+    if (tm == 1)
+    {
+        // a new signature = the set of clips (or their detected tempos) changed
+        long long sig = 0;
+        for (auto& t : engine.getTracks())
+            for (auto& c : t->getClips())
+                if (c->original != nullptr)
+                    sig = sig * 31 + (long long) c->id + (long long) std::llround (c->original->fileBpm * 100.0);
+        if (sig != mixSignature)
+        {
+            mixSignature = sig;
+            const double bpm = engine.getMixTempo();
+            if (bpm > 0.0 && std::abs (bpm - engine.getBpm()) > 0.05)
+            {
+                engine.setTempo (bpm);
+                bpmSlider.setValue (bpm, juce::dontSendNotification);
+            }
+        }
+    }
+    else if (tm == 2)
+    {
+        const auto live = engine.liveKey.getState();
+        if (live.active && live.bpm > 0.0 && live.bpmStamp != liveBpmStamp)
+        {
+            liveBpmStamp = live.bpmStamp;
+            // the same value twice in a row: no jumping on a single doubtful reading
+            if (std::abs (live.bpm - liveBpmCandidate) < 0.8)
+                ++liveBpmAgree;
+            else
+                liveBpmAgree = 1;
+            liveBpmCandidate = live.bpm;
+
+            if (liveBpmAgree >= 2 && std::abs (live.bpm - engine.getBpm()) > 0.4 && ! bpmSlider.isMouseButtonDown())
+            {
+                const double bpm = std::round (live.bpm * 10.0) / 10.0;
+                engine.setTempo (bpm);
+                bpmSlider.setValue (bpm, juce::dontSendNotification);
+            }
+        }
+    }
 }
 
 // Text of the key button: the key of the live input if one is listened to, otherwise the key of the mix.
 void MainComponent::updateKeyDisplay()
 {
-    const auto live = engine.liveKey.getState();
     juce::String text = "Тон: -"_ru, tip;
-    int used = 0;
-    const KeyGuess proj = engine.getProjectKey (&used);
+    const int mode = engine.keyMode.load();
     const int shift = engine.getTranspose();
 
-    if (live.active && live.valid)
+    if (mode == 2)
     {
-        text = "Вход: "_ru + keyName (live.key.tonic, live.key.minor);
-        tip = "Тональность по входному каналу: "_ru + keyNameFull (live.key.tonic, live.key.minor)
-              + ", по последним "_ru + juce::String ((int) live.seconds) + " с"_ru;
+        const auto live = engine.liveKey.getState();
+        if (live.active && live.valid)
+        {
+            text = "Вход: "_ru + keyName (live.key.tonic, live.key.minor);
+            tip = "Тональность по входному каналу: "_ru + keyNameFull (live.key.tonic, live.key.minor)
+                  + ", по последним "_ru + juce::String ((int) live.seconds) + " с"_ru;
+        }
+        else
+        {
+            text = live.active ? "Вход: ..."_ru : "Вход: -"_ru;
+            tip = live.active ? "Слушаю входной канал, нужно несколько секунд музыки"_ru
+                              : "Выберите входной канал в настройках (шестерёнка)"_ru;
+        }
     }
-    else if (live.active)
+    else if (mode == 1)
     {
-        text = "Вход: ..."_ru;
-        tip = "Слушаю входной канал, нужно несколько секунд музыки"_ru;
+        int used = 0;
+        const KeyGuess proj = engine.getProjectKey (&used);
+        if (proj.tonic >= 0)
+        {
+            const int t = ((proj.tonic + shift) % 12 + 12) % 12;
+            text = "Тон: "_ru + keyName (t, proj.minor);
+            if (shift != 0)
+                text += juce::String (shift > 0 ? " +" : " ") + juce::String (shift);
+            tip = "Тональность микса по нейросети: "_ru + keyNameFull (proj.tonic, proj.minor)
+                  + (shift != 0 ? ", сдвиг "_ru + juce::String (shift) + " -> " + keyNameFull (t, proj.minor) : juce::String())
+                  + ", по клипам: "_ru + juce::String (used);
+        }
+        else
+            tip = "Тональность ещё не определена: нужны клипы с выраженными нотами"_ru;
     }
-    else if (proj.tonic >= 0)
-    {
-        const int t = ((proj.tonic + shift) % 12 + 12) % 12;
-        text = "Тон: "_ru + keyName (t, proj.minor);
-        if (shift != 0)
-            text += juce::String (shift > 0 ? " +" : " ") + juce::String (shift);
-        tip = "Тональность микса по нейросети: "_ru + keyNameFull (proj.tonic, proj.minor)
-              + (shift != 0 ? ", сдвиг "_ru + juce::String (shift) + " -> " + keyNameFull (t, proj.minor) : juce::String())
-              + ", по клипам: "_ru + juce::String (used);
-    }
-    else if (shift != 0)
-        text = "Тон: "_ru + (shift > 0 ? "+" : "") + juce::String (shift);
+    else
+        tip = "Тональность задаётся вручную (шестерёнка: определение по миксу или Live)"_ru;
 
-    if (keyEngineError().isNotEmpty())
+    if (mode != 2 && shift != 0 && text == "Тон: -"_ru)
+        text = "Тон: "_ru + juce::String (shift > 0 ? "+" : "") + juce::String (shift);
+
+    if (mode != 0 && keyEngineError().isNotEmpty())
         tip += "\nНейросеть недоступна: "_ru + keyEngineError();
 
     if (keyLabel.getButtonText() != text)
         keyLabel.setButtonText (text);
-    keyLabel.setTooltip (tip.isNotEmpty() ? tip + "\nКлик: сдвиг до нужной тональности, сброс"_ru : "Тональность микса. Клик: сдвиг, сброс"_ru);
+    keyLabel.setTooltip (tip + "\nКлик: сдвиг до нужной тональности, сброс"_ru);
 }
 
 void MainComponent::showKeyMenu()
@@ -1425,6 +1512,7 @@ void MainComponent::timerCallback()
     {
         slowCounter = 0;
         updateKeyDisplay();
+        updateAutoTempo();
         {   // diagnostics: engine state to %APPDATA%\TC\log.txt while playing
             static juce::int64 lastLogged = -1;
             const auto cb = engine.getCallbackCount();
