@@ -35,7 +35,7 @@ namespace
     // once and loaded from there; the import of onnxruntime.dll is delay-loaded, so the exe starts without it.
     bool getResource (int id, const void*& data, size_t& size)
     {
-        HRSRC res = FindResourceW (nullptr, MAKEINTRESOURCEW (id), RT_RCDATA);
+        HRSRC res = FindResourceW (nullptr, MAKEINTRESOURCEW (id), MAKEINTRESOURCEW (10))   // 10 = RT_RCDATA;
         if (res == nullptr)
             return false;
         HGLOBAL h = LoadResource (nullptr, res);
