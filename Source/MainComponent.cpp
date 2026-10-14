@@ -16,7 +16,22 @@ PluginWindow::PluginWindow (juce::AudioPluginInstance& pluginToShow, std::functi
 {
     setUsingNativeTitleBar (true);
 
-    juce::AudioProcessorEditor* editor = plugin->hasEditor() ? plugin->createEditorIfNeeded() : nullptr;
+    // The built-in effects always get their own editor (never the plain list of parameters, which was shown
+    // when the second open found no editor); a plugin whose old editor is still alive gives it back
+    juce::PluginDescription description;
+    plugin->fillInPluginDescription (description);
+    const bool builtIn = description.pluginFormatName == "TC";
+
+    juce::AudioProcessorEditor* editor = nullptr;
+    if (builtIn)
+    {
+        if (auto* old = plugin->getActiveEditor())
+            delete old;
+        editor = plugin->createEditor();
+    }
+    else if (plugin->hasEditor())
+        editor = plugin->createEditorIfNeeded();
+
     if (editor == nullptr)
         editor = new juce::GenericAudioProcessorEditor (*plugin);
 
