@@ -1387,7 +1387,7 @@ namespace
             mxL.setBounds (c2.removeFromTop (18)); mxS.setBounds (c2);
             auto c3 = row2.removeFromLeft (w2);
             bpL.setBounds (c3.removeFromTop (18)); bpS.setBounds (c3);
-            auto c4 = row2.reduced (10, 20);
+            auto c4 = row2.reduced (10, 6);
             syncMs.setBounds (c4.removeFromTop (28));
             c4.removeFromTop (6);
             syncBpm.setBounds (c4.removeFromTop (28));
