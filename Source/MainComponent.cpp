@@ -25,8 +25,6 @@ PluginWindow::PluginWindow (juce::AudioPluginInstance& pluginToShow, std::functi
     juce::AudioProcessorEditor* editor = nullptr;
     if (builtIn)
     {
-        if (auto* old = plugin->getActiveEditor())
-            delete old;
         editor = plugin->createEditor();
     }
     else if (plugin->hasEditor())
