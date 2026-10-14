@@ -1,7 +1,11 @@
 #include "Builtin.h"
 #include "Text.h"
 
+#include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstring>
+#include <vector>
 
 namespace
 {
@@ -156,24 +160,179 @@ namespace
         double sr = 48000.0;
     };
 
-    // ------------------------------------------------------------ equaliser: high-pass, low shelf, two bells, high shelf
+    // ------------------------------------------------------------ equaliser in the style of a graphic "pro" EQ
+    // Up to kBands bands, each: Bell / Low Shelf / High Shelf / Low Cut / High Cut / Notch.
+    // Zero latency: minimum-phase IIR sections only (no look-ahead, no FFT in the audio path). The spectrum analyser
+    // only copies samples into a lock-free FIFO; all of its work happens in the editor.
+    constexpr int kBands = 10;
+    constexpr float kMinFreq = 10.0f, kMaxFreq = 30000.0f;
+    const char* const kTypeNames[] = { "Bell", "Low Shelf", "High Shelf", "Low Cut", "High Cut", "Notch" };
+    const char* const kSlopeNames[] = { "12 dB/oct", "24 dB/oct", "36 dB/oct", "48 dB/oct" };
+
+    struct Coef { float b0 = 1, b1 = 0, b2 = 0, a1 = 0, a2 = 0; };
+
+    inline Coef normCoef (float b0, float b1, float b2, float a0, float a1, float a2)
+    {
+        return { b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0 };
+    }
+
+    // returns the number of 2nd-order sections (1..4)
+    int designBand (int type, double sr, float f, float gDb, float q, int slope, Coef* out)
+    {
+        f = juce::jlimit (5.0f, (float) sr * 0.49f, f);
+        q = juce::jmax (0.05f, q);
+        const float w = 2.0f * pi * f / (float) sr, c = std::cos (w), s = std::sin (w);
+
+        switch (type)
+        {
+            case 0:   // bell
+            {
+                const float A = std::pow (10.0f, gDb / 40.0f), al = s / (2.0f * q);
+                out[0] = normCoef (1 + al * A, -2 * c, 1 - al * A, 1 + al / A, -2 * c, 1 - al / A);
+                return 1;
+            }
+            case 1:   // low shelf
+            case 2:   // high shelf
+            {
+                const float A = std::pow (10.0f, gDb / 40.0f), al = s / (2.0f * q), sq = 2.0f * std::sqrt (A) * al;
+                if (type == 1)
+                    out[0] = normCoef (A * ((A + 1) - (A - 1) * c + sq), 2 * A * ((A - 1) - (A + 1) * c), A * ((A + 1) - (A - 1) * c - sq),
+                                       (A + 1) + (A - 1) * c + sq, -2 * ((A - 1) + (A + 1) * c), (A + 1) + (A - 1) * c - sq);
+                else
+                    out[0] = normCoef (A * ((A + 1) + (A - 1) * c + sq), -2 * A * ((A - 1) + (A + 1) * c), A * ((A + 1) + (A - 1) * c - sq),
+                                       (A + 1) - (A - 1) * c + sq, 2 * ((A - 1) - (A + 1) * c), (A + 1) - (A - 1) * c - sq);
+                return 1;
+            }
+            case 5:   // notch
+            {
+                const float al = s / (2.0f * q);
+                out[0] = normCoef (1, -2 * c, 1, 1 + al, -2 * c, 1 - al);
+                return 1;
+            }
+            default:  // 3 = low cut (high-pass), 4 = high cut (low-pass): Butterworth, 12..48 dB/oct
+            {
+                const int sections = juce::jlimit (1, 4, slope + 1);
+                const int order = sections * 2;
+                for (int i = 0; i < sections; ++i)
+                {
+                    const float qi = 1.0f / (2.0f * std::cos (pi * (float) (2 * i + 1) / (float) (2 * order)));
+                    const float al = s / (2.0f * qi);
+                    if (type == 3)
+                        out[i] = normCoef ((1 + c) / 2, -(1 + c), (1 + c) / 2, 1 + al, -2 * c, 1 - al);
+                    else
+                        out[i] = normCoef ((1 - c) / 2, 1 - c, (1 - c) / 2, 1 + al, -2 * c, 1 - al);
+                }
+                return sections;
+            }
+        }
+    }
+
+    // magnitude of one section in dB at angular frequency w
+    inline float sectionDb (const Coef& k, float w)
+    {
+        const float c1 = std::cos (w), s1 = std::sin (w), c2 = std::cos (2 * w), s2 = std::sin (2 * w);
+        const float nr = k.b0 + k.b1 * c1 + k.b2 * c2, ni = -(k.b1 * s1 + k.b2 * s2);
+        const float dr = 1 + k.a1 * c1 + k.a2 * c2, di = -(k.a1 * s1 + k.a2 * s2);
+        const float num = nr * nr + ni * ni, den = dr * dr + di * di;
+        return 10.0f * std::log10 (juce::jmax (1.0e-20f, num) / juce::jmax (1.0e-20f, den));
+    }
+
+    // lock-free single-producer / single-consumer copy of the audio for the analyser
+    struct SampleFifo
+    {
+        static constexpr int size = 16384;
+        juce::AbstractFifo fifo { size };
+        std::vector<float> data = std::vector<float> ((size_t) size, 0.0f);
+
+        void push (const juce::AudioBuffer<float>& b)
+        {
+            const int channels = b.getNumChannels();
+            const int total = b.getNumSamples();
+            if (channels == 0)
+                return;
+            float chunk[512];
+            for (int pos = 0; pos < total; pos += 512)
+            {
+                const int n = juce::jmin (512, total - pos);
+                for (int i = 0; i < n; ++i)
+                {
+                    float sum = 0.0f;
+                    for (int c = 0; c < channels; ++c)
+                        sum += b.getReadPointer (c)[pos + i];
+                    chunk[i] = sum / (float) channels;
+                }
+                int s1, n1, s2, n2;
+                fifo.prepareToWrite (n, s1, n1, s2, n2);
+                if (n1 > 0) std::copy (chunk, chunk + n1, data.begin() + s1);
+                if (n2 > 0) std::copy (chunk + n1, chunk + n1 + n2, data.begin() + s2);
+                fifo.finishedWrite (n1 + n2);
+            }
+        }
+
+        int pull (float* dest, int maxCount)
+        {
+            const int n = juce::jmin (maxCount, fifo.getNumReady());
+            int s1, n1, s2, n2;
+            fifo.prepareToRead (n, s1, n1, s2, n2);
+            if (n1 > 0) std::copy (data.begin() + s1, data.begin() + s1 + n1, dest);
+            if (n2 > 0) std::copy (data.begin() + s2, data.begin() + s2 + n2, dest + n1);
+            fifo.finishedRead (n1 + n2);
+            return n1 + n2;
+        }
+    };
+
+    class EqEditor;
+
     class EqPlugin : public BuiltinBase
     {
     public:
-        EqPlugin() : BuiltinBase ("eq", "Эквалайзер"_ru, "Эквалайзер: ФВЧ, 2 полки, 2 колокола"_ru)
+        struct Band
         {
-            hp    = addFloat ("hp",   "ФВЧ, Гц"_ru,            20.0f, 500.0f, 20.0f, 0.15f);
-            lsF   = addFloat ("lsf",  "НЧ полка, Гц"_ru,       30.0f, 500.0f, 120.0f, 0.3f);
-            lsG   = addLinear ("lsg", "НЧ полка, дБ"_ru,      -18.0f, 18.0f, 0.0f);
-            m1F   = addFloat ("m1f",  "Колокол 1, Гц"_ru,     100.0f, 3000.0f, 400.0f, 0.3f);
-            m1G   = addLinear ("m1g", "Колокол 1, дБ"_ru,     -18.0f, 18.0f, 0.0f);
-            m1Q   = addFloat ("m1q",  "Колокол 1, добротность"_ru, 0.3f, 8.0f, 1.0f, 0.3f);
-            m2F   = addFloat ("m2f",  "Колокол 2, Гц"_ru,     500.0f, 10000.0f, 3000.0f, 0.3f);
-            m2G   = addLinear ("m2g", "Колокол 2, дБ"_ru,     -18.0f, 18.0f, 0.0f);
-            m2Q   = addFloat ("m2q",  "Колокол 2, добротность"_ru, 0.3f, 8.0f, 1.0f, 0.3f);
-            hsF   = addFloat ("hsf",  "ВЧ полка, Гц"_ru,     2000.0f, 18000.0f, 8000.0f, 0.3f);
-            hsG   = addLinear ("hsg", "ВЧ полка, дБ"_ru,     -18.0f, 18.0f, 0.0f);
-            level = addLinear ("out", "Выход, дБ"_ru,        -18.0f, 18.0f, 0.0f);
+            juce::AudioParameterBool* on = nullptr;
+            juce::AudioParameterChoice* type = nullptr;
+            juce::AudioParameterFloat *freq = nullptr, *gain = nullptr, *q = nullptr;
+            juce::AudioParameterChoice* slope = nullptr;
+        };
+
+        EqPlugin() : BuiltinBase ("eq", "Equalizer", "Parametric equalizer with spectrum analyzer")
+        {
+            for (int i = 0; i < kBands; ++i)
+            {
+                const juce::String n = "Band " + juce::String (i + 1) + " ";
+                const juce::String id = "b" + juce::String (i);
+                auto& b = bands[(size_t) i];
+                b.on = new juce::AudioParameterBool (juce::ParameterID { id + "on", 1 }, n + "On", false);
+                b.type = new juce::AudioParameterChoice (juce::ParameterID { id + "ty", 1 }, n + "Type",
+                                                         juce::StringArray { kTypeNames[0], kTypeNames[1], kTypeNames[2], kTypeNames[3], kTypeNames[4], kTypeNames[5] }, 0);
+                juce::NormalisableRange<float> fr (kMinFreq, kMaxFreq);
+                fr.setSkewForCentre (1000.0f);
+                b.freq = new juce::AudioParameterFloat (juce::ParameterID { id + "fr", 1 }, n + "Frequency", fr, 1000.0f,
+                    juce::AudioParameterFloatAttributes().withStringFromValueFunction ([] (float v, int)
+                    {
+                        return v >= 1000.0f ? juce::String (v / 1000.0f, 2) + " kHz" : juce::String (v, v < 100.0f ? 1 : 0) + " Hz";
+                    }));
+                b.gain = new juce::AudioParameterFloat (juce::ParameterID { id + "ga", 1 }, n + "Gain", juce::NormalisableRange<float> (-30.0f, 30.0f), 0.0f,
+                    juce::AudioParameterFloatAttributes().withStringFromValueFunction ([] (float v, int)
+                    {
+                        return (v > 0.0f ? "+" : "") + juce::String (v, 1) + " dB";
+                    }));
+                juce::NormalisableRange<float> qr (0.1f, 40.0f);
+                qr.setSkewForCentre (1.0f);
+                b.q = new juce::AudioParameterFloat (juce::ParameterID { id + "q", 1 }, n + "Q", qr, 1.0f,
+                    juce::AudioParameterFloatAttributes().withStringFromValueFunction ([] (float v, int) { return juce::String (v, 2); }));
+                b.slope = new juce::AudioParameterChoice (juce::ParameterID { id + "sl", 1 }, n + "Slope",
+                                                          juce::StringArray { kSlopeNames[0], kSlopeNames[1], kSlopeNames[2], kSlopeNames[3] }, 0);
+                for (juce::RangedAudioParameter* p : { (juce::RangedAudioParameter*) b.on, (juce::RangedAudioParameter*) b.type,
+                                                       (juce::RangedAudioParameter*) b.freq, (juce::RangedAudioParameter*) b.gain,
+                                                       (juce::RangedAudioParameter*) b.q, (juce::RangedAudioParameter*) b.slope })
+                    juce::AudioProcessor::addParameter (p);
+            }
+            out = new juce::AudioParameterFloat (juce::ParameterID { "out", 1 }, "Output Gain", juce::NormalisableRange<float> (-24.0f, 24.0f), 0.0f,
+                juce::AudioParameterFloatAttributes().withStringFromValueFunction ([] (float v, int)
+                {
+                    return (v > 0.0f ? "+" : "") + juce::String (v, 1) + " dB";
+                }));
+            juce::AudioProcessor::addParameter (out);
         }
 
         void processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&) override
@@ -181,44 +340,724 @@ namespace
             const int channels = juce::jmin (2, buffer.getNumChannels());
             const int n = buffer.getNumSamples();
 
-            // coefficients are recomputed once per block: cheap, and the sound follows the knobs
-            const bool useHp = hp->get() > 21.0f;
-            if (useHp) hpF.makeHighPass (sr, hp->get());
-            const bool useLs = std::abs (lsG->get()) > 0.05f, useM1 = std::abs (m1G->get()) > 0.05f,
-                       useM2 = std::abs (m2G->get()) > 0.05f, useHs = std::abs (hsG->get()) > 0.05f;
-            if (useLs) ls.makeLowShelf (sr, lsF->get(), lsG->get());
-            if (useM1) m1.makePeak (sr, m1F->get(), m1G->get(), m1Q->get());
-            if (useM2) m2.makePeak (sr, m2F->get(), m2G->get(), m2Q->get());
-            if (useHs) hs.makeHighShelf (sr, juce::jmin (hsF->get(), (float) sr * 0.45f), hsG->get());
-            const float gain = std::pow (10.0f, level->get() / 20.0f);
+            pre.push (buffer);
 
-            for (int c = 0; c < channels; ++c)
+            for (int i = 0; i < kBands; ++i)
             {
-                float* d = buffer.getWritePointer (c);
-                for (int i = 0; i < n; ++i)
+                auto& b = bands[(size_t) i];
+                auto& d = dsp[(size_t) i];
+                if (! b.on->get())
                 {
-                    float x = d[i];
-                    if (useHp) x = hpF.process (c, x);
-                    if (useLs) x = ls.process (c, x);
-                    if (useM1) x = m1.process (c, x);
-                    if (useM2) x = m2.process (c, x);
-                    if (useHs) x = hs.process (c, x);
-                    d[i] = x * gain;
+                    d.sections = 0;
+                    continue;
+                }
+
+                const int type = b.type->getIndex(), slope = b.slope->getIndex();
+                const float f = b.freq->get(), g = b.gain->get(), q = b.q->get();
+                if (d.sections == 0 || type != d.type || slope != d.slope || f != d.freq || g != d.gain || q != d.q)
+                {
+                    const int before = d.sections;
+                    Coef c[4];
+                    const int count = designBand (type, sr, f, g, q, slope, c);
+                    for (int k = 0; k < count; ++k)
+                        d.coef[k] = c[k];
+                    if (before == 0 || count != before)
+                        std::memset (d.z, 0, sizeof (d.z));
+                    d.sections = count;
+                    d.type = type; d.slope = slope; d.freq = f; d.gain = g; d.q = q;
                 }
             }
+
+            for (int i = 0; i < kBands; ++i)
+            {
+                auto& d = dsp[(size_t) i];
+                for (int k = 0; k < d.sections; ++k)
+                {
+                    const Coef& c = d.coef[k];
+                    for (int ch = 0; ch < channels; ++ch)
+                    {
+                        float* x = buffer.getWritePointer (ch);
+                        float z1 = d.z[k][ch][0], z2 = d.z[k][ch][1];
+                        for (int s = 0; s < n; ++s)
+                        {
+                            const float in = x[s];
+                            const float y = c.b0 * in + z1;
+                            z1 = c.b1 * in - c.a1 * y + z2;
+                            z2 = c.b2 * in - c.a2 * y;
+                            x[s] = y;
+                        }
+                        d.z[k][ch][0] = z1;
+                        d.z[k][ch][1] = z2;
+                    }
+                }
+            }
+
+            const float gain = std::pow (10.0f, out->get() / 20.0f);
+            if (gain != 1.0f)
+                buffer.applyGain (gain);
+
+            post.push (buffer);
         }
+
+        juce::AudioProcessorEditor* createEditor() override;
+        bool hasEditor() const override { return true; }
+
+        std::array<Band, kBands> bands;
+        juce::AudioParameterFloat* out = nullptr;
+        SampleFifo pre, post;
+        std::atomic<int> analyzerMode { 0 };   // 0 = Pre + Post, 1 = Pre, 2 = Post, 3 = off
+        std::atomic<int> rangeIndex { 1 };     // 6 / 12 / 18 / 30 dB
+
+        double getRate() const { return sr; }
 
     protected:
         void prepare() override
         {
-            for (auto* b : { &hpF, &ls, &m1, &m2, &hs })
-                b->reset();
+            for (auto& d : dsp)
+            {
+                d.sections = 0;
+                std::memset (d.z, 0, sizeof (d.z));
+            }
         }
 
     private:
-        juce::AudioParameterFloat *hp, *lsF, *lsG, *m1F, *m1G, *m1Q, *m2F, *m2G, *m2Q, *hsF, *hsG, *level;
-        Biquad hpF, ls, m1, m2, hs;
+        struct Dsp
+        {
+            Coef coef[4];
+            float z[4][2][2] = {};
+            int sections = 0, type = -1, slope = -1;
+            float freq = 0, gain = 0, q = 0;
+        };
+        std::array<Dsp, kBands> dsp;
     };
+
+    // small radix-2 FFT for the analyser (editor thread only)
+    struct Fft
+    {
+        static constexpr int N = 4096;
+        std::vector<float> re = std::vector<float> ((size_t) N), im = std::vector<float> ((size_t) N), window = std::vector<float> ((size_t) N);
+        Fft()
+        {
+            for (int i = 0; i < N; ++i)
+                window[(size_t) i] = 0.5f - 0.5f * std::cos (2.0f * pi * (float) i / (float) N);
+        }
+        // in: N samples; out: N/2 magnitudes in dBFS
+        void run (const float* in, float* outDb)
+        {
+            for (int i = 0; i < N; ++i)
+            {
+                re[(size_t) i] = in[i] * window[(size_t) i];
+                im[(size_t) i] = 0.0f;
+            }
+            for (int i = 1, j = 0; i < N; ++i)
+            {
+                int bit = N >> 1;
+                for (; j & bit; bit >>= 1)
+                    j ^= bit;
+                j ^= bit;
+                if (i < j)
+                {
+                    std::swap (re[(size_t) i], re[(size_t) j]);
+                    std::swap (im[(size_t) i], im[(size_t) j]);
+                }
+            }
+            for (int len = 2; len <= N; len <<= 1)
+            {
+                const float ang = -2.0f * pi / (float) len;
+                const float wr = std::cos (ang), wi = std::sin (ang);
+                for (int i = 0; i < N; i += len)
+                {
+                    float cr = 1.0f, ci = 0.0f;
+                    for (int k = 0; k < len / 2; ++k)
+                    {
+                        const size_t a = (size_t) (i + k), b = (size_t) (i + k + len / 2);
+                        const float tr = re[b] * cr - im[b] * ci, ti = re[b] * ci + im[b] * cr;
+                        re[b] = re[a] - tr; im[b] = im[a] - ti;
+                        re[a] += tr; im[a] += ti;
+                        const float ncr = cr * wr - ci * wi;
+                        ci = cr * wi + ci * wr;
+                        cr = ncr;
+                    }
+                }
+            }
+            for (int i = 0; i < N / 2; ++i)
+            {
+                const float mag = std::sqrt (re[(size_t) i] * re[(size_t) i] + im[(size_t) i] * im[(size_t) i]) / ((float) N / 4.0f);
+                outDb[i] = 20.0f * std::log10 (juce::jmax (1.0e-7f, mag));
+            }
+        }
+    };
+
+    // ------------------------------------------------------------ the editor
+    class EqEditor : public juce::AudioProcessorEditor, private juce::Timer
+    {
+    public:
+        explicit EqEditor (EqPlugin& p) : juce::AudioProcessorEditor (p), eq (p)
+        {
+            setSize (900, 560);
+            setResizable (true, true);
+            setResizeLimits (720, 460, 1800, 1100);
+
+            for (auto* b : { &analyzerBtn, &rangeBtn, &delBtn })
+            {
+                b->setColour (juce::TextButton::buttonColourId, bg2);
+                b->setColour (juce::TextButton::textColourOffId, text);
+                addAndMakeVisible (*b);
+            }
+            analyzerBtn.onClick = [this]
+            {
+                eq.analyzerMode = (eq.analyzerMode.load() + 1) % 4;
+                refreshButtons();
+            };
+            rangeBtn.onClick = [this]
+            {
+                eq.rangeIndex = (eq.rangeIndex.load() + 1) % 4;
+                refreshButtons();
+            };
+            delBtn.setButtonText ("X");
+            delBtn.onClick = [this] { removeBand (selected); };
+
+            onBtn.setButtonText ("");
+            onBtn.setColour (juce::ToggleButton::tickColourId, accent);
+            addAndMakeVisible (onBtn);
+            typeBox.addItemList (juce::StringArray { kTypeNames[0], kTypeNames[1], kTypeNames[2], kTypeNames[3], kTypeNames[4], kTypeNames[5] }, 1);
+            slopeBox.addItemList (juce::StringArray { kSlopeNames[0], kSlopeNames[1], kSlopeNames[2], kSlopeNames[3] }, 1);
+            for (auto* c : { &typeBox, &slopeBox })
+            {
+                c->setColour (juce::ComboBox::backgroundColourId, bg2);
+                c->setColour (juce::ComboBox::textColourId, text);
+                c->setColour (juce::ComboBox::outlineColourId, border);
+                addAndMakeVisible (*c);
+            }
+            for (auto* s : { &freqS, &gainS, &qS })
+            {
+                s->setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
+                s->setTextBoxStyle (juce::Slider::TextBoxBelow, false, 78, 18);
+                s->setColour (juce::Slider::rotarySliderFillColourId, accent);
+                s->setColour (juce::Slider::rotarySliderOutlineColourId, juce::Colour (0xff3a4152));
+                s->setColour (juce::Slider::thumbColourId, text);
+                s->setColour (juce::Slider::textBoxTextColourId, accent);
+                s->setColour (juce::Slider::textBoxOutlineColourId, juce::Colours::transparentBlack);
+                addAndMakeVisible (*s);
+            }
+            outS.setSliderStyle (juce::Slider::LinearHorizontal);
+            outS.setTextBoxStyle (juce::Slider::TextBoxRight, false, 70, 18);
+            outS.setColour (juce::Slider::trackColourId, accent);
+            outS.setColour (juce::Slider::thumbColourId, text);
+            outS.setColour (juce::Slider::textBoxTextColourId, text);
+            outS.setColour (juce::Slider::textBoxOutlineColourId, juce::Colours::transparentBlack);
+            addAndMakeVisible (outS);
+            outAtt = std::make_unique<juce::SliderParameterAttachment> (*eq.out, outS);
+
+            refreshButtons();
+            select (-1);
+            startTimerHz (30);
+        }
+
+        ~EqEditor() override { stopTimer(); }
+
+        void resized() override
+        {
+            auto r = getLocalBounds();
+            header = r.removeFromTop (38);
+            footer = r.removeFromBottom (28);
+            graph = r.reduced (46, 8).withTrimmedRight (30).toFloat();
+
+            analyzerBtn.setBounds (header.getRight() - 560, 6, 150, 26);
+            rangeBtn.setBounds (header.getRight() - 400, 6, 90, 26);
+            outS.setBounds (header.getRight() - 300, 6, 290, 26);
+
+            const int pw = 600, ph = 124;
+            panel = juce::Rectangle<int> (graph.getCentreX() - pw / 2, (int) graph.getBottom() - ph - 8, pw, ph).toNearestInt();
+            onBtn.setBounds (panel.getX() + 10, panel.getY() + 10, 28, 28);
+            typeBox.setBounds (panel.getX() + 44, panel.getY() + 10, 120, 28);
+            slopeBox.setBounds (panel.getX() + 44, panel.getY() + 48, 120, 28);
+            freqS.setBounds (panel.getX() + 190, panel.getY() + 6, 100, 108);
+            gainS.setBounds (panel.getX() + 300, panel.getY() + 6, 100, 108);
+            qS.setBounds (panel.getX() + 410, panel.getY() + 6, 100, 108);
+            delBtn.setBounds (panel.getRight() - 40, panel.getY() + 10, 30, 28);
+        }
+
+        void paint (juce::Graphics& g) override
+        {
+            g.fillAll (bg);
+
+            g.setColour (accent);
+            g.setFont (juce::FontOptions (16.0f, juce::Font::bold));
+            g.drawText ("TC  EQUALIZER", header.withTrimmedLeft (16), juce::Justification::centredLeft);
+            g.setColour (muted);
+            g.setFont (12.0f);
+            g.drawText ("Output", outS.getBounds().withX (outS.getX() - 52).withWidth (50), juce::Justification::centredRight);
+
+            auto gr = graph;
+            g.setColour (juce::Colour (0xff0d0f13));
+            g.fillRoundedRectangle (gr, 6.0f);
+
+            const float range = currentRange();
+
+            // grid
+            g.setFont (11.0f);
+            for (float f : { 20.f, 30.f, 40.f, 50.f, 60.f, 70.f, 80.f, 90.f, 100.f, 200.f, 300.f, 400.f, 500.f, 600.f, 700.f, 800.f, 900.f,
+                             1000.f, 2000.f, 3000.f, 4000.f, 5000.f, 6000.f, 7000.f, 8000.f, 9000.f, 10000.f, 20000.f })
+            {
+                const float x = freqToX (f);
+                const bool major = f == 20 || f == 50 || f == 100 || f == 200 || f == 500 || f == 1000 || f == 2000 || f == 5000 || f == 10000 || f == 20000;
+                g.setColour (juce::Colour (major ? 0xff262c38 : 0xff1a1f28));
+                g.drawVerticalLine ((int) x, gr.getY(), gr.getBottom());
+                if (major)
+                {
+                    g.setColour (muted);
+                    g.drawText (f >= 1000 ? juce::String ((int) (f / 1000)) + "k" : juce::String ((int) f),
+                                juce::Rectangle<float> (x - 20, gr.getBottom() - 16, 40, 14).toNearestInt(), juce::Justification::centred);
+                }
+            }
+            for (int i = -4; i <= 4; ++i)
+            {
+                const float db = range * (float) i / 4.0f;
+                const float y = dbToY (db);
+                g.setColour (juce::Colour (i == 0 ? 0xff3a4152 : 0xff1f2430));
+                g.drawHorizontalLine ((int) y, gr.getX(), gr.getRight());
+                g.setColour (accent.withAlpha (0.85f));
+                g.drawText ((db > 0 ? "+" : "") + juce::String ((int) std::round (db)), juce::Rectangle<float> (gr.getX() - 40, y - 8, 36, 16).toNearestInt(),
+                            juce::Justification::centredRight);
+            }
+            for (int d = 0; d <= 100; d += 20)   // dBFS scale of the analyser on the right
+            {
+                g.setColour (muted);
+                g.drawText (juce::String (-d), juce::Rectangle<float> (gr.getRight() + 2, specToY ((float) -d) - 8, 30, 16).toNearestInt(),
+                            juce::Justification::centredLeft);
+            }
+
+            g.saveState();
+            g.reduceClipRegion (gr.toNearestInt());
+
+            // analyser
+            const int mode = eq.analyzerMode.load();
+            if (mode == 0 || mode == 1)
+                drawSpectrum (g, preDb, accent.withAlpha (0.22f), accent.withAlpha (0.55f), true);
+            if (mode == 0 || mode == 2)
+                drawSpectrum (g, postDb, juce::Colours::transparentBlack, text.withAlpha (0.5f), false);
+
+            // curves
+            const int steps = juce::jmax (2, (int) gr.getWidth() / 2);
+            std::vector<float> total ((size_t) steps + 1, 0.0f);
+            for (int i = 0; i < kBands; ++i)
+                if (eq.bands[(size_t) i].on->get())
+                    for (int s = 0; s <= steps; ++s)
+                        total[(size_t) s] += bandDb (i, xToFreq (gr.getX() + gr.getWidth() * (float) s / (float) steps));
+
+            if (selected >= 0 && eq.bands[(size_t) selected].on->get())
+            {
+                juce::Path sp;
+                const float y0 = dbToY (0.0f);
+                sp.startNewSubPath (gr.getX(), y0);
+                for (int s = 0; s <= steps; ++s)
+                    sp.lineTo (gr.getX() + gr.getWidth() * (float) s / (float) steps,
+                               dbToY (bandDb (selected, xToFreq (gr.getX() + gr.getWidth() * (float) s / (float) steps))));
+                sp.lineTo (gr.getRight(), y0);
+                sp.closeSubPath();
+                g.setColour (accent.withAlpha (0.2f));
+                g.fillPath (sp);
+            }
+
+            juce::Path curve, fill;
+            for (int s = 0; s <= steps; ++s)
+            {
+                const float x = gr.getX() + gr.getWidth() * (float) s / (float) steps;
+                const float y = dbToY (juce::jlimit (-range * 1.2f, range * 1.2f, total[(size_t) s]));
+                if (s == 0) curve.startNewSubPath (x, y); else curve.lineTo (x, y);
+            }
+            fill = curve;
+            fill.lineTo (gr.getRight(), dbToY (0.0f));
+            fill.lineTo (gr.getX(), dbToY (0.0f));
+            fill.closeSubPath();
+            g.setColour (accent.withAlpha (0.1f));
+            g.fillPath (fill);
+            g.setColour (accent);
+            g.strokePath (curve, juce::PathStrokeType (2.5f));
+
+            // nodes
+            for (int i = 0; i < kBands; ++i)
+            {
+                if (! eq.bands[(size_t) i].on->get())
+                    continue;
+                const auto c = nodePos (i);
+                const bool sel = i == selected, hov = i == hover;
+                if (sel)
+                {
+                    g.setColour (accent.withAlpha (0.25f));
+                    g.fillEllipse (c.x - 15, c.y - 15, 30, 30);
+                }
+                g.setColour (sel ? juce::Colours::white : (hov ? accent.brighter (0.4f) : accent));
+                g.fillEllipse (c.x - 9, c.y - 9, 18, 18);
+                g.setColour (bg);
+                g.fillEllipse (c.x - 6.5f, c.y - 6.5f, 13, 13);
+                g.setColour (sel ? juce::Colours::white : accent);
+                g.setFont (juce::FontOptions (10.0f, juce::Font::bold));
+                g.drawText (juce::String (i + 1), juce::Rectangle<float> (c.x - 9, c.y - 9, 18, 18).toNearestInt(), juce::Justification::centred);
+            }
+            g.restoreState();
+
+            g.setColour (border);
+            g.drawRoundedRectangle (gr, 6.0f, 1.0f);
+
+            if (selected < 0)
+            {
+                g.setColour (muted);
+                g.setFont (13.0f);
+                g.drawText ("Double-click the graph to add a band  -  drag a point  -  mouse wheel = Q  -  right-click = type",
+                            gr.toNearestInt().removeFromBottom (60).removeFromTop (30), juce::Justification::centred);
+            }
+            else
+            {
+                g.setColour (juce::Colour (0xf0181b22));
+                g.fillRoundedRectangle (panel.toFloat(), 8.0f);
+                g.setColour (border);
+                g.drawRoundedRectangle (panel.toFloat(), 8.0f, 1.0f);
+                g.setColour (accent);
+                g.setFont (juce::FontOptions (13.0f, juce::Font::bold));
+                g.drawText ("BAND " + juce::String (selected + 1), juce::Rectangle<int> (panel.getX() + 12, panel.getBottom() - 30, 110, 20),
+                            juce::Justification::centredLeft);
+                g.setColour (muted);
+                g.setFont (11.0f);
+                const int labelY = panel.getY() + 4;
+                g.drawText ("FREQ", juce::Rectangle<int> (freqS.getX(), labelY, freqS.getWidth(), 14), juce::Justification::centred);
+                g.drawText ("GAIN", juce::Rectangle<int> (gainS.getX(), labelY, gainS.getWidth(), 14), juce::Justification::centred);
+                g.drawText ("Q", juce::Rectangle<int> (qS.getX(), labelY, qS.getWidth(), 14), juce::Justification::centred);
+            }
+
+            g.setColour (muted);
+            g.setFont (12.0f);
+            g.drawText ("Zero Latency", footer.withTrimmedLeft (16), juce::Justification::centredLeft);
+            g.drawText ("Analyzer input: pre-EQ" + juce::String (mode == 0 ? " + post-EQ" : mode == 2 ? " (post only)" : mode == 3 ? " (off)" : ""),
+                        footer.withTrimmedRight (16), juce::Justification::centredRight);
+        }
+
+        // ---- mouse
+        void mouseMove (const juce::MouseEvent& e) override
+        {
+            const int h = hitNode (e.position);
+            if (h != hover)
+            {
+                hover = h;
+                setMouseCursor (h >= 0 ? juce::MouseCursor::PointingHandCursor : juce::MouseCursor::NormalCursor);
+                repaint();
+            }
+        }
+
+        void mouseDown (const juce::MouseEvent& e) override
+        {
+            if (panelVisible() && panel.contains (e.getPosition()))
+                return;
+            const int h = hitNode (e.position);
+            if (e.mods.isPopupMenu())
+            {
+                if (h >= 0)
+                {
+                    select (h);
+                    showTypeMenu (h);
+                }
+                return;
+            }
+            if (h >= 0)
+            {
+                select (h);
+                dragging = h;
+                bandBegin (h);
+            }
+            else
+            {
+                select (-1);
+            }
+        }
+
+        void mouseDrag (const juce::MouseEvent& e) override
+        {
+            if (dragging < 0)
+                return;
+            auto& b = eq.bands[(size_t) dragging];
+            setParam (b.freq, juce::jlimit (kMinFreq, kMaxFreq, xToFreq (e.position.x)));
+            const int type = b.type->getIndex();
+            if (type != 3 && type != 4)
+                setParam (b.gain, juce::jlimit (-30.0f, 30.0f, yToDb (e.position.y)));
+            repaint();
+        }
+
+        void mouseUp (const juce::MouseEvent&) override
+        {
+            if (dragging >= 0)
+                bandEnd (dragging);
+            dragging = -1;
+        }
+
+        void mouseDoubleClick (const juce::MouseEvent& e) override
+        {
+            if (panelVisible() && panel.contains (e.getPosition()))
+                return;
+            const int h = hitNode (e.position);
+            if (h >= 0)
+            {
+                removeBand (h);
+                return;
+            }
+            if (! graph.contains (e.position))
+                return;
+            for (int i = 0; i < kBands; ++i)
+                if (! eq.bands[(size_t) i].on->get())
+                {
+                    auto& b = eq.bands[(size_t) i];
+                    bandBegin (i);
+                    setParam (b.type, 0.0f);
+                    setParam (b.slope, 0.0f);
+                    setParam (b.freq, juce::jlimit (kMinFreq, kMaxFreq, xToFreq (e.position.x)));
+                    setParam (b.gain, juce::jlimit (-30.0f, 30.0f, yToDb (e.position.y)));
+                    setParam (b.q, 1.0f);
+                    setParam (b.on, 1.0f);
+                    bandEnd (i);
+                    select (i);
+                    return;
+                }
+        }
+
+        void mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& w) override
+        {
+            int target = hitNode (e.position);
+            if (target < 0)
+                target = selected;
+            if (target < 0 || ! eq.bands[(size_t) target].on->get())
+                return;
+            auto& b = eq.bands[(size_t) target];
+            const float factor = std::pow (1.25f, w.deltaY * 4.0f);
+            bandBegin (target);
+            setParam (b.q, juce::jlimit (0.1f, 40.0f, b.q->get() * factor));
+            bandEnd (target);
+            repaint();
+        }
+
+    private:
+        static void setParam (juce::RangedAudioParameter* p, float plain) { p->setValueNotifyingHost (p->convertTo0to1 (plain)); }
+        static void bandBegin (int) {}
+        static void bandEnd (int) {}
+
+        bool panelVisible() const { return selected >= 0; }
+        float currentRange() const { static const float r[] = { 6.0f, 12.0f, 18.0f, 30.0f }; return r[eq.rangeIndex.load() & 3]; }
+
+        float freqToX (float f) const { return graph.getX() + graph.getWidth() * std::log (f / kMinFreq) / std::log (kMaxFreq / kMinFreq); }
+        float xToFreq (float x) const { return kMinFreq * std::pow (kMaxFreq / kMinFreq, juce::jlimit (0.0f, 1.0f, (x - graph.getX()) / graph.getWidth())); }
+        float dbToY (float db) const { return graph.getCentreY() - db / currentRange() * (graph.getHeight() * 0.5f); }
+        float yToDb (float y) const { return (graph.getCentreY() - y) / (graph.getHeight() * 0.5f) * currentRange(); }
+        float specToY (float dbfs) const { return graph.getBottom() - (dbfs + 100.0f) / 100.0f * graph.getHeight(); }
+
+        juce::Point<float> nodePos (int i) const
+        {
+            auto& b = eq.bands[(size_t) i];
+            const int type = b.type->getIndex();
+            const float db = (type == 3 || type == 4) ? 0.0f : (type == 5 ? 0.0f : b.gain->get());
+            return { freqToX (b.freq->get()), dbToY (juce::jlimit (-currentRange() * 1.05f, currentRange() * 1.05f, db)) };
+        }
+
+        int hitNode (juce::Point<float> p) const
+        {
+            int best = -1;
+            float bestD = 12.0f * 12.0f;
+            for (int i = 0; i < kBands; ++i)
+                if (eq.bands[(size_t) i].on->get())
+                {
+                    const auto c = nodePos (i);
+                    const float d = (c.x - p.x) * (c.x - p.x) + (c.y - p.y) * (c.y - p.y);
+                    if (d < bestD) { bestD = d; best = i; }
+                }
+            return best;
+        }
+
+        float bandDb (int i, float f) const
+        {
+            auto& b = eq.bands[(size_t) i];
+            Coef c[4];
+            const int n = designBand (b.type->getIndex(), eq.getRate() > 0 ? eq.getRate() : 48000.0, b.freq->get(), b.gain->get(), b.q->get(), b.slope->getIndex(), c);
+            const double sr = eq.getRate() > 0 ? eq.getRate() : 48000.0;
+            const float w = 2.0f * pi * f / (float) sr;
+            float db = 0.0f;
+            for (int k = 0; k < n; ++k)
+                db += sectionDb (c[k], juce::jmin (w, pi * 0.999f));
+            return db;
+        }
+
+        void removeBand (int i)
+        {
+            if (i < 0)
+                return;
+            setParam (eq.bands[(size_t) i].on, 0.0f);
+            if (selected == i)
+                select (-1);
+            repaint();
+        }
+
+        void showTypeMenu (int i)
+        {
+            juce::PopupMenu m;
+            for (int t = 0; t < 6; ++t)
+                m.addItem (t + 1, kTypeNames[t], true, eq.bands[(size_t) i].type->getIndex() == t);
+            m.addSeparator();
+            m.addItem (100, "Delete band");
+            juce::Component::SafePointer<EqEditor> safe (this);
+            m.showMenuAsync (juce::PopupMenu::Options(), [safe, i] (int r)
+            {
+                if (safe == nullptr || r <= 0)
+                    return;
+                if (r == 100)
+                    safe->removeBand (i);
+                else
+                    setParam (safe->eq.bands[(size_t) i].type, (float) (r - 1));
+                safe->repaint();
+            });
+        }
+
+        void select (int i)
+        {
+            selected = i;
+            typeAtt.reset(); slopeAtt.reset(); onAtt.reset(); freqAtt.reset(); gainAtt.reset(); qAtt.reset();
+            const bool show = i >= 0;
+            for (auto* c : std::initializer_list<juce::Component*> { &onBtn, &typeBox, &freqS, &gainS, &qS, &delBtn })
+                c->setVisible (show);
+            slopeBox.setVisible (false);
+            if (show)
+            {
+                auto& b = eq.bands[(size_t) i];
+                onAtt = std::make_unique<juce::ButtonParameterAttachment> (*b.on, onBtn);
+                typeAtt = std::make_unique<juce::ComboBoxParameterAttachment> (*b.type, typeBox);
+                slopeAtt = std::make_unique<juce::ComboBoxParameterAttachment> (*b.slope, slopeBox);
+                freqAtt = std::make_unique<juce::SliderParameterAttachment> (*b.freq, freqS);
+                gainAtt = std::make_unique<juce::SliderParameterAttachment> (*b.gain, gainS);
+                qAtt = std::make_unique<juce::SliderParameterAttachment> (*b.q, qS);
+            }
+            repaint();
+        }
+
+        void refreshButtons()
+        {
+            static const char* modes[] = { "Analyzer: Pre+Post", "Analyzer: Pre", "Analyzer: Post", "Analyzer: Off" };
+            analyzerBtn.setButtonText (modes[eq.analyzerMode.load() & 3]);
+            rangeBtn.setButtonText (juce::String ((int) currentRange()) + " dB");
+            repaint();
+        }
+
+        void drawSpectrum (juce::Graphics& g, const std::vector<float>& db, juce::Colour fillColour, juce::Colour lineColour, bool filled)
+        {
+            if (db.empty())
+                return;
+            const double sr = eq.getRate() > 0 ? eq.getRate() : 48000.0;
+            const float binHz = (float) sr / (float) Fft::N;
+            juce::Path p;
+            bool started = false;
+            float prevBin = 1.0f;
+            for (int x = 0; x <= (int) graph.getWidth(); x += 2)
+            {
+                const float f = xToFreq (graph.getX() + (float) x);
+                const float bin = f / binHz;
+                if (bin < 1.0f || bin >= (float) db.size() - 1)
+                    continue;
+                float v = -200.0f;
+                const int lo = (int) std::floor (prevBin), hi = (int) std::ceil (bin);
+                for (int k = lo; k <= hi && k < (int) db.size(); ++k)
+                    v = juce::jmax (v, db[(size_t) k]);
+                if (hi - lo <= 1)   // low frequencies: interpolate between bins
+                {
+                    const int k = (int) bin;
+                    const float fr = bin - (float) k;
+                    v = db[(size_t) k] * (1.0f - fr) + db[(size_t) k + 1] * fr;
+                }
+                prevBin = bin;
+                const float tilt = 4.5f * std::log2 (f / 1000.0f);   // pink-noise slope compensation
+                const float y = specToY (juce::jlimit (-100.0f, 0.0f, v + tilt));
+                if (! started) { p.startNewSubPath (graph.getX() + (float) x, y); started = true; }
+                else p.lineTo (graph.getX() + (float) x, y);
+            }
+            if (! started)
+                return;
+            if (filled)
+            {
+                juce::Path f2 = p;
+                f2.lineTo (graph.getRight(), graph.getBottom());
+                f2.lineTo (graph.getX(), graph.getBottom());
+                f2.closeSubPath();
+                g.setColour (fillColour);
+                g.fillPath (f2);
+            }
+            g.setColour (lineColour);
+            g.strokePath (p, juce::PathStrokeType (1.2f));
+        }
+
+        void updateSpectrum (SampleFifo& fifo, std::vector<float>& ring, std::vector<float>& db)
+        {
+            float tmp[4096];
+            const int got = fifo.pull (tmp, 4096);
+            if (got > 0)
+            {
+                if (got >= Fft::N)
+                    std::copy (tmp + got - Fft::N, tmp + got, ring.begin());
+                else
+                {
+                    std::copy (ring.begin() + got, ring.end(), ring.begin());
+                    std::copy (tmp, tmp + got, ring.end() - got);
+                }
+            }
+            std::vector<float> now ((size_t) Fft::N / 2);
+            fft.run (ring.data(), now.data());
+            if (db.size() != now.size())
+                db.assign (now.size(), -120.0f);
+            for (size_t i = 0; i < now.size(); ++i)
+                db[i] = now[i] > db[i] ? now[i] : db[i] * 0.85f + now[i] * 0.15f - 0.4f;   // fast attack, slow fall
+        }
+
+        void timerCallback() override
+        {
+            if (eq.analyzerMode.load() != 3)
+            {
+                updateSpectrum (eq.pre, preRing, preDb);
+                updateSpectrum (eq.post, postRing, postDb);
+            }
+            else
+            {
+                float tmp[4096];
+                while (eq.pre.pull (tmp, 4096) > 0) {}
+                while (eq.post.pull (tmp, 4096) > 0) {}
+            }
+            if (selected >= 0)
+            {
+                const int type = eq.bands[(size_t) selected].type->getIndex();
+                const bool cut = type == 3 || type == 4;
+                if (slopeBox.isVisible() != cut)
+                    slopeBox.setVisible (cut);
+                const bool noGain = cut || type == 5;
+                if (gainS.isEnabled() == noGain)
+                    gainS.setEnabled (! noGain);
+                gainS.setAlpha (noGain ? 0.35f : 1.0f);
+            }
+            repaint();
+        }
+
+        EqPlugin& eq;
+        int selected = -1, dragging = -1, hover = -1;
+        juce::Rectangle<float> graph;
+        juce::Rectangle<int> panel, header, footer;
+
+        juce::Colour bg { 0xff15171c }, bg2 { 0xff262b36 }, border { 0xff2a2f3a }, accent { 0xffff9a2e }, text { 0xffe8eaf0 }, muted { 0xff8b93a7 };
+
+        juce::TextButton analyzerBtn, rangeBtn, delBtn;
+        juce::ToggleButton onBtn;
+        juce::ComboBox typeBox, slopeBox;
+        juce::Slider freqS, gainS, qS, outS;
+        std::unique_ptr<juce::ButtonParameterAttachment> onAtt;
+        std::unique_ptr<juce::ComboBoxParameterAttachment> typeAtt, slopeAtt;
+        std::unique_ptr<juce::SliderParameterAttachment> freqAtt, gainAtt, qAtt, outAtt;
+
+        Fft fft;
+        std::vector<float> preRing = std::vector<float> ((size_t) Fft::N, 0.0f), postRing = std::vector<float> ((size_t) Fft::N, 0.0f);
+        std::vector<float> preDb, postDb;
+    };
+
+    juce::AudioProcessorEditor* EqPlugin::createEditor() { return new EqEditor (*this); }
 
     std::unique_ptr<juce::AudioPluginInstance> makeBuiltin (const juce::String& id)
     {
