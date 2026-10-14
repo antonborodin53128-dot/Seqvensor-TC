@@ -1,4 +1,5 @@
 #include "Builtin.h"
+#include "ReverbCore.h"
 #include "Text.h"
 
 #include <algorithm>
@@ -1761,37 +1762,13 @@ namespace
     // Algorithmic reverb: stereo pre-delay -> input diffusion -> 8-line feedback delay network (Hadamard matrix,
     // damping in the loop, slowly modulated delay lines) -> low cut / high cut on the wet signal -> mix.
     // It adds NO latency: the dry signal passes straight through; the only delay is the Pre-Delay the user asks for.
-    struct RevDelay
-    {
-        std::vector<float> buf;
-        int mask = 0, w = 0;
-
-        void init (int minLen)
-        {
-            int n = 1;
-            while (n < minLen + 4)
-                n <<= 1;
-            buf.assign ((size_t) n, 0.0f);
-            mask = n - 1;
-            w = 0;
-        }
-        void write (float x) { buf[(size_t) w] = x; w = (w + 1) & mask; }
-        float read (float d) const // d >= 1 samples, fractional (linear interpolation)
-        {
-            const int i = (int) d;
-            const float f = d - (float) i;
-            const float a = buf[(size_t) ((w - 1 - i) & mask)], b = buf[(size_t) ((w - 2 - i) & mask)];
-            return a + (b - a) * f;
-        }
-    };
-
     class ReverbPlugin : public BuiltinBase
     {
     public:
-        static constexpr int kLines = 8;
-
         ReverbPlugin() : BuiltinBase ("reverb", "Reverb", "Vintage-style algorithmic reverb (no latency)")
         {
+            mode = new juce::AudioParameterChoice (juce::ParameterID { "mo", 1 }, "Mode", juce::StringArray { "Hall", "Plate", "Room" }, 0);
+            juce::AudioProcessor::addParameter (mode);
             preDelay = addFloat ("pd", "Pre-Delay", 0.0f, 500.0f, 20.0f, 0.1f);
             decay = addFloat ("de", "Decay", 0.2f, 20.0f, 2.5f, 0.15f);
             lowCut = addFloat ("lc", "Low Cut", 20.0f, 1000.0f, 100.0f, 0.1f);
@@ -1806,16 +1783,10 @@ namespace
         {
             juce::ScopedNoDenormals noDenormals;
             const int n = buf.getNumSamples(), nch = juce::jmin (2, buf.getNumChannels());
-            if (nch == 0 || pre[0].buf.empty())
+            if (nch == 0)
                 return;
 
-            const float rt = decay->get();
-            if (rt != lastDecay)
-            {
-                lastDecay = rt;
-                for (int i = 0; i < kLines; ++i)
-                    lineGain[i] = std::pow (10.0f, -3.0f * (float) len[i] / ((float) sr * rt));
-            }
+            core.setParams (mode->getIndex(), preDelay->get(), decay->get());
             if (lowCut->get() != lastLc || highCut->get() != lastHc)
             {
                 lastLc = lowCut->get();
@@ -1831,117 +1802,36 @@ namespace
                 tiltHigh.makeHighShelf (sr, 3000.0f, lastTone * 0.5f, 0.7f);
             }
             const float wetAmt = mix->get() * 0.01f, dryAmt = 1.0f - wetAmt;
-            const float preTarget = juce::jmax (1.0f, (float) (sr * 0.001 * preDelay->get()));
-            const float preStep = (preTarget - preSmooth) / (float) juce::jmax (1, n);
 
             auto* d0 = buf.getWritePointer (0);
             auto* d1 = nch > 1 ? buf.getWritePointer (1) : nullptr;
-
             for (int s = 0; s < n; ++s)
             {
-                preSmooth += preStep;
                 const float inL = d0[s], inR = d1 ? d1[s] : inL;
-
-                // pre-delay
-                pre[0].write (inL);
-                pre[1].write (inR);
-                float xl = pre[0].read (preSmooth), xr = pre[1].read (preSmooth);
-
-                // input diffusion (two Schroeder all-passes per side)
-                xl = allpass (ap[0], xl, apLen[0]);
-                xl = allpass (ap[1], xl, apLen[1]);
-                xr = allpass (ap[2], xr, apLen[2]);
-                xr = allpass (ap[3], xr, apLen[3]);
-
-                // feedback delay network
-                float f[kLines];
-                for (int i = 0; i < kLines; ++i)
-                {
-                    const float mod = std::sin (phase[i]) * modDepth;
-                    phase[i] += phaseInc[i];
-                    if (phase[i] > 6.2831853f) phase[i] -= 6.2831853f;
-                    const float tap = lines[i].read ((float) len[i] + mod);
-                    damp[i] = tap * (1.0f - dampCoef) + damp[i] * dampCoef;
-                    f[i] = damp[i] * lineGain[i];
-                }
-                // 8x8 Hadamard (butterfly), normalised
-                for (int h = 1; h < kLines; h <<= 1)
-                    for (int i = 0; i < kLines; i += h << 1)
-                        for (int j = i; j < i + h; ++j)
-                        {
-                            const float a = f[j], b = f[j + h];
-                            f[j] = a + b;
-                            f[j + h] = a - b;
-                        }
-                float wl = 0.0f, wr = 0.0f;
-                for (int i = 0; i < kLines; ++i)
-                {
-                    const float inj = (i & 1 ? xr : xl) * 0.5f;
-                    lines[i].write (inj + f[i] * 0.35355339f);
-                    // taps for the output: alternate signs give two different stereo mixes
-                    const float t = damp[i];
-                    wl += (i & 1 ? -t : t);
-                    wr += ((i >> 1) & 1 ? -t : t);
-                }
-                wl *= 0.35f;
-                wr *= 0.35f;
-
-                // wet filters
+                float wl, wr;
+                core.process (inL, inR, wl, wr);
                 wl = tiltHigh.process (0, tiltLow.process (0, lp.process (0, hp.process (0, wl))));
                 wr = tiltHigh.process (1, tiltLow.process (1, lp.process (1, hp.process (1, wr))));
-
                 d0[s] = inL * dryAmt + wl * wetAmt;
                 if (d1) d1[s] = inR * dryAmt + wr * wetAmt;
             }
-            preSmooth = preTarget;
         }
 
+        juce::AudioParameterChoice* mode;
         juce::AudioParameterFloat *preDelay, *decay, *lowCut, *highCut, *tone, *mix;
         juce::AudioProcessorEditor* createEditor() override;
 
     protected:
         void prepare() override
         {
-            const float k = (float) sr / 44100.0f;
-            static const int base[kLines] = { 1117, 1327, 1559, 1783, 2029, 2239, 2477, 2711 };
-            for (int i = 0; i < kLines; ++i)
-            {
-                len[i] = (int) (base[i] * k);
-                lines[i].init (len[i] + 64);
-                damp[i] = 0.0f;
-                phase[i] = (float) i * 0.8f;
-                phaseInc[i] = 6.2831853f * (0.25f + 0.07f * (float) i) / (float) sr;
-            }
-            modDepth = 6.0f * k;
-            static const int apBase[4] = { 142, 107, 163, 121 };
-            for (int i = 0; i < 4; ++i)
-            {
-                apLen[i] = (int) (apBase[i] * k);
-                ap[i].init (apLen[i] + 8);
-            }
-            const int maxPre = (int) (sr * 0.5) + 8;
-            pre[0].init (maxPre);
-            pre[1].init (maxPre);
-            dampCoef = std::exp (-2.0f * pi * 6000.0f / (float) sr);
-            preSmooth = juce::jmax (1.0f, (float) (sr * 0.001 * preDelay->get()));
-            lastDecay = lastLc = lastHc = lastTone = -99.0f;
+            core.prepare (sr);
+            lastLc = lastHc = lastTone = -99.0f;
             hp.reset(); lp.reset(); tiltLow.reset(); tiltHigh.reset();
         }
 
     private:
-        static float allpass (RevDelay& d, float x, int len)
-        {
-            const float del = d.read ((float) len);
-            const float w = x + 0.6f * del;
-            d.write (w);
-            return del - 0.6f * w;
-        }
-
-        RevDelay lines[kLines], pre[2], ap[4];
-        int len[kLines] = {}, apLen[4] = {};
-        float lineGain[kLines] = {}, damp[kLines] = {}, phase[kLines] = {}, phaseInc[kLines] = {};
-        float modDepth = 6.0f, dampCoef = 0.5f, preSmooth = 1.0f;
-        float lastDecay = -1.0f, lastLc = -1.0f, lastHc = -1.0f, lastTone = -99.0f;
+        tcrev::Core core;
+        float lastLc = -99.0f, lastHc = -99.0f, lastTone = -99.0f;
         Biquad hp, lp, tiltLow, tiltHigh;
     };
 
@@ -1965,6 +1855,19 @@ namespace
             mxS.textFromValueFunction = [] (double v) { return juce::String ((int) std::round (v)) + " %"; };
             for (auto* s : { &pdS, &deS, &lcS, &hcS, &toS, &mxS })
                 s->updateText();
+            const char* names[3] = { "HALL", "PLATE", "ROOM" };
+            for (int i = 0; i < 3; ++i)
+            {
+                auto& b = modeBtn[i];
+                b.setButtonText (names[i]);
+                b.setClickingTogglesState (false);
+                b.setColour (juce::TextButton::buttonColourId, juce::Colour (0xff262b36));
+                b.setColour (juce::TextButton::buttonOnColourId, accent);
+                b.setColour (juce::TextButton::textColourOffId, text_);
+                b.setColour (juce::TextButton::textColourOnId, juce::Colour (0xff15171c));
+                b.onClick = [this, i] { plug.mode->beginChangeGesture(); *plug.mode = i; plug.mode->endChangeGesture(); };
+                addAndMakeVisible (b);
+            }
             startTimerHz (20);
         }
 
@@ -2010,6 +1913,8 @@ namespace
 
         void resized() override
         {
+            for (int i = 0; i < 3; ++i)
+                modeBtn[i].setBounds (getWidth() - 16 - 3 * 64 + i * 64, 8, 60, 26);
             graphArea = juce::Rectangle<int> (16, 40, getWidth() - 32, 110);
             auto row = juce::Rectangle<int> (16, 164, getWidth() - 32, 150);
             const int w = row.getWidth() / 6;
@@ -2040,12 +1945,18 @@ namespace
             att = std::make_unique<juce::SliderParameterAttachment> (prm, s);
         }
 
-        void timerCallback() override { repaint (graphArea); }
+        void timerCallback() override
+        {
+            for (int i = 0; i < 3; ++i)
+                modeBtn[i].setToggleState (plug.mode->getIndex() == i, juce::dontSendNotification);
+            repaint (graphArea);
+        }
 
         ReverbPlugin& plug;
         juce::Slider pdS, deS, lcS, hcS, toS, mxS;
         juce::Label pdL, deL, lcL, hcL, toL, mxL;
         std::unique_ptr<juce::SliderParameterAttachment> pdA, deA, lcA, hcA, toA, mxA;
+        juce::TextButton modeBtn[3];
         juce::Rectangle<int> graphArea;
         juce::Colour bg { 0xff15171c }, accent { 0xffff9a2e }, text_ { 0xffe8eaf0 }, muted { 0xff8b93a7 };
     };
