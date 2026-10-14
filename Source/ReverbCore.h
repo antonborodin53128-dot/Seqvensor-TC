@@ -98,7 +98,7 @@ namespace tcrev
         }
 
         // called once per block (cheap)
-        void setParams (int mode, float preDelayMs, float decaySec)
+        void setParams (int mode, float preDelayMs, float decaySec, float damping = 0.5f)
         {
             const Preset& p = preset (mode);
             const float k = sr / 44100.0f;
@@ -111,7 +111,9 @@ namespace tcrev
                 first = false;
             }
             curPreset = p;
-            dampCoef = std::exp (-2.0f * 3.14159265f * p.dampHz / sr);
+            // Damping 0..1 (0.5 = the character of the mode): how fast the high frequencies die in the tail
+            const float hz = std::max (500.0f, std::min (0.45f * sr, p.dampHz * std::exp ((0.5f - damping) * 2.0f * std::log (5.0f))));
+            dampCoef = std::exp (-2.0f * 3.14159265f * hz / sr);
             decay = std::max (0.1f, decaySec);
             preTarget = std::max (1.0f, sr * 0.001f * preDelayMs);
             // wet level: the energy of a diffuse tail grows with its length, so compensate a bit

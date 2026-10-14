@@ -1773,6 +1773,7 @@ namespace
             decay = addFloat ("de", "Decay", 0.2f, 20.0f, 2.5f, 0.15f);
             lowCut = addFloat ("lc", "Low Cut", 20.0f, 1000.0f, 100.0f, 0.1f);
             highCut = addFloat ("hc", "High Cut", 1000.0f, 20000.0f, 10000.0f, 0.3f);
+            damping = addLinear ("da", "Damping", 0.0f, 100.0f, 50.0f);
             tone = addLinear ("to", "Tone", -12.0f, 12.0f, 0.0f);
             mix = addLinear ("mx", "Mix", 0.0f, 100.0f, 25.0f);
         }
@@ -1786,7 +1787,7 @@ namespace
             if (nch == 0)
                 return;
 
-            core.setParams (mode->getIndex(), preDelay->get(), decay->get());
+            core.setParams (mode->getIndex(), preDelay->get(), decay->get(), damping->get() * 0.01f);
             if (lowCut->get() != lastLc || highCut->get() != lastHc)
             {
                 lastLc = lowCut->get();
@@ -1818,7 +1819,7 @@ namespace
         }
 
         juce::AudioParameterChoice* mode;
-        juce::AudioParameterFloat *preDelay, *decay, *lowCut, *highCut, *tone, *mix;
+        juce::AudioParameterFloat *preDelay, *decay, *lowCut, *highCut, *damping, *tone, *mix;
         juce::AudioProcessorEditor* createEditor() override;
 
     protected:
@@ -1845,15 +1846,17 @@ namespace
             addKnob (deS, deL, "DECAY", *p.decay, deA);
             addKnob (lcS, lcL, "LOW CUT", *p.lowCut, lcA);
             addKnob (hcS, hcL, "HIGH CUT", *p.highCut, hcA);
+            addKnob (daS, daL, "DAMPING", *p.damping, daA);
             addKnob (toS, toL, "TONE", *p.tone, toA);
             addKnob (mxS, mxL, "MIX", *p.mix, mxA);
             pdS.textFromValueFunction = [] (double v) { return juce::String ((int) std::round (v)) + " ms"; };
             deS.textFromValueFunction = [] (double v) { return juce::String (v, 2) + " s"; };
             lcS.textFromValueFunction = [] (double v) { return juce::String ((int) std::round (v)) + " Hz"; };
             hcS.textFromValueFunction = [] (double v) { return v >= 1000.0 ? juce::String (v / 1000.0, 1) + " kHz" : juce::String ((int) v) + " Hz"; };
+            daS.textFromValueFunction = [] (double v) { return juce::String ((int) std::round (v)) + " %"; };
             toS.textFromValueFunction = [] (double v) { return std::abs (v) < 0.05 ? juce::String ("FLAT") : (v < 0 ? "DARK " : "BRIGHT ") + juce::String (std::abs (v), 1); };
             mxS.textFromValueFunction = [] (double v) { return juce::String ((int) std::round (v)) + " %"; };
-            for (auto* s : { &pdS, &deS, &lcS, &hcS, &toS, &mxS })
+            for (auto* s : { &pdS, &deS, &lcS, &hcS, &daS, &toS, &mxS })
                 s->updateText();
             const char* names[3] = { "HALL", "PLATE", "ROOM" };
             for (int i = 0; i < 3; ++i)
@@ -1878,37 +1881,69 @@ namespace
             g.setFont (juce::FontOptions (16.0f, juce::Font::bold));
             g.drawText ("REVERB", 16, 8, 200, 26, juce::Justification::centredLeft);
 
-            // decay preview: silence for the pre-delay, then the tail falling 60 dB over the Decay time
+            // decay preview. The time axis is fixed (square-root scale, 0 .. 20.5 s), so Pre-Delay only moves where the tail
+            // starts and Decay only changes how long it is. The fill density shows Damping: dense = dark tail (highs die fast).
             auto r = graphArea.toFloat();
             g.setColour (juce::Colour (0xff0d0f13));
             g.fillRoundedRectangle (r, 6.0f);
             g.setColour (juce::Colour (0xff2a2f3a));
             g.drawRoundedRectangle (r, 6.0f, 1.0f);
             const float pre = plug.preDelay->get() * 0.001f, rt = plug.decay->get();
-            const float total = (pre + rt) * 1.1f;
-            auto X = [&] (float t) { return r.getX() + 8.0f + t / total * (r.getWidth() - 16.0f); };
-            auto Y = [&] (float db) { return r.getY() + 10.0f + (-db / 60.0f) * (r.getHeight() - 20.0f); };
+            const float damp = plug.damping->get() * 0.01f;
+            constexpr float tMax = 20.5f;
+            auto X = [&] (float t) { return r.getX() + 10.0f + std::sqrt (juce::jlimit (0.0f, tMax, t) / tMax) * (r.getWidth() - 20.0f); };
+            auto Y = [&] (float db) { return r.getY() + 14.0f + (-db / 60.0f) * (r.getHeight() - 28.0f); };
             for (int db = 0; db >= -60; db -= 20)
             {
                 g.setColour (juce::Colour (0xff1f2430));
-                g.drawHorizontalLine ((int) Y ((float) db), r.getX() + 8.0f, r.getRight() - 8.0f);
+                g.drawHorizontalLine ((int) Y ((float) db), r.getX() + 10.0f, r.getRight() - 10.0f);
             }
-            juce::Path p;
-            p.startNewSubPath (X (0.0f), Y (-60.0f));
-            p.lineTo (X (0.0f), Y (-60.0f));
-            p.lineTo (X (pre), Y (-60.0f));
-            p.lineTo (X (pre), Y (0.0f));
-            p.lineTo (X (pre + rt), Y (-60.0f));
-            juce::Path fill (p);
+            g.setFont (juce::FontOptions (10.0f));
+            for (float t : { 0.1f, 0.5f, 1.0f, 2.0f, 5.0f, 10.0f, 20.0f })
+            {
+                g.setColour (juce::Colour (0xff1f2430));
+                g.drawVerticalLine ((int) X (t), r.getY() + 4.0f, r.getBottom() - 16.0f);
+                g.setColour (juce::Colour (0xff5b6478));
+                g.drawText (t < 1.0f ? juce::String ((int) (t * 1000)) + " ms" : juce::String ((int) t) + " s",
+                            juce::Rectangle<float> (X (t) - 20.0f, r.getBottom() - 15.0f, 40.0f, 12.0f), juce::Justification::centred);
+            }
+
+            // the tail: from the end of the pre-delay it falls 60 dB over the Decay time
+            juce::Path line;
+            const int steps = 80;
+            for (int i = 0; i <= steps; ++i)
+            {
+                const float t = pre + rt * (float) i / (float) steps;
+                const auto pt = juce::Point<float> (X (t), Y (-60.0f * (float) i / (float) steps));
+                if (i == 0) line.startNewSubPath (pt); else line.lineTo (pt);
+            }
+            juce::Path fill (line);
+            fill.lineTo (X (pre + rt), Y (-60.0f));
             fill.lineTo (X (pre), Y (-60.0f));
             fill.closeSubPath();
-            g.setColour (juce::Colour (0x40ff9a2e));
+
+            g.saveState();
+            g.reduceClipRegion (fill);
+            g.setColour (accent.withAlpha (0.06f + 0.34f * damp));
             g.fillPath (fill);
+            // vertical hatching: the more damping, the closer the lines
+            const float spacing = 14.0f - 11.0f * damp;
+            g.setColour (accent.withAlpha (0.10f + 0.50f * damp));
+            for (float x = X (pre); x < X (pre + rt); x += spacing)
+                g.drawVerticalLine ((int) x, r.getY(), r.getBottom());
+            g.restoreState();
+
+            // pre-delay marker and the tail line
+            g.setColour (juce::Colour (0xff5b6478));
+            g.drawVerticalLine ((int) X (pre), Y (0.0f), Y (-60.0f));
             g.setColour (accent);
-            g.strokePath (p, juce::PathStrokeType (2.5f));
+            g.strokePath (line, juce::PathStrokeType (2.5f));
+            g.fillEllipse (X (pre + rt) - 4.0f, Y (-60.0f) - 4.0f, 8.0f, 8.0f);
+
             g.setColour (muted);
             g.setFont (juce::FontOptions (11.0f));
-            g.drawText ("-60 dB at " + juce::String (rt, 2) + " s", graphArea.reduced (10, 4), juce::Justification::topRight);
+            g.drawText ("RT60 " + juce::String (rt, 2) + " s   -   pre-delay " + juce::String ((int) std::round (pre * 1000.0f)) + " ms   -   damping " + juce::String ((int) std::round (damp * 100.0f)) + " %",
+                        graphArea.reduced (10, 2), juce::Justification::topRight);
         }
 
         void resized() override
@@ -1917,8 +1952,8 @@ namespace
                 modeBtn[i].setBounds (getWidth() - 16 - 3 * 64 + i * 64, 8, 60, 26);
             graphArea = juce::Rectangle<int> (16, 40, getWidth() - 32, 110);
             auto row = juce::Rectangle<int> (16, 164, getWidth() - 32, 150);
-            const int w = row.getWidth() / 6;
-            for (auto pr : { std::pair<juce::Slider*, juce::Label*> { &pdS, &pdL }, { &deS, &deL }, { &lcS, &lcL }, { &hcS, &hcL }, { &toS, &toL }, { &mxS, &mxL } })
+            const int w = row.getWidth() / 7;
+            for (auto pr : { std::pair<juce::Slider*, juce::Label*> { &pdS, &pdL }, { &deS, &deL }, { &lcS, &lcL }, { &hcS, &hcL }, { &daS, &daL }, { &toS, &toL }, { &mxS, &mxL } })
             {
                 auto c = row.removeFromLeft (w);
                 pr.second->setBounds (c.removeFromTop (18));
@@ -1953,9 +1988,9 @@ namespace
         }
 
         ReverbPlugin& plug;
-        juce::Slider pdS, deS, lcS, hcS, toS, mxS;
-        juce::Label pdL, deL, lcL, hcL, toL, mxL;
-        std::unique_ptr<juce::SliderParameterAttachment> pdA, deA, lcA, hcA, toA, mxA;
+        juce::Slider pdS, deS, lcS, hcS, daS, toS, mxS;
+        juce::Label pdL, deL, lcL, hcL, daL, toL, mxL;
+        std::unique_ptr<juce::SliderParameterAttachment> pdA, deA, lcA, hcA, daA, toA, mxA;
         juce::TextButton modeBtn[3];
         juce::Rectangle<int> graphArea;
         juce::Colour bg { 0xff15171c }, accent { 0xffff9a2e }, text_ { 0xffe8eaf0 }, muted { 0xff8b93a7 };
