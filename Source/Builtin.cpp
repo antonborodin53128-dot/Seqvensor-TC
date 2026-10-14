@@ -1797,10 +1797,10 @@ namespace
             }
             if (tone->get() != lastTone)
             {
-                // tilt around 3 kHz: bass up / treble down (or the other way round), 0 = flat
+                // tilt around 1 kHz: bass up / treble down (or the other way round), 0 = flat
                 lastTone = tone->get();
-                tiltLow.makeLowShelf (sr, 3000.0f, -lastTone * 0.5f, 0.7f);
-                tiltHigh.makeHighShelf (sr, 3000.0f, lastTone * 0.5f, 0.7f);
+                tiltLow.makeLowShelf (sr, 1000.0f, -lastTone * 0.5f, 0.7f);
+                tiltHigh.makeHighShelf (sr, 1000.0f, lastTone * 0.5f, 0.7f);
             }
             const float wetAmt = mix->get() * 0.01f, dryAmt = 1.0f - wetAmt;
 
