@@ -140,7 +140,7 @@ namespace
             juce::NormalisableRange<float> range (lo, hi);
             range.setSkewForCentre (skew > 0.0f ? lo + (hi - lo) * skew : (lo + hi) * 0.5f);
             auto* p = new juce::AudioParameterFloat (juce::ParameterID { pid, 1 }, label, range, def);
-            addParameter (p);
+            juce::AudioProcessor::addParameter (p);
             return p;
         }
 
@@ -148,7 +148,7 @@ namespace
         juce::AudioParameterFloat* addLinear (const char* pid, const juce::String& label, float lo, float hi, float def)
         {
             auto* p = new juce::AudioParameterFloat (juce::ParameterID { pid, 1 }, label, juce::NormalisableRange<float> (lo, hi), def);
-            addParameter (p);
+            juce::AudioProcessor::addParameter (p);
             return p;
         }
 
