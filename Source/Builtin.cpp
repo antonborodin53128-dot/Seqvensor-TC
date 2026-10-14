@@ -2007,8 +2007,6 @@ namespace
         {
             drive = addLinear ("dr", "Drive", 0.0f, 100.0f, 40.0f);
             tone = addLinear ("to", "Tone", 0.0f, 100.0f, 50.0f);
-            level = addLinear ("lv", "Level", -24.0f, 12.0f, 0.0f);
-            mix = addLinear ("mx", "Mix", 0.0f, 100.0f, 100.0f);
             on = new juce::AudioParameterBool (juce::ParameterID { "on", 1 }, "On", true);
             juce::AudioProcessor::addParameter (on);
         }
@@ -2031,29 +2029,24 @@ namespace
                     c.setTone (sr, lastTone * 0.01f);
                 }
             }
-            const float target = juce::Decibels::decibelsToGain (level->get());
-            const float step = (target - level_) / (float) juce::jmax (1, n);
-            const float wetAmt = mix->get() * 0.01f;
             const float startRamp = ramp;
             for (int c = 0; c < nch; ++c)
             {
                 auto* d = buf.getWritePointer (c);
-                float g = level_, r = startRamp;
+                float r = startRamp;
                 for (int i = 0; i < n; ++i)
                 {
-                    g += step;
                     r += juce::jlimit (-rampStep, rampStep, rampTarget - r);
                     const float x = d[i];
-                    const float w = wetAmt * r;
-                    d[i] = ch[c].process (x) * g * w + x * (1.0f - w);
+                    const float w = r;
+                    d[i] = ch[c].process (x) * w + x * (1.0f - w);
                 }
                 if (c == nch - 1)
                     ramp = r;
             }
-            level_ = target;
         }
 
-        juce::AudioParameterFloat *drive, *tone, *level, *mix;
+        juce::AudioParameterFloat *drive, *tone;
         juce::AudioParameterBool* on;
         juce::AudioProcessorEditor* createEditor() override;
 
@@ -2063,12 +2056,11 @@ namespace
             lastDrive = lastTone = -1.0f;
             ch[0].reset(); ch[1].reset();
             ramp = on->get() ? 1.0f : 0.0f;
-            level_ = juce::Decibels::decibelsToGain (level->get());
         }
 
     private:
         tcod::Channel ch[2];
-        float lastDrive = -1.0f, lastTone = -1.0f, level_ = 1.0f, ramp = 1.0f;
+        float lastDrive = -1.0f, lastTone = -1.0f, ramp = 1.0f;
     };
 
     class OverdriveEditor : public juce::AudioProcessorEditor, private juce::Timer
@@ -2076,16 +2068,12 @@ namespace
     public:
         explicit OverdriveEditor (OverdrivePlugin& p) : juce::AudioProcessorEditor (p), plug (p)
         {
-            setSize (480, 480);
+            setSize (340, 480);
             addKnob (drS, drL, "DRIVE", *p.drive, drA);
             addKnob (toS, toL, "TONE", *p.tone, toA);
-            addKnob (lvS, lvL, "LEVEL", *p.level, lvA);
-            addKnob (mxS, mxL, "MIX", *p.mix, mxA);
-            mxS.textFromValueFunction = [] (double v) { return juce::String ((int) std::round (v)) + " %"; };
             drS.textFromValueFunction = [] (double v) { return juce::String ((int) std::round (v / 10.0)); };
             toS.textFromValueFunction = [] (double v) { return juce::String ((int) std::round (v / 10.0)); };
-            lvS.textFromValueFunction = [] (double v) { return (v > 0 ? "+" : "") + juce::String (v, 1) + " dB"; };
-            for (auto* s : { &drS, &toS, &lvS, &mxS })
+            for (auto* s : { &drS, &toS })
                 s->updateText();
             startTimerHz (15);
         }
@@ -2140,10 +2128,10 @@ namespace
 
         void resized() override
         {
-            const int w = (getWidth() - 56) / 4;
-            juce::Slider* sl[4] = { &drS, &toS, &lvS, &mxS };
-            juce::Label* lb[4] = { &drL, &toL, &lvL, &mxL };
-            for (int i = 0; i < 4; ++i)
+            const int w = (getWidth() - 56) / 2;
+            juce::Slider* sl[2] = { &drS, &toS };
+            juce::Label* lb[2] = { &drL, &toL };
+            for (int i = 0; i < 2; ++i)
             {
                 auto c = juce::Rectangle<int> (28 + i * w, 36, w, 232);
                 lb[i]->setBounds (c.removeFromTop (22));
@@ -2186,9 +2174,9 @@ namespace
         void timerCallback() override { repaint (0, 360, getWidth(), 120); }
 
         OverdrivePlugin& plug;
-        juce::Slider drS, toS, lvS, mxS;
-        juce::Label drL, toL, lvL, mxL;
-        std::unique_ptr<juce::SliderParameterAttachment> drA, toA, lvA, mxA;
+        juce::Slider drS, toS;
+        juce::Label drL, toL;
+        std::unique_ptr<juce::SliderParameterAttachment> drA, toA;
     };
 
     juce::AudioProcessorEditor* OverdrivePlugin::createEditor() { return new OverdriveEditor (*this); }

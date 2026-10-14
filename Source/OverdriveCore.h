@@ -43,6 +43,13 @@ namespace tcod
             stage.b2 = -a * K / a0;
             stage.a1 = (2.0 - 2.0 * d2 * K * K) / a0;
             stage.a2 = (1.0 - d1 * K + d2 * K * K) / a0;
+
+            // Loudness compensation: the output level stays the same (at a normal playing level) from Drive 0 to 100,
+            // so Drive only changes the amount of overdrive. Measured offline (equal RMS for a 0.25 sine and a speech-like noise).
+            static const float table[11] = { 0.338f, 0.330f, 0.317f, 0.307f, 0.2985f, 0.2935f, 0.2885f, 0.286f, 0.283f, 0.280f, 0.2785f };
+            const float pos = std::min (1.0f, std::max (0.0f, drive)) * 10.0f;
+            const int i = std::min (9, (int) pos);
+            comp = table[i] + (table[i + 1] - table[i]) * (pos - (float) i);
         }
 
         // tone 0..1: low-pass from 720 Hz (dark) to about 11 kHz (open)
@@ -73,7 +80,7 @@ namespace tcod
             toneState = toneA * y + toneK * toneState;
             // remove DC (asymmetries, denormals)
             dc += (toneState - dc) * 0.0008f;
-            return (toneState - dc) / (inScale * 1.4f);
+            return (toneState - dc) / (inScale * 1.4f) * comp;
         }
 
         void reset() { stage.reset(); vPrev = toneState = dc = 0.0f; }
@@ -86,6 +93,6 @@ namespace tcod
         }
 
         Biquad stage;
-        float vPrev = 0.0f, toneState = 0.0f, dc = 0.0f, toneA = 0.5f, toneK = 0.5f;
+        float vPrev = 0.0f, toneState = 0.0f, dc = 0.0f, toneA = 0.5f, toneK = 0.5f, comp = 0.3f;
     };
 }
