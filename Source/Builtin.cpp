@@ -1647,7 +1647,6 @@ namespace
                 sl[i]->setBounds (row);
             }
         }
-        }
 
     private:
         void paintTransfer (juce::Graphics& g)
