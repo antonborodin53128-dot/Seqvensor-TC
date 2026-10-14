@@ -563,18 +563,18 @@ namespace
             footer = r.removeFromBottom (28);
             graph = r.reduced (46, 8).withTrimmedRight (30).toFloat();
 
-            analyzerBtn.setBounds (header.getRight() - 560, 6, 150, 26);
-            rangeBtn.setBounds (header.getRight() - 400, 6, 90, 26);
-            outS.setBounds (header.getRight() - 300, 6, 290, 26);
+            analyzerBtn.setBounds (header.getRight() - 700, 6, 160, 26);
+            rangeBtn.setBounds (header.getRight() - 530, 6, 80, 26);
+            outS.setBounds (header.getRight() - 360, 6, 350, 26);
 
-            const int pw = 600, ph = 124;
-            panel = juce::Rectangle<int> (graph.getCentreX() - pw / 2, (int) graph.getBottom() - ph - 8, pw, ph).toNearestInt();
+            const int pw = 620, ph = 138;
+            panel = juce::Rectangle<int> (graph.getCentreX() - pw / 2, (int) graph.getBottom() - ph - 26, pw, ph).toNearestInt();
             onBtn.setBounds (panel.getX() + 10, panel.getY() + 10, 28, 28);
             typeBox.setBounds (panel.getX() + 44, panel.getY() + 10, 120, 28);
             slopeBox.setBounds (panel.getX() + 44, panel.getY() + 48, 120, 28);
-            freqS.setBounds (panel.getX() + 190, panel.getY() + 6, 100, 108);
-            gainS.setBounds (panel.getX() + 300, panel.getY() + 6, 100, 108);
-            qS.setBounds (panel.getX() + 410, panel.getY() + 6, 100, 108);
+            freqS.setBounds (panel.getX() + 190, panel.getY() + 24, 104, 108);
+            gainS.setBounds (panel.getX() + 304, panel.getY() + 24, 104, 108);
+            qS.setBounds (panel.getX() + 418, panel.getY() + 24, 104, 108);
             delBtn.setBounds (panel.getRight() - 40, panel.getY() + 10, 30, 28);
         }
 
@@ -587,7 +587,7 @@ namespace
             g.drawText ("TC  EQUALIZER", header.withTrimmedLeft (16), juce::Justification::centredLeft);
             g.setColour (muted);
             g.setFont (12.0f);
-            g.drawText ("Output", outS.getBounds().withX (outS.getX() - 52).withWidth (50), juce::Justification::centredRight);
+            g.drawText ("Output", juce::Rectangle<int> (outS.getX() - 60, outS.getY(), 54, outS.getHeight()), juce::Justification::centredRight);
 
             auto gr = graph;
             g.setColour (juce::Colour (0xff0d0f13));
@@ -720,7 +720,7 @@ namespace
                             juce::Justification::centredLeft);
                 g.setColour (muted);
                 g.setFont (11.0f);
-                const int labelY = panel.getY() + 4;
+                const int labelY = panel.getY() + 6;
                 g.drawText ("FREQ", juce::Rectangle<int> (freqS.getX(), labelY, freqS.getWidth(), 14), juce::Justification::centred);
                 g.drawText ("GAIN", juce::Rectangle<int> (gainS.getX(), labelY, gainS.getWidth(), 14), juce::Justification::centred);
                 g.drawText ("Q", juce::Rectangle<int> (qS.getX(), labelY, qS.getWidth(), 14), juce::Justification::centred);
