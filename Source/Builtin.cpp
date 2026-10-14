@@ -1171,7 +1171,7 @@ namespace
 
             inLevel.store (peakIn);
             outLevel.store (peakOut);
-            reduction.store (minGain);
+            reduction.store (grDb);
         }
 
         juce::AudioProcessorEditor* createEditor() override;
@@ -1193,7 +1193,7 @@ namespace
     public:
         explicit CompEditor (CompPlugin& p) : juce::AudioProcessorEditor (p), plug (p)
         {
-            setSize (620, 330);
+            setSize (640, 470);
             auto addKnob = [this] (juce::Slider& s, juce::Label& l, const juce::String& text)
             {
                 s.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
@@ -1281,7 +1281,7 @@ namespace
             addAndMakeVisible (limBtn);
             limA = std::make_unique<juce::ButtonParameterAttachment> (*p.limiter, limBtn);
 
-            startTimerHz (30);
+            startTimerHz (60);
             timerCallback();
         }
 
@@ -1292,34 +1292,64 @@ namespace
             g.setFont (juce::FontOptions (16.0f, juce::Font::bold));
             g.drawText ("COMPRESSOR", 16, 8, 200, 26, juce::Justification::centredLeft);
 
-            // meter
-            auto m = meterArea.toFloat();
+            // VU face
+            auto f = meterArea.toFloat();
             g.setColour (juce::Colour (0xff0d0f13));
-            g.fillRoundedRectangle (m, 5.0f);
-            g.setColour (border);
-            g.drawRoundedRectangle (m, 5.0f, 1.0f);
+            g.fillRoundedRectangle (f.expanded (4.0f), 8.0f);
+            juce::ColourGradient face (juce::Colour (0xfff4e8c4), f.getCentreX(), f.getBottom(), juce::Colour (0xffcdb784), f.getX(), f.getY(), true);
+            g.setGradientFill (face);
+            g.fillRoundedRectangle (f, 6.0f);
 
             const int mode = plug.meter->getIndex();
-            const float v = mode == 1 ? juce::jlimit (0.0f, 1.0f, -grShown / 24.0f)
-                                      : juce::jlimit (0.0f, 1.0f, (juce::Decibels::gainToDecibels (mode == 0 ? inShown : outShown, -60.0f) + 60.0f) / 60.0f);
-            auto bar = m.reduced (4.0f);
-            if (mode == 1)
+            const float cx = f.getCentreX(), cy = f.getBottom() + f.getHeight() * 0.55f, rad = f.getHeight() * 1.45f;
+            const float a0 = -0.62f, a1 = 0.62f; // radians from vertical
+            auto ang = [&] (float t) { return a0 + (a1 - a0) * t; };
+            auto pt = [&] (float t, float r) { return juce::Point<float> (cx + std::sin (ang (t)) * r, cy - std::cos (ang (t)) * r); };
+
+            g.saveState();
+            g.reduceClipRegion (meterArea);
+            g.setFont (juce::FontOptions (12.0f, juce::Font::bold));
+            const int ticks = mode == 1 ? 20 : 43;
+            for (int i = 0; i <= ticks; ++i)
             {
-                // gain reduction grows from the right edge to the left
-                g.setColour (accent);
-                g.fillRect (bar.withLeft (bar.getRight() - bar.getWidth() * v));
+                // GR: 0 dB on the right, 20 dB on the left; IN/OUT: -40 dB on the left, +3 dB on the right
+                const float t = (float) i / (float) ticks;
+                const bool major = mode == 1 ? (i % 5 == 0) : (i % 10 == 3 || i == ticks);
+                const bool red = mode == 1 ? false : (i >= 40);
+                g.setColour (red ? juce::Colour (0xffc0392b) : juce::Colour (0xff2b2417));
+                g.drawLine (juce::Line<float> (pt (t, rad - (major ? 16.0f : 9.0f)), pt (t, rad - 2.0f)), major ? 2.0f : 1.0f);
+                if (major)
+                {
+                    const int val = mode == 1 ? 20 - i : -40 + i;
+                    auto tp = pt (t, rad - 30.0f);
+                    g.setColour (red ? juce::Colour (0xffc0392b) : juce::Colour (0xff2b2417));
+                    g.drawText (mode == 1 ? juce::String (val) : (val > 0 ? "+" + juce::String (val) : juce::String (val)),
+                                juce::Rectangle<float> (30.0f, 14.0f).withCentre (tp), juce::Justification::centred);
+                }
             }
-            else
-            {
-                g.setColour (accent);
-                g.fillRect (bar.withWidth (bar.getWidth() * v));
-            }
+            g.setColour (juce::Colour (0xff2b2417));
+            g.setFont (juce::FontOptions (13.0f, juce::Font::bold));
+            g.drawText (mode == 1 ? "GAIN REDUCTION  dB" : (mode == 0 ? "INPUT  dB" : "OUTPUT  dB"),
+                        meterArea.withTrimmedTop (meterArea.getHeight() / 2).withTrimmedBottom (meterArea.getHeight() / 4 - 6), juce::Justification::centred);
+
+            // needle
+            const float t = juce::jlimit (0.0f, 1.0f, needle);
+            auto tip = pt (t, rad - 3.0f);
+            auto base = pt (t, rad - f.getHeight() * 1.05f);
+            g.setColour (juce::Colour (0x40000000));
+            g.drawLine (juce::Line<float> (base.translated (2, 2), tip.translated (2, 2)), 3.0f);
+            g.setColour (juce::Colour (0xffb0201a));
+            g.drawLine (juce::Line<float> (base, tip), 2.2f);
+            g.restoreState();
+
+            g.setColour (juce::Colour (0xff1a1d24));
+            g.fillRect (meterArea.getX(), meterArea.getBottom() - 10, meterArea.getWidth(), 10);
+
+            // numeric read-out
             g.setColour (muted);
-            g.setFont (juce::FontOptions (11.0f));
-            const juce::String lo = mode == 1 ? "24" : "-60", hi = mode == 1 ? "0 dB" : "0 dB";
-            g.drawText (mode == 1 ? "GR (dB)" : (mode == 0 ? "INPUT (dB)" : "OUTPUT (dB)"), meterArea.translated (0, 0).withTrimmedLeft (8), juce::Justification::centredLeft);
-            g.drawText (hi, meterArea.withTrimmedRight (8), juce::Justification::centredRight);
-            juce::ignoreUnused (lo);
+            g.setFont (juce::FontOptions (12.0f));
+            const float shownDb = mode == 1 ? grShown : juce::Decibels::gainToDecibels (mode == 0 ? inShown : outShown, -60.0f);
+            g.drawText (juce::String (shownDb, 1) + " dB", juce::Rectangle<int> (meterArea.getX(), meterArea.getBottom() + 4, meterArea.getWidth(), 16), juce::Justification::centred);
         }
 
         void resized() override
@@ -1332,11 +1362,10 @@ namespace
             mGr.setBounds (top.removeFromRight (44));
             mIn.setBounds (top.removeFromRight (44));
             top.removeFromRight (8);
-            meterArea = juce::Rectangle<int> (150, 12, getWidth() - 150 - 16 - 84 - 8 - 132 - 8 - 16, 22);
             juce::ignoreUnused (top);
-
-            r.removeFromTop (14);
-            auto row1 = r.removeFromTop (130);
+            meterArea = juce::Rectangle<int> (getWidth() / 2 - 180, 46, 360, 130);
+            r.removeFromTop (172);
+            auto row1 = r.removeFromTop (118);
             const int w = row1.getWidth() / 4;
             for (auto pr : { std::pair<juce::Slider*, juce::Label*> { &thS, &thL }, { &raS, &raL }, { &atS, &atL }, { &reS, &reL } })
             {
@@ -1350,7 +1379,7 @@ namespace
                 }
             }
             r.removeFromTop (8);
-            auto row2 = r.removeFromTop (130);
+            auto row2 = r.removeFromTop (118);
             const int w2 = row2.getWidth() / 4;
             auto c1 = row2.removeFromLeft (w2);
             ouL.setBounds (c1.removeFromTop (18)); ouS.setBounds (c1);
@@ -1397,8 +1426,13 @@ namespace
             };
             follow (inShown, plug.inLevel.load(), false);
             follow (outShown, plug.outLevel.load(), false);
-            follow (grShown, plug.reduction.load(), true);
-            repaint (meterArea);
+            // the GR needle follows the real reduction (so attack and release are visible), the level needles are VU-like
+            grShown += (plug.reduction.load() - grShown) * 0.6f;
+            const int m = plug.meter->getIndex();
+            const float target = m == 1 ? juce::jlimit (0.0f, 1.0f, 1.0f + grShown / 20.0f)
+                                        : juce::jlimit (0.0f, 1.0f, (juce::Decibels::gainToDecibels (m == 0 ? inShown : outShown, -60.0f) + 40.0f) / 43.0f);
+            needle += (target - needle) * (m == 1 ? 0.7f : 0.35f);
+            repaint (meterArea.expanded (6, 24));
         }
 
         CompPlugin& plug;
@@ -1408,7 +1442,7 @@ namespace
         juce::TextButton syncMs, syncBpm, syncHost, mIn, mGr, mOut, limBtn;
         std::unique_ptr<juce::ButtonParameterAttachment> limA;
         juce::Rectangle<int> meterArea;
-        float inShown = 0.0f, outShown = 0.0f, grShown = 0.0f;
+        float inShown = 0.0f, outShown = 0.0f, grShown = 0.0f, needle = 1.0f;
         juce::Colour bg { 0xff15171c }, bg2 { 0xff262b36 }, border { 0xff2a2f3a }, accent { 0xffff9a2e }, text_ { 0xffe8eaf0 }, muted { 0xff8b93a7 };
     };
 
