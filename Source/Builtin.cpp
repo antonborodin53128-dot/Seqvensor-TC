@@ -1796,6 +1796,7 @@ namespace
             decay = addFloat ("de", "Decay", 0.2f, 20.0f, 2.5f, 0.15f);
             lowCut = addFloat ("lc", "Low Cut", 20.0f, 1000.0f, 100.0f, 0.1f);
             highCut = addFloat ("hc", "High Cut", 1000.0f, 20000.0f, 10000.0f, 0.3f);
+            tone = addLinear ("to", "Tone", -12.0f, 12.0f, 0.0f);
             mix = addLinear ("mx", "Mix", 0.0f, 100.0f, 25.0f);
         }
 
@@ -1821,6 +1822,13 @@ namespace
                 lastHc = highCut->get();
                 hp.makeHighPass (sr, lastLc);
                 lp.makeLowPass (sr, juce::jmin (lastHc, (float) (sr * 0.45)));
+            }
+            if (tone->get() != lastTone)
+            {
+                // tilt around 3 kHz: bass up / treble down (or the other way round), 0 = flat
+                lastTone = tone->get();
+                tiltLow.makeLowShelf (sr, 3000.0f, -lastTone * 0.5f, 0.7f);
+                tiltHigh.makeHighShelf (sr, 3000.0f, lastTone * 0.5f, 0.7f);
             }
             const float wetAmt = mix->get() * 0.01f, dryAmt = 1.0f - wetAmt;
             const float preTarget = juce::jmax (1.0f, (float) (sr * 0.001 * preDelay->get()));
@@ -1879,8 +1887,8 @@ namespace
                 wr *= 0.35f;
 
                 // wet filters
-                wl = lp.process (0, hp.process (0, wl));
-                wr = lp.process (1, hp.process (1, wr));
+                wl = tiltHigh.process (0, tiltLow.process (0, lp.process (0, hp.process (0, wl))));
+                wr = tiltHigh.process (1, tiltLow.process (1, lp.process (1, hp.process (1, wr))));
 
                 d0[s] = inL * dryAmt + wl * wetAmt;
                 if (d1) d1[s] = inR * dryAmt + wr * wetAmt;
@@ -1888,7 +1896,7 @@ namespace
             preSmooth = preTarget;
         }
 
-        juce::AudioParameterFloat *preDelay, *decay, *lowCut, *highCut, *mix;
+        juce::AudioParameterFloat *preDelay, *decay, *lowCut, *highCut, *tone, *mix;
         juce::AudioProcessorEditor* createEditor() override;
 
     protected:
@@ -1916,8 +1924,8 @@ namespace
             pre[1].init (maxPre);
             dampCoef = std::exp (-2.0f * pi * 6000.0f / (float) sr);
             preSmooth = juce::jmax (1.0f, (float) (sr * 0.001 * preDelay->get()));
-            lastDecay = lastLc = lastHc = -1.0f;
-            hp.reset(); lp.reset();
+            lastDecay = lastLc = lastHc = lastTone = -99.0f;
+            hp.reset(); lp.reset(); tiltLow.reset(); tiltHigh.reset();
         }
 
     private:
@@ -1933,8 +1941,8 @@ namespace
         int len[kLines] = {}, apLen[4] = {};
         float lineGain[kLines] = {}, damp[kLines] = {}, phase[kLines] = {}, phaseInc[kLines] = {};
         float modDepth = 6.0f, dampCoef = 0.5f, preSmooth = 1.0f;
-        float lastDecay = -1.0f, lastLc = -1.0f, lastHc = -1.0f;
-        Biquad hp, lp;
+        float lastDecay = -1.0f, lastLc = -1.0f, lastHc = -1.0f, lastTone = -99.0f;
+        Biquad hp, lp, tiltLow, tiltHigh;
     };
 
     class ReverbEditor : public juce::AudioProcessorEditor, private juce::Timer
@@ -1947,13 +1955,15 @@ namespace
             addKnob (deS, deL, "DECAY", *p.decay, deA);
             addKnob (lcS, lcL, "LOW CUT", *p.lowCut, lcA);
             addKnob (hcS, hcL, "HIGH CUT", *p.highCut, hcA);
+            addKnob (toS, toL, "TONE", *p.tone, toA);
             addKnob (mxS, mxL, "MIX", *p.mix, mxA);
             pdS.textFromValueFunction = [] (double v) { return juce::String ((int) std::round (v)) + " ms"; };
             deS.textFromValueFunction = [] (double v) { return juce::String (v, 2) + " s"; };
             lcS.textFromValueFunction = [] (double v) { return juce::String ((int) std::round (v)) + " Hz"; };
             hcS.textFromValueFunction = [] (double v) { return v >= 1000.0 ? juce::String (v / 1000.0, 1) + " kHz" : juce::String ((int) v) + " Hz"; };
+            toS.textFromValueFunction = [] (double v) { return std::abs (v) < 0.05 ? juce::String ("FLAT") : (v < 0 ? "DARK " : "BRIGHT ") + juce::String (std::abs (v), 1); };
             mxS.textFromValueFunction = [] (double v) { return juce::String ((int) std::round (v)) + " %"; };
-            for (auto* s : { &pdS, &deS, &lcS, &hcS, &mxS })
+            for (auto* s : { &pdS, &deS, &lcS, &hcS, &toS, &mxS })
                 s->updateText();
             startTimerHz (20);
         }
@@ -2002,8 +2012,8 @@ namespace
         {
             graphArea = juce::Rectangle<int> (16, 40, getWidth() - 32, 110);
             auto row = juce::Rectangle<int> (16, 164, getWidth() - 32, 150);
-            const int w = row.getWidth() / 5;
-            for (auto pr : { std::pair<juce::Slider*, juce::Label*> { &pdS, &pdL }, { &deS, &deL }, { &lcS, &lcL }, { &hcS, &hcL }, { &mxS, &mxL } })
+            const int w = row.getWidth() / 6;
+            for (auto pr : { std::pair<juce::Slider*, juce::Label*> { &pdS, &pdL }, { &deS, &deL }, { &lcS, &lcL }, { &hcS, &hcL }, { &toS, &toL }, { &mxS, &mxL } })
             {
                 auto c = row.removeFromLeft (w);
                 pr.second->setBounds (c.removeFromTop (18));
@@ -2033,9 +2043,9 @@ namespace
         void timerCallback() override { repaint (graphArea); }
 
         ReverbPlugin& plug;
-        juce::Slider pdS, deS, lcS, hcS, mxS;
-        juce::Label pdL, deL, lcL, hcL, mxL;
-        std::unique_ptr<juce::SliderParameterAttachment> pdA, deA, lcA, hcA, mxA;
+        juce::Slider pdS, deS, lcS, hcS, toS, mxS;
+        juce::Label pdL, deL, lcL, hcL, toL, mxL;
+        std::unique_ptr<juce::SliderParameterAttachment> pdA, deA, lcA, hcA, toA, mxA;
         juce::Rectangle<int> graphArea;
         juce::Colour bg { 0xff15171c }, accent { 0xffff9a2e }, text_ { 0xffe8eaf0 }, muted { 0xff8b93a7 };
     };
