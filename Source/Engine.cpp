@@ -772,21 +772,16 @@ void Engine::addClipFromFile (const std::shared_ptr<Track>& track, const juce::F
     track->loadingClips++;
     std::weak_ptr<Track> weak = track;
 
+    // 1. the file is opened (quick) and the clip appears at once; 2. the audio is decoded into it in the background
+    // (the waveform grows; playback is silent beyond the decoded part); 3. tempo and key follow (cached or computed).
     juce::Thread::launch ([this, weak, file, startSeconds, done, analysed]
     {
         juce::String error;
-        auto data = ClipData::load (file, error);
-        std::shared_ptr<LiveStretch> live;
-        const auto key = cacheKey (file);
-        FileAnalysis cached;
-        const bool hit = data != nullptr && findCached (key, cached);
-        if (hit)
-        {
-            applyAnalysis (*data, cached);   // seen before: no waiting
-            live = std::make_shared<LiveStretch> (data, currentSampleRate, data->fileBpm > 0.0 || transposeSemis.load() != 0);
-        }
+        std::unique_ptr<juce::AudioFormatReader> opened;
+        auto data = ClipData::open (file, error, opened);
+        std::shared_ptr<juce::AudioFormatReader> reader (std::move (opened));
 
-        juce::MessageManager::callAsync ([this, weak, data, live, error, startSeconds, done, analysed, hit, key, file]
+        juce::MessageManager::callAsync ([this, weak, file, startSeconds, done, analysed, data, reader, error]
         {
             auto t = weak.lock();
             if (t == nullptr)
@@ -799,7 +794,7 @@ void Engine::addClipFromFile (const std::shared_ptr<Track>& track, const juce::F
                 // a playback track has no live input: the default input would only add noise
                 if (! t->inputChosenByUser)
                     t->inputL = -1;
-                clip = t->addClip (data, startSeconds, takeClipId(), live);
+                clip = t->addClip (data, startSeconds, takeClipId(), nullptr);
                 clip->updateSpeed (getBpm());
                 clipsChanged();
             }
@@ -807,66 +802,87 @@ void Engine::addClipFromFile (const std::shared_ptr<Track>& track, const juce::F
                 done (clip, error);
             if (clip == nullptr)
                 return;
-            if (hit)
-            {
-                if (analysed)
-                    analysed (clip);
-                if (onAnalysisDone)
-                    onAnalysisDone();
-                return;
-            }
 
-            // tempo and key: slow, so the clip is already on the track while they are computed
             std::weak_ptr<Clip> weakClip = clip;
-            analysisPool.addJob ([this, weak, weakClip, data, key, analysed]
+            juce::Thread::launch ([this, weak, weakClip, file, data, reader, analysed]
             {
-                const auto t0 = juce::Time::getMillisecondCounterHiRes();
-                std::vector<float> mono;
-                data->getMono (mono, (int) (data->sampleRate * 150.0));
-                const auto found = detectTempoEx (mono, data->sampleRate);
-                const auto t1 = juce::Time::getMillisecondCounterHiRes();
-
-                // the key is judged from up to 90 s from the middle of the file
-                const size_t keep = (size_t) (data->sampleRate * 90.0);
-                KeyHist kh;
-                if (mono.size() > keep)
+                int lastShown = 0;
+                data->fill (*reader, [this, &lastShown, &data]
                 {
-                    const auto from = mono.begin() + (long) ((mono.size() - keep) / 2);
-                    kh = computeKeyHist (std::vector<float> (from, from + (long) keep), data->sampleRate);
-                }
-                else
-                    kh = computeKeyHist (mono, data->sampleRate);
-                const auto t2 = juce::Time::getMillisecondCounterHiRes();
-
-                FileAnalysis a;
-                a.bpm = found.bpm;
-                a.confidence = found.confidence;
-                if (kh.valid)
-                {
-                    a.mass = kh.mass;
-                    std::copy (kh.v, kh.v + 12, a.hist);
-                }
-                if (kh.valid || keyEngineError().isEmpty())
-                    storeCached (key, a);   // a failed network must not be remembered as "no notes"
-                logLine ("analysis " + data->name + ": tempo " + juce::String ((int) (t1 - t0)) + " ms, key " + juce::String ((int) (t2 - t1))
-                         + " ms (" + keyEngineError() + ")");
-
-                juce::MessageManager::callAsync ([this, weak, weakClip, data, a, analysed]
-                {
-                    auto c = weakClip.lock();
-                    if (c == nullptr)
-                        return;
-                    applyAnalysis (*data, a);
-                    c->updateSpeed (getBpm());
-                    if (auto owner = weak.lock())
-                        ensureLive (owner, c);
-                    if (analysed)
-                        analysed (c);
-                    if (onAnalysisDone)
-                        onAnalysisDone();
+                    const int d = data->decoded.load();
+                    if (d - lastShown >= data->numSamples / 6)
+                    {
+                        lastShown = d;
+                        juce::MessageManager::callAsync ([this] { clipsChanged(); });
+                    }
                 });
+                juce::MessageManager::callAsync ([this] { clipsChanged(); });
+
+                const auto key = cacheKey (file);
+                FileAnalysis a;
+                if (! findCached (key, a))
+                {
+                    // tempo and key are slow: they run one clip at a time in the analysis pool
+                    analysisPool.addJob ([this, weak, weakClip, data, key, analysed]
+                    {
+                        if (weakClip.expired())
+                            return;
+                        const auto t0 = juce::Time::getMillisecondCounterHiRes();
+                        std::vector<float> mono;
+                        data->getMono (mono, (int) (data->sampleRate * 150.0));
+                        const auto found = detectTempoEx (mono, data->sampleRate);
+                        const auto t1 = juce::Time::getMillisecondCounterHiRes();
+
+                        // the key is judged from up to 90 s from the middle of the file
+                        const size_t keep = (size_t) (data->sampleRate * 90.0);
+                        KeyHist kh;
+                        if (mono.size() > keep)
+                        {
+                            const auto from = mono.begin() + (long) ((mono.size() - keep) / 2);
+                            kh = computeKeyHist (std::vector<float> (from, from + (long) keep), data->sampleRate);
+                        }
+                        else
+                            kh = computeKeyHist (mono, data->sampleRate);
+                        const auto t2 = juce::Time::getMillisecondCounterHiRes();
+
+                        FileAnalysis r;
+                        r.bpm = found.bpm;
+                        r.confidence = found.confidence;
+                        if (kh.valid)
+                        {
+                            r.mass = kh.mass;
+                            std::copy (kh.v, kh.v + 12, r.hist);
+                        }
+                        if (kh.valid || keyEngineError().isEmpty())
+                            storeCached (key, r);   // a failed network must not be remembered as "no notes"
+                        logLine ("analysis " + data->name + ": tempo " + juce::String ((int) (t1 - t0)) + " ms, key "
+                                 + juce::String ((int) (t2 - t1)) + " ms (" + keyEngineError() + ")");
+                        applyAnalysisLater (weak, weakClip, data, r, analysed);
+                    });
+                    return;
+                }
+                applyAnalysisLater (weak, weakClip, data, a, analysed);   // seen before: no waiting
             });
         });
+    });
+}
+
+void Engine::applyAnalysisLater (std::weak_ptr<Track> weak, std::weak_ptr<Clip> weakClip, std::shared_ptr<ClipData> data,
+                                 FileAnalysis a, std::function<void (std::shared_ptr<Clip>)> analysed)
+{
+    juce::MessageManager::callAsync ([this, weak, weakClip, data, a, analysed]
+    {
+        auto c = weakClip.lock();
+        if (c == nullptr)
+            return;
+        applyAnalysis (*data, a);
+        c->updateSpeed (getBpm());
+        if (auto owner = weak.lock())
+            ensureLive (owner, c);
+        if (analysed)
+            analysed (c);
+        if (onAnalysisDone)
+            onAnalysisDone();
     });
 }
 

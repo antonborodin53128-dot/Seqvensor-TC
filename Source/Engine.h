@@ -219,6 +219,8 @@ private:
     void pruneAnalysisCache();
     std::atomic<bool> pruning { false };
     static void applyAnalysis (ClipData& d, const FileAnalysis& a);
+    void applyAnalysisLater (std::weak_ptr<Track> weak, std::weak_ptr<Clip> weakClip, std::shared_ptr<ClipData> data,
+                             FileAnalysis a, std::function<void (std::shared_ptr<Clip>)> analysed);
 
     double currentSampleRate = 48000.0;
     int currentBlockSize = 512;

@@ -4,6 +4,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -23,6 +24,9 @@ struct ClipData
     int numSamples = 0;
     juce::AudioBuffer<float> audio;      // 1 or 2 channels
     std::vector<float> peaks;            // min, max per block of peakBlock samples
+    std::atomic<int> decoded { 0x7fffffff };   // samples already filled in (a file still being decoded plays silence beyond it)
+
+    bool isComplete() const { return decoded.load() >= numSamples; }
 
     double lengthSeconds() const { return sampleRate > 0.0 ? (double) numSamples / sampleRate : 0.0; }
 
@@ -30,6 +34,12 @@ struct ClipData
 
     // Decodes the file (call from a background thread). Returns null and sets `error` on failure.
     static std::shared_ptr<ClipData> load (const juce::File& file, juce::String& error);
+
+    // Two steps, so that a clip can be shown at once: open() is quick (length, empty zeroed buffer),
+    // fill() then decodes the audio chunk by chunk (background thread) and keeps `decoded` / the overview up to date.
+    static std::shared_ptr<ClipData> open (const juce::File& file, juce::String& error,
+                                           std::unique_ptr<juce::AudioFormatReader>& readerOut);
+    void fill (juce::AudioFormatReader& reader, const std::function<void()>& progress);
 
     // Draws the part [t0, t1) (seconds inside the clip) into the rectangle.
     void draw (juce::Graphics& g, juce::Rectangle<int> area, double t0, double t1) const;

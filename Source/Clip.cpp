@@ -1,41 +1,77 @@
 #include "Clip.h"
 #include "Text.h"
 
-std::shared_ptr<ClipData> ClipData::load (const juce::File& file, juce::String& error)
+std::shared_ptr<ClipData> ClipData::open (const juce::File& file, juce::String& error,
+                                          std::unique_ptr<juce::AudioFormatReader>& readerOut)
 {
     juce::AudioFormatManager formats;
     formats.registerBasicFormats();
 
-    std::unique_ptr<juce::AudioFormatReader> reader (formats.createReaderFor (file));
-    if (reader == nullptr)
+    readerOut.reset (formats.createReaderFor (file));
+    if (readerOut == nullptr)
     {
         error = "Не удалось открыть файл"_ru;
         return nullptr;
     }
 
-    const juce::int64 total = reader->lengthInSamples;
-    const int channels = (int) juce::jlimit<juce::uint32> (1, 2, reader->numChannels);
+    const juce::int64 total = readerOut->lengthInSamples;
+    const int channels = (int) juce::jlimit<juce::uint32> (1, 2, readerOut->numChannels);
     if (total <= 0 || total * channels * 4 > 1600000000LL)
     {
         error = total <= 0 ? "Файл пуст"_ru : "Файл слишком большой"_ru;
+        readerOut.reset();
         return nullptr;
     }
 
     auto d = std::make_shared<ClipData>();
     d->file = file;
     d->name = file.getFileNameWithoutExtension();
-    d->sampleRate = reader->sampleRate;
+    d->sampleRate = readerOut->sampleRate;
     d->numSamples = (int) total;
     d->audio.setSize (channels, d->numSamples);
+    d->audio.clear();
+    d->peaks.assign ((size_t) ((d->numSamples + peakBlock - 1) / peakBlock) * 2, 0.0f);
+    d->decoded.store (0);
+    return d;
+}
 
-    constexpr int chunk = 262144;
-    for (juce::int64 pos = 0; pos < total; pos += chunk)
+void ClipData::fill (juce::AudioFormatReader& reader, const std::function<void()>& progress)
+{
+    const int channels = audio.getNumChannels();
+    constexpr int chunk = 262144;   // a multiple of peakBlock
+    for (int pos = 0; pos < numSamples; pos += chunk)
     {
-        const int n = (int) juce::jmin ((juce::int64) chunk, total - pos);
-        reader->read (&d->audio, (int) pos, n, pos, true, channels > 1);
-    }
+        const int n = juce::jmin (chunk, numSamples - pos);
+        reader.read (&audio, pos, n, pos, true, channels > 1);
 
-    d->buildPeaks();
+        const float* l = audio.getReadPointer (0);
+        const float* r = channels > 1 ? audio.getReadPointer (1) : nullptr;
+        for (int b = pos / peakBlock; b * peakBlock < pos + n; ++b)
+        {
+            float lo = 1.0e9f, hi = -1.0e9f;
+            const int s0 = b * peakBlock, s1 = juce::jmin (numSamples, s0 + peakBlock);
+            for (int i = s0; i < s1; ++i)
+            {
+                const float v = r != nullptr ? 0.5f * (l[i] + r[i]) : l[i];
+                lo = juce::jmin (lo, v);
+                hi = juce::jmax (hi, v);
+            }
+            peaks[(size_t) b * 2] = lo;
+            peaks[(size_t) b * 2 + 1] = hi;
+        }
+        decoded.store (pos + n);
+        if (progress)
+            progress();
+    }
+    decoded.store (numSamples);
+}
+
+std::shared_ptr<ClipData> ClipData::load (const juce::File& file, juce::String& error)
+{
+    std::unique_ptr<juce::AudioFormatReader> reader;
+    auto d = open (file, error, reader);
+    if (d != nullptr)
+        d->fill (*reader, {});
     return d;
 }
 
