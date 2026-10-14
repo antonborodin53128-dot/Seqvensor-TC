@@ -4,10 +4,12 @@
 #include "TempoDetect.h"
 #include "LiveStretch.h"
 #include "KeyDetect.h"
+#include "Builtin.h"
 
 Engine::Engine()
 {
     pluginFormats.addFormat (std::make_unique<juce::VST3PluginFormat>());
+    pluginFormats.addFormat (std::make_unique<BuiltinFormat>());
     order.reserve (256);
 }
 
@@ -29,6 +31,8 @@ void Engine::initialise()
     auto listFile = getDataDirectory().getChildFile ("plugins.xml");
     if (auto xml = juce::XmlDocument::parse (listFile))
         knownPlugins.recreateFromXml (*xml);
+    for (auto& d : BuiltinFormat::allDescriptions())
+        knownPlugins.addType (d);   // the built-in effects are always in the list
 
     loadEnabledPlugins();
     loadAnalysisCache();
@@ -601,7 +605,7 @@ void Engine::saveEnabledPlugins() const
 
 bool Engine::isPluginEnabled (const juce::PluginDescription& d) const
 {
-    return allPluginsEnabled || enabledPlugins.count (d.createIdentifierString()) > 0;
+    return d.pluginFormatName == BuiltinFormat::formatName() || allPluginsEnabled || enabledPlugins.count (d.createIdentifierString()) > 0;
 }
 
 void Engine::setPluginEnabled (const juce::PluginDescription& d, bool enabled)

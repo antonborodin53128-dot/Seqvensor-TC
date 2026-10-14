@@ -68,7 +68,8 @@ target_sources(TC PRIVATE
     Source/Stretch.cpp
     Source/LiveStretch.cpp
     Source/KeyDetect.cpp
-    Source/LiveKey.cpp)
+    Source/LiveKey.cpp
+    Source/Builtin.cpp)
 
 if(WIN32)
     target_sources(TC PRIVATE ${CMAKE_BINARY_DIR}/embedded.rc)
