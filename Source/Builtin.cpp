@@ -1059,14 +1059,371 @@ namespace
 
     juce::AudioProcessorEditor* EqPlugin::createEditor() { return new EqEditor (*this); }
 
+    // ------------------------------------------------------------ compressor in the style of Waves H-Comp
+    // (without the Analog and Punch sections). Zero latency: feed-forward, peak detector, no look-ahead, no oversampling.
+    // Threshold 0..-48 dB, Ratio 1..50, Attack 0.5..100 ms, Release in ms or in note lengths (1/64 .. 2 bars, from a BPM
+    // value or from the host tempo), Output +-18 dB, Mix = dry/wet (parallel compression), Limiter = 0 dBFS safety ceiling.
+    const char* const kRelNotes[] = { "1/64", "1/32", "1/16", "1/8", "1/4", "1/2", "1 Bar", "2 Bar" };
+    const double kRelBeats[] = { 1.0 / 16, 1.0 / 8, 1.0 / 4, 1.0 / 2, 1.0, 2.0, 4.0, 8.0 }; // in quarter notes
+
+    class CompEditor;
+
+    class CompPlugin : public BuiltinBase
+    {
+    public:
+        CompPlugin() : BuiltinBase ("comp", "Compressor", "Hybrid compressor (zero latency)")
+        {
+            thresh = addLinear ("th", "Threshold", -48.0f, 0.0f, -18.0f);
+            ratio = addFloat ("ra", "Ratio", 1.0f, 50.0f, 4.0f, 0.12f);
+            attack = addFloat ("at", "Attack", 0.5f, 100.0f, 10.0f, 0.15f);
+            release = addFloat ("re", "Release", 3.0f, 2000.0f, 120.0f, 0.1f);
+            relNote = new juce::AudioParameterChoice (juce::ParameterID { "rn", 1 }, "Release Note", juce::StringArray { kRelNotes[0], kRelNotes[1], kRelNotes[2], kRelNotes[3], kRelNotes[4], kRelNotes[5], kRelNotes[6], kRelNotes[7] }, 3);
+            juce::AudioProcessor::addParameter (relNote);
+            sync = new juce::AudioParameterChoice (juce::ParameterID { "sy", 1 }, "Sync", juce::StringArray { "MS", "BPM", "HOST" }, 0);
+            juce::AudioProcessor::addParameter (sync);
+            bpm = addLinear ("bp", "BPM", 20.0f, 300.0f, 120.0f);
+            output = addLinear ("ou", "Output", -18.0f, 18.0f, 0.0f);
+            mix = addLinear ("mx", "Mix", 0.0f, 100.0f, 100.0f);
+            limiter = new juce::AudioParameterBool (juce::ParameterID { "li", 1 }, "Limiter", false);
+            juce::AudioProcessor::addParameter (limiter);
+            meter = new juce::AudioParameterChoice (juce::ParameterID { "me", 1 }, "Meter", juce::StringArray { "IN", "GR", "OUT" }, 1);
+            juce::AudioProcessor::addParameter (meter);
+        }
+
+        void processBlock (juce::AudioBuffer<float>& buf, juce::MidiBuffer&) override
+        {
+            juce::ScopedNoDenormals noDenormals;
+            const int n = buf.getNumSamples(), nch = juce::jmin (2, buf.getNumChannels());
+            if (nch == 0)
+                return;
+
+            const float th = thresh->get(), ra = ratio->get(), outG = juce::Decibels::decibelsToGain (output->get());
+            const float wet = mix->get() * 0.01f, dry = 1.0f - wet;
+            const bool lim = limiter->get();
+
+            // release time in ms
+            double relMs = release->get();
+            const int sy = sync->getIndex();
+            if (sy != 0)
+            {
+                double tempo = bpm->get();
+                if (sy == 2)
+                    if (auto* ph = getPlayHead())
+                        if (auto pos = ph->getPosition())
+                            if (auto b = pos->getBpm())
+                                if (*b > 1.0)
+                                    tempo = *b;
+                relMs = juce::jlimit (1.0, 4000.0, kRelBeats[relNote->getIndex()] * 60000.0 / tempo);
+            }
+
+            const float atkC = std::exp (-1.0f / (float) (sr * 0.001 * (lim ? juce::jmin (0.5f, attack->get()) : attack->get())));
+            const float relC = std::exp (-1.0f / (float) (sr * 0.001 * relMs));
+            const float limRelC = std::exp (-1.0f / (float) (sr * 0.05));
+            const float slope = 1.0f / (lim ? juce::jmax (ra, 20.0f) : ra) - 1.0f;
+            constexpr float knee = 6.0f;
+
+            float peakIn = 0.0f, peakOut = 0.0f, minGain = 0.0f;
+            auto* d0 = buf.getWritePointer (0);
+            auto* d1 = nch > 1 ? buf.getWritePointer (1) : nullptr;
+
+            for (int i = 0; i < n; ++i)
+            {
+                const float l = d0[i], r = d1 ? d1[i] : l;
+                const float level = juce::jmax (std::abs (l), std::abs (r));
+                peakIn = juce::jmax (peakIn, level);
+
+                const float lvlDb = 20.0f * std::log10 (juce::jmax (level, 1.0e-6f));
+                const float over = lvlDb - th;
+                float target = 0.0f; // wanted gain change in dB (<= 0)
+                if (2.0f * over > knee)
+                    target = slope * over;
+                else if (2.0f * over > -knee)
+                {
+                    const float x = over + knee * 0.5f;
+                    target = slope * x * x / (2.0f * knee);
+                }
+
+                // smoothing of the reduction (attack when it grows, release when it falls)
+                const float c = target < grDb ? atkC : relC;
+                grDb = target + c * (grDb - target);
+                minGain = juce::jmin (minGain, grDb);
+
+                float g = juce::Decibels::decibelsToGain (grDb) * outG;
+
+                // 0 dBFS safety ceiling of the limiter button
+                float lg = 1.0f;
+                if (lim)
+                {
+                    const float pk = level * juce::Decibels::decibelsToGain (grDb) * outG;
+                    const float need = pk > 1.0f ? 1.0f / pk : 1.0f;
+                    limGain = need < limGain ? need : need + limRelC * (limGain - need);
+                    lg = limGain;
+                }
+                else
+                    limGain = 1.0f;
+
+                const float yl = (l * g * lg) * wet + l * dry * outG;
+                const float yr = (r * g * lg) * wet + r * dry * outG;
+                d0[i] = yl;
+                if (d1) d1[i] = yr;
+                peakOut = juce::jmax (peakOut, juce::jmax (std::abs (yl), std::abs (yr)));
+            }
+
+            inLevel.store (peakIn);
+            outLevel.store (peakOut);
+            reduction.store (minGain);
+        }
+
+        juce::AudioProcessorEditor* createEditor() override;
+
+        juce::AudioParameterFloat *thresh, *ratio, *attack, *release, *bpm, *output, *mix;
+        juce::AudioParameterChoice *relNote, *sync, *meter;
+        juce::AudioParameterBool* limiter;
+        std::atomic<float> inLevel { 0.0f }, outLevel { 0.0f }, reduction { 0.0f };
+
+    protected:
+        void prepare() override { grDb = 0.0f; limGain = 1.0f; }
+
+    private:
+        float grDb = 0.0f, limGain = 1.0f;
+    };
+
+    class CompEditor : public juce::AudioProcessorEditor, private juce::Timer
+    {
+    public:
+        explicit CompEditor (CompPlugin& p) : juce::AudioProcessorEditor (p), plug (p)
+        {
+            setSize (620, 330);
+            auto addKnob = [this] (juce::Slider& s, juce::Label& l, const juce::String& text)
+            {
+                s.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
+                s.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 84, 18);
+                s.setColour (juce::Slider::rotarySliderFillColourId, accent);
+                s.setColour (juce::Slider::rotarySliderOutlineColourId, juce::Colour (0xff3a4152));
+                s.setColour (juce::Slider::thumbColourId, accent);
+                s.setColour (juce::Slider::textBoxTextColourId, text_);
+                s.setColour (juce::Slider::textBoxOutlineColourId, juce::Colours::transparentBlack);
+                addAndMakeVisible (s);
+                l.setText (text, juce::dontSendNotification);
+                l.setJustificationType (juce::Justification::centred);
+                l.setColour (juce::Label::textColourId, muted);
+                l.setFont (juce::FontOptions (13.0f, juce::Font::bold));
+                addAndMakeVisible (l);
+            };
+            addKnob (thS, thL, "THRESHOLD");
+            addKnob (raS, raL, "RATIO");
+            addKnob (atS, atL, "ATTACK");
+            addKnob (reS, reL, "RELEASE");
+            addKnob (rnS, rnL, "RELEASE");
+            addKnob (ouS, ouL, "OUTPUT");
+            addKnob (mxS, mxL, "MIX");
+            addKnob (bpS, bpL, "BPM");
+
+            thA = std::make_unique<juce::SliderParameterAttachment> (*p.thresh, thS);
+            raA = std::make_unique<juce::SliderParameterAttachment> (*p.ratio, raS);
+            atA = std::make_unique<juce::SliderParameterAttachment> (*p.attack, atS);
+            reA = std::make_unique<juce::SliderParameterAttachment> (*p.release, reS);
+            rnA = std::make_unique<juce::SliderParameterAttachment> (*p.relNote, rnS);
+            ouA = std::make_unique<juce::SliderParameterAttachment> (*p.output, ouS);
+            mxA = std::make_unique<juce::SliderParameterAttachment> (*p.mix, mxS);
+            bpA = std::make_unique<juce::SliderParameterAttachment> (*p.bpm, bpS);
+
+            thS.textFromValueFunction = [] (double v) { return juce::String (v, 1) + " dB"; };
+            raS.textFromValueFunction = [] (double v) { return v < 1.05 ? juce::String ("1 : 1") : juce::String (v, 1) + " : 1"; };
+            atS.textFromValueFunction = [] (double v) { return juce::String (v, 1) + " ms"; };
+            reS.textFromValueFunction = [] (double v) { return v >= 1000.0 ? juce::String (v / 1000.0, 2) + " s" : juce::String ((int) v) + " ms"; };
+            rnS.textFromValueFunction = [] (double v) { return juce::String (kRelNotes[juce::jlimit (0, 7, (int) std::round (v))]); };
+            ouS.textFromValueFunction = [] (double v) { return (v > 0 ? "+" : "") + juce::String (v, 1) + " dB"; };
+            mxS.textFromValueFunction = [] (double v) { return juce::String ((int) std::round (v)) + " %"; };
+            bpS.textFromValueFunction = [] (double v) { return juce::String (v, 1); };
+            for (auto* s : { &thS, &raS, &atS, &reS, &rnS, &ouS, &mxS, &bpS })
+                s->updateText();
+            rnS.setNumDecimalPlacesToDisplay (0);
+
+            for (auto* b : { &syncMs, &syncBpm, &syncHost })
+            {
+                b->setClickingTogglesState (false);
+                b->setColour (juce::TextButton::buttonColourId, bg2);
+                b->setColour (juce::TextButton::buttonOnColourId, accent);
+                b->setColour (juce::TextButton::textColourOffId, text_);
+                b->setColour (juce::TextButton::textColourOnId, juce::Colour (0xff15171c));
+                addAndMakeVisible (b);
+            }
+            syncMs.setButtonText ("MS");
+            syncBpm.setButtonText ("BPM");
+            syncHost.setButtonText ("HOST");
+            syncMs.onClick = [this] { setChoice (*plug.sync, 0); };
+            syncBpm.onClick = [this] { setChoice (*plug.sync, 1); };
+            syncHost.onClick = [this] { setChoice (*plug.sync, 2); };
+
+            for (auto* b : { &mIn, &mGr, &mOut })
+            {
+                b->setClickingTogglesState (false);
+                b->setColour (juce::TextButton::buttonColourId, bg2);
+                b->setColour (juce::TextButton::buttonOnColourId, accent);
+                b->setColour (juce::TextButton::textColourOffId, text_);
+                b->setColour (juce::TextButton::textColourOnId, juce::Colour (0xff15171c));
+                addAndMakeVisible (b);
+            }
+            mIn.setButtonText ("IN");
+            mGr.setButtonText ("GR");
+            mOut.setButtonText ("OUT");
+            mIn.onClick = [this] { setChoice (*plug.meter, 0); };
+            mGr.onClick = [this] { setChoice (*plug.meter, 1); };
+            mOut.onClick = [this] { setChoice (*plug.meter, 2); };
+
+            limBtn.setButtonText ("LIMITER");
+            limBtn.setClickingTogglesState (true);
+            limBtn.setColour (juce::TextButton::buttonColourId, bg2);
+            limBtn.setColour (juce::TextButton::buttonOnColourId, accent);
+            limBtn.setColour (juce::TextButton::textColourOffId, text_);
+            limBtn.setColour (juce::TextButton::textColourOnId, juce::Colour (0xff15171c));
+            addAndMakeVisible (limBtn);
+            limA = std::make_unique<juce::ButtonParameterAttachment> (*p.limiter, limBtn);
+
+            startTimerHz (30);
+            timerCallback();
+        }
+
+        void paint (juce::Graphics& g) override
+        {
+            g.fillAll (bg);
+            g.setColour (text_);
+            g.setFont (juce::FontOptions (16.0f, juce::Font::bold));
+            g.drawText ("COMPRESSOR", 16, 8, 200, 26, juce::Justification::centredLeft);
+
+            // meter
+            auto m = meterArea.toFloat();
+            g.setColour (juce::Colour (0xff0d0f13));
+            g.fillRoundedRectangle (m, 5.0f);
+            g.setColour (border);
+            g.drawRoundedRectangle (m, 5.0f, 1.0f);
+
+            const int mode = plug.meter->getIndex();
+            const float v = mode == 1 ? juce::jlimit (0.0f, 1.0f, -grShown / 24.0f)
+                                      : juce::jlimit (0.0f, 1.0f, (juce::Decibels::gainToDecibels (mode == 0 ? inShown : outShown, -60.0f) + 60.0f) / 60.0f);
+            auto bar = m.reduced (4.0f);
+            if (mode == 1)
+            {
+                // gain reduction grows from the right edge to the left
+                g.setColour (accent);
+                g.fillRect (bar.withLeft (bar.getRight() - bar.getWidth() * v));
+            }
+            else
+            {
+                g.setColour (accent);
+                g.fillRect (bar.withWidth (bar.getWidth() * v));
+            }
+            g.setColour (muted);
+            g.setFont (juce::FontOptions (11.0f));
+            const juce::String lo = mode == 1 ? "24" : "-60", hi = mode == 1 ? "0 dB" : "0 dB";
+            g.drawText (mode == 1 ? "GR (dB)" : (mode == 0 ? "INPUT (dB)" : "OUTPUT (dB)"), meterArea.translated (0, 0).withTrimmedLeft (8), juce::Justification::centredLeft);
+            g.drawText (hi, meterArea.withTrimmedRight (8), juce::Justification::centredRight);
+            juce::ignoreUnused (lo);
+        }
+
+        void resized() override
+        {
+            auto r = getLocalBounds().reduced (16, 8);
+            auto top = r.removeFromTop (30);
+            limBtn.setBounds (top.removeFromRight (84));
+            top.removeFromRight (8);
+            mOut.setBounds (top.removeFromRight (44));
+            mGr.setBounds (top.removeFromRight (44));
+            mIn.setBounds (top.removeFromRight (44));
+            top.removeFromRight (8);
+            meterArea = juce::Rectangle<int> (150, 12, getWidth() - 150 - 16 - 84 - 8 - 132 - 8 - 16, 22);
+            juce::ignoreUnused (top);
+
+            r.removeFromTop (14);
+            auto row1 = r.removeFromTop (130);
+            const int w = row1.getWidth() / 4;
+            for (auto pr : { std::pair<juce::Slider*, juce::Label*> { &thS, &thL }, { &raS, &raL }, { &atS, &atL }, { &reS, &reL } })
+            {
+                auto c = row1.removeFromLeft (w);
+                pr.second->setBounds (c.removeFromTop (18));
+                pr.first->setBounds (c);
+                if (pr.first == &reS)
+                {
+                    rnL.setBounds (pr.second->getBounds());
+                    rnS.setBounds (pr.first->getBounds());
+                }
+            }
+            r.removeFromTop (8);
+            auto row2 = r.removeFromTop (130);
+            const int w2 = row2.getWidth() / 4;
+            auto c1 = row2.removeFromLeft (w2);
+            ouL.setBounds (c1.removeFromTop (18)); ouS.setBounds (c1);
+            auto c2 = row2.removeFromLeft (w2);
+            mxL.setBounds (c2.removeFromTop (18)); mxS.setBounds (c2);
+            auto c3 = row2.removeFromLeft (w2);
+            bpL.setBounds (c3.removeFromTop (18)); bpS.setBounds (c3);
+            auto c4 = row2.reduced (10, 20);
+            syncMs.setBounds (c4.removeFromTop (28));
+            c4.removeFromTop (6);
+            syncBpm.setBounds (c4.removeFromTop (28));
+            c4.removeFromTop (6);
+            syncHost.setBounds (c4.removeFromTop (28));
+        }
+
+    private:
+        void setChoice (juce::AudioParameterChoice& c, int i)
+        {
+            c.beginChangeGesture();
+            c = i;
+            c.endChangeGesture();
+        }
+
+        void timerCallback() override
+        {
+            const int sy = plug.sync->getIndex(), me = plug.meter->getIndex();
+            syncMs.setToggleState (sy == 0, juce::dontSendNotification);
+            syncBpm.setToggleState (sy == 1, juce::dontSendNotification);
+            syncHost.setToggleState (sy == 2, juce::dontSendNotification);
+            mIn.setToggleState (me == 0, juce::dontSendNotification);
+            mGr.setToggleState (me == 1, juce::dontSendNotification);
+            mOut.setToggleState (me == 2, juce::dontSendNotification);
+            reS.setVisible (sy == 0); reL.setVisible (sy == 0);
+            rnS.setVisible (sy != 0); rnL.setVisible (sy != 0);
+            bpS.setEnabled (sy == 1); bpL.setEnabled (sy == 1);
+            bpS.setAlpha (sy == 1 ? 1.0f : 0.4f);
+            bpL.setAlpha (sy == 1 ? 1.0f : 0.4f);
+
+            // fast rise, slow fall
+            auto follow = [] (float& shown, float now, bool gr)
+            {
+                if (gr ? now < shown : now > shown) shown = now;
+                else shown += (now - shown) * 0.25f;
+            };
+            follow (inShown, plug.inLevel.load(), false);
+            follow (outShown, plug.outLevel.load(), false);
+            follow (grShown, plug.reduction.load(), true);
+            repaint (meterArea);
+        }
+
+        CompPlugin& plug;
+        juce::Slider thS, raS, atS, reS, rnS, ouS, mxS, bpS;
+        juce::Label thL, raL, atL, reL, rnL, ouL, mxL, bpL;
+        std::unique_ptr<juce::SliderParameterAttachment> thA, raA, atA, reA, rnA, ouA, mxA, bpA;
+        juce::TextButton syncMs, syncBpm, syncHost, mIn, mGr, mOut, limBtn;
+        std::unique_ptr<juce::ButtonParameterAttachment> limA;
+        juce::Rectangle<int> meterArea;
+        float inShown = 0.0f, outShown = 0.0f, grShown = 0.0f;
+        juce::Colour bg { 0xff15171c }, bg2 { 0xff262b36 }, border { 0xff2a2f3a }, accent { 0xffff9a2e }, text_ { 0xffe8eaf0 }, muted { 0xff8b93a7 };
+    };
+
+    juce::AudioProcessorEditor* CompPlugin::createEditor() { return new CompEditor (*this); }
+
     std::unique_ptr<juce::AudioPluginInstance> makeBuiltin (const juce::String& id)
     {
         if (id == "TC:eq")
             return std::make_unique<EqPlugin>();
+        if (id == "TC:comp")
+            return std::make_unique<CompPlugin>();
         return nullptr;
     }
 
-    const char* const allIds[] = { "TC:eq" };
+    const char* const allIds[] = { "TC:eq", "TC:comp" };
 }
 
 std::vector<juce::PluginDescription> BuiltinFormat::allDescriptions()
