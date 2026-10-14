@@ -2017,18 +2017,10 @@ namespace
         {
             juce::ScopedNoDenormals noDenormals;
             const int n = buf.getNumSamples(), nch = juce::jmin (2, buf.getNumChannels());
-            const bool active = on->get();
-            if (! active)
-            {
-                if (wasOn)
-                {
-                    ch[0].reset(); ch[1].reset();
-                    wasOn = false;
-                }
-                level_ = 1.0f;
-                return;
-            }
-            wasOn = true;
+            // The circuit keeps running while the pedal is bypassed (its filters stay warm) and the bypass is a short
+            // cross-fade: switching it off and on again therefore never clicks.
+            const float rampTarget = on->get() ? 1.0f : 0.0f;
+            const float rampStep = (float) (1.0 / (0.012 * sr));
             if (drive->get() != lastDrive || tone->get() != lastTone)
             {
                 lastDrive = drive->get();
@@ -2041,17 +2033,22 @@ namespace
             }
             const float target = juce::Decibels::decibelsToGain (level->get());
             const float step = (target - level_) / (float) juce::jmax (1, n);
-            const float wet = mix->get() * 0.01f, dry = 1.0f - wet;
+            const float wetAmt = mix->get() * 0.01f;
+            const float startRamp = ramp;
             for (int c = 0; c < nch; ++c)
             {
                 auto* d = buf.getWritePointer (c);
-                float g = level_;
+                float g = level_, r = startRamp;
                 for (int i = 0; i < n; ++i)
                 {
                     g += step;
+                    r += juce::jlimit (-rampStep, rampStep, rampTarget - r);
                     const float x = d[i];
-                    d[i] = ch[c].process (x) * g * wet + x * dry;
+                    const float w = wetAmt * r;
+                    d[i] = ch[c].process (x) * g * w + x * (1.0f - w);
                 }
+                if (c == nch - 1)
+                    ramp = r;
             }
             level_ = target;
         }
@@ -2065,13 +2062,13 @@ namespace
         {
             lastDrive = lastTone = -1.0f;
             ch[0].reset(); ch[1].reset();
+            ramp = on->get() ? 1.0f : 0.0f;
             level_ = juce::Decibels::decibelsToGain (level->get());
         }
 
     private:
         tcod::Channel ch[2];
-        float lastDrive = -1.0f, lastTone = -1.0f, level_ = 1.0f;
-        bool wasOn = true;
+        float lastDrive = -1.0f, lastTone = -1.0f, level_ = 1.0f, ramp = 1.0f;
     };
 
     class OverdriveEditor : public juce::AudioProcessorEditor, private juce::Timer
