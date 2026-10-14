@@ -1,6 +1,7 @@
 #include "Builtin.h"
 #include "ReverbCore.h"
 #include "OverdriveCore.h"
+#include "AmpCore.h"
 #include "Text.h"
 
 #include <algorithm>
@@ -2181,6 +2182,188 @@ namespace
 
     juce::AudioProcessorEditor* OverdrivePlugin::createEditor() { return new OverdriveEditor (*this); }
 
+    // ------------------------------------------------------------ guitar amp + cabinet (zero latency, see AmpCore.h)
+    class AmpPlugin : public BuiltinBase
+    {
+    public:
+        AmpPlugin() : BuiltinBase ("amp", "Amp", "Guitar amplifier and cabinet (zero latency)")
+        {
+            model = new juce::AudioParameterChoice (juce::ParameterID { "md", 1 }, "Channel", juce::StringArray { "Clean", "Crunch", "Lead" }, 1);
+            juce::AudioProcessor::addParameter (model);
+            cab = new juce::AudioParameterChoice (juce::ParameterID { "cb", 1 }, "Cabinet", juce::StringArray { "Off", "1x12", "2x12", "4x12" }, 3);
+            juce::AudioProcessor::addParameter (cab);
+            input = addLinear ("in", "Input", -12.0f, 12.0f, 0.0f);
+            gain = addLinear ("ga", "Gain", 0.0f, 100.0f, 50.0f);
+            bass = addLinear ("ba", "Bass", 0.0f, 100.0f, 50.0f);
+            mid = addLinear ("mi", "Mid", 0.0f, 100.0f, 50.0f);
+            treble = addLinear ("tr", "Treble", 0.0f, 100.0f, 50.0f);
+            presence = addLinear ("pr", "Presence", 0.0f, 100.0f, 50.0f);
+            master = addLinear ("ma", "Master", -40.0f, 6.0f, -6.0f);
+        }
+
+        void processBlock (juce::AudioBuffer<float>& buf, juce::MidiBuffer&) override
+        {
+            juce::ScopedNoDenormals noDenormals;
+            const int n = buf.getNumSamples(), nch = juce::jmin (2, buf.getNumChannels());
+            tcamp::Params p;
+            p.model = model->getIndex();
+            p.cab = cab->getIndex();
+            p.inputDb = input->get();
+            p.gain = gain->get() * 0.01f;
+            p.bass = bass->get() * 0.01f;
+            p.mid = mid->get() * 0.01f;
+            p.treble = treble->get() * 0.01f;
+            p.presence = presence->get() * 0.01f;
+            p.masterDb = master->get();
+            if (! haveParams || std::memcmp (&p, &last, sizeof (p)) != 0)
+            {
+                last = p;
+                haveParams = true;
+                for (auto& c : ch)
+                    c.setParams (p);
+            }
+            for (int c = 0; c < nch; ++c)
+            {
+                auto* d = buf.getWritePointer (c);
+                for (int i = 0; i < n; ++i)
+                    d[i] = ch[c].process (d[i]);
+            }
+        }
+
+        juce::AudioParameterChoice *model, *cab;
+        juce::AudioParameterFloat *input, *gain, *bass, *mid, *treble, *presence, *master;
+        juce::AudioProcessorEditor* createEditor() override;
+
+    protected:
+        void prepare() override
+        {
+            haveParams = false;
+            for (auto& c : ch)
+                c.prepare (sr);
+        }
+
+    private:
+        tcamp::Channel ch[2];
+        tcamp::Params last;
+        bool haveParams = false;
+    };
+
+    class AmpEditor : public juce::AudioProcessorEditor, private juce::Timer
+    {
+    public:
+        explicit AmpEditor (AmpPlugin& p) : juce::AudioProcessorEditor (p), plug (p)
+        {
+            setSize (720, 350);
+            addKnob (inS, inL, "INPUT", *p.input, inA);
+            addKnob (gaS, gaL, "GAIN", *p.gain, gaA);
+            addKnob (baS, baL, "BASS", *p.bass, baA);
+            addKnob (miS, miL, "MID", *p.mid, miA);
+            addKnob (trS, trL, "TREBLE", *p.treble, trA);
+            addKnob (prS, prL, "PRESENCE", *p.presence, prA);
+            addKnob (maS, maL, "MASTER", *p.master, maA);
+            auto tenth = [] (double v) { return juce::String (v / 10.0, 1); };
+            for (auto* s : { &gaS, &baS, &miS, &trS, &prS })
+                s->textFromValueFunction = tenth;
+            inS.textFromValueFunction = [] (double v) { return (v > 0 ? "+" : "") + juce::String (v, 1) + " dB"; };
+            maS.textFromValueFunction = [] (double v) { return juce::String (v, 1) + " dB"; };
+            for (auto* s : { &inS, &gaS, &baS, &miS, &trS, &prS, &maS })
+                s->updateText();
+
+            const char* modelNames[3] = { "CLEAN", "CRUNCH", "LEAD" };
+            const char* cabNames[4] = { "NO CAB", "1x12", "2x12", "4x12" };
+            for (int i = 0; i < 3; ++i)
+                setupButton (modelBtn[i], modelNames[i], [this, i] { plug.model->beginChangeGesture(); *plug.model = i; plug.model->endChangeGesture(); });
+            for (int i = 0; i < 4; ++i)
+                setupButton (cabBtn[i], cabNames[i], [this, i] { plug.cab->beginChangeGesture(); *plug.cab = i; plug.cab->endChangeGesture(); });
+            startTimerHz (15);
+            timerCallback();
+        }
+
+        void paint (juce::Graphics& g) override
+        {
+            g.fillAll (bg);
+            auto body = getLocalBounds().toFloat().reduced (10.0f);
+            juce::ColourGradient grad (juce::Colour (0xff23262e), body.getX(), body.getY(), juce::Colour (0xff181a20), body.getX(), body.getBottom(), false);
+            g.setGradientFill (grad);
+            g.fillRoundedRectangle (body, 10.0f);
+            g.setColour (juce::Colour (0xff3a4152));
+            g.drawRoundedRectangle (body, 10.0f, 2.0f);
+            g.setColour (accent);
+            g.setFont (juce::FontOptions (20.0f, juce::Font::bold));
+            g.drawText ("AMP", 24, 16, 120, 30, juce::Justification::centredLeft);
+            g.setColour (muted);
+            g.setFont (juce::FontOptions (11.0f, juce::Font::bold));
+            g.drawText ("CHANNEL", 150, 20, 60, 14, juce::Justification::centredLeft);
+            g.drawText ("CABINET", 24, getHeight() - 52, 70, 14, juce::Justification::centredLeft);
+        }
+
+        void resized() override
+        {
+            for (int i = 0; i < 3; ++i)
+                modelBtn[i].setBounds (214 + i * 84, 16, 78, 28);
+            const int w = (getWidth() - 48) / 7;
+            juce::Slider* sl[7] = { &inS, &gaS, &baS, &miS, &trS, &prS, &maS };
+            juce::Label* lb[7] = { &inL, &gaL, &baL, &miL, &trL, &prL, &maL };
+            for (int i = 0; i < 7; ++i)
+            {
+                auto c = juce::Rectangle<int> (24 + i * w, 60, w, 190);
+                lb[i]->setBounds (c.removeFromTop (20));
+                sl[i]->setBounds (c);
+            }
+            for (int i = 0; i < 4; ++i)
+                cabBtn[i].setBounds (100 + i * 84, getHeight() - 58, 78, 28);
+        }
+
+    private:
+        template <typename F>
+        void setupButton (juce::TextButton& b, const char* text, F&& onClick)
+        {
+            b.setButtonText (text);
+            b.setClickingTogglesState (false);
+            b.setColour (juce::TextButton::buttonColourId, juce::Colour (0xff262b36));
+            b.setColour (juce::TextButton::buttonOnColourId, accent);
+            b.setColour (juce::TextButton::textColourOffId, text_);
+            b.setColour (juce::TextButton::textColourOnId, juce::Colour (0xff15171c));
+            b.onClick = std::forward<F> (onClick);
+            addAndMakeVisible (b);
+        }
+
+        void addKnob (juce::Slider& s, juce::Label& l, const juce::String& text, juce::RangedAudioParameter& prm, std::unique_ptr<juce::SliderParameterAttachment>& att)
+        {
+            s.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
+            s.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 70, 20);
+            s.setColour (juce::Slider::rotarySliderFillColourId, accent);
+            s.setColour (juce::Slider::rotarySliderOutlineColourId, juce::Colour (0xff3a4152));
+            s.setColour (juce::Slider::thumbColourId, accent);
+            s.setColour (juce::Slider::textBoxTextColourId, text_);
+            s.setColour (juce::Slider::textBoxOutlineColourId, juce::Colours::transparentBlack);
+            addAndMakeVisible (s);
+            l.setText (text, juce::dontSendNotification);
+            l.setJustificationType (juce::Justification::centred);
+            l.setColour (juce::Label::textColourId, muted);
+            l.setFont (juce::FontOptions (12.0f, juce::Font::bold));
+            addAndMakeVisible (l);
+            att = std::make_unique<juce::SliderParameterAttachment> (prm, s);
+        }
+
+        void timerCallback() override
+        {
+            for (int i = 0; i < 3; ++i)
+                modelBtn[i].setToggleState (plug.model->getIndex() == i, juce::dontSendNotification);
+            for (int i = 0; i < 4; ++i)
+                cabBtn[i].setToggleState (plug.cab->getIndex() == i, juce::dontSendNotification);
+        }
+
+        AmpPlugin& plug;
+        juce::Slider inS, gaS, baS, miS, trS, prS, maS;
+        juce::Label inL, gaL, baL, miL, trL, prL, maL;
+        std::unique_ptr<juce::SliderParameterAttachment> inA, gaA, baA, miA, trA, prA, maA;
+        juce::TextButton modelBtn[3], cabBtn[4];
+        juce::Colour bg { 0xff15171c }, accent { 0xffff9a2e }, text_ { 0xffe8eaf0 }, muted { 0xff8b93a7 };
+    };
+
+    juce::AudioProcessorEditor* AmpPlugin::createEditor() { return new AmpEditor (*this); }
+
     std::unique_ptr<juce::AudioPluginInstance> makeBuiltin (const juce::String& id)
     {
         if (id == "TC:eq")
@@ -2193,10 +2376,12 @@ namespace
             return std::make_unique<ReverbPlugin>();
         if (id == "TC:od808")
             return std::make_unique<OverdrivePlugin>();
+        if (id == "TC:amp")
+            return std::make_unique<AmpPlugin>();
         return nullptr;
     }
 
-    const char* const allIds[] = { "TC:eq", "TC:comp", "TC:gate", "TC:reverb", "TC:od808" };
+    const char* const allIds[] = { "TC:eq", "TC:comp", "TC:gate", "TC:reverb", "TC:od808", "TC:amp" };
 }
 
 std::vector<juce::PluginDescription> BuiltinFormat::allDescriptions()
