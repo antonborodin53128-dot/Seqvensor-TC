@@ -1463,7 +1463,7 @@ namespace
         GatePlugin() : BuiltinBase ("gate", "Gate", "Noise gate (zero latency)")
         {
             thresh = addLinear ("th", "Threshold", -80.0f, 0.0f, -45.0f);
-            range = addLinear ("rg", "Range", -80.0f, 0.0f, -80.0f);
+            range = addLinear ("rg", "Range", -100.0f, 0.0f, -100.0f);
             attack = addFloat ("at", "Attack", 0.05f, 50.0f, 0.5f, 0.1f);
             hold = addFloat ("ho", "Hold", 0.0f, 1000.0f, 80.0f, 0.15f);
             release = addFloat ("re", "Release", 5.0f, 3000.0f, 150.0f, 0.1f);
@@ -1652,15 +1652,15 @@ namespace
     private:
         void paintTransfer (juce::Graphics& g)
         {
-            auto plot = juce::Rectangle<float> ((float) transferArea.getX() + 58.0f, (float) transferArea.getY() + 4.0f, 270.0f, 270.0f);
+            auto plot = juce::Rectangle<float> ((float) transferArea.getX() + 84.0f, (float) transferArea.getY() + 4.0f, 252.0f, 252.0f);
             g.setColour (juce::Colour (0xff0d0f13));
             g.fillRect (transferArea.toFloat());
 
-            auto X = [&] (float db) { return plot.getX() + (juce::jlimit (-80.0f, 0.0f, db) + 80.0f) / 80.0f * plot.getWidth(); };
-            auto Y = [&] (float db) { return plot.getBottom() - (juce::jlimit (-80.0f, 0.0f, db) + 80.0f) / 80.0f * plot.getHeight(); };
+            auto X = [&] (float db) { return plot.getX() + (juce::jlimit (-100.0f, 0.0f, db) + 100.0f) / 100.0f * plot.getWidth(); };
+            auto Y = [&] (float db) { return plot.getBottom() - (juce::jlimit (-100.0f, 0.0f, db) + 100.0f) / 100.0f * plot.getHeight(); };
 
             g.setFont (juce::FontOptions (11.0f));
-            for (int db = 0; db >= -80; db -= 10)
+            for (int db = 0; db >= -100; db -= 20)
             {
                 g.setColour (juce::Colour (0xff1f2430));
                 g.drawHorizontalLine ((int) Y ((float) db), plot.getX(), plot.getRight());
@@ -1672,23 +1672,32 @@ namespace
             g.drawRect (plot);
 
             // input level meter (left of the dB labels)
-            auto m = juce::Rectangle<float> ((float) transferArea.getX() + 6.0f, plot.getY(), 12.0f, plot.getHeight());
+            auto m = juce::Rectangle<float> ((float) transferArea.getX() + 6.0f, plot.getY(), 14.0f, plot.getHeight());
+            auto m2 = m.translated (20.0f, 0.0f);
             g.setColour (juce::Colour (0xff1a1d24));
             g.fillRect (m);
-            const float inDb = juce::Decibels::gainToDecibels (inShown, -80.0f);
+            g.fillRect (m2);
+            const float inDb = juce::Decibels::gainToDecibels (inShown, -100.0f);
             g.setColour (accent);
             g.fillRect (m.withTop (Y (inDb)));
+            // gain reduction meter: grows from the top downwards
+            g.setColour (juce::Colour (0xff4cd964));
+            g.fillRect (m2.withHeight (juce::jlimit (0.0f, 1.0f, -grShown / 100.0f) * m2.getHeight()));
+            g.setColour (muted);
+            g.setFont (juce::FontOptions (10.0f, juce::Font::bold));
+            g.drawText ("IN", m.withY (plot.getBottom() + 2.0f).withHeight (14.0f).expanded (4.0f, 0.0f), juce::Justification::centred);
+            g.drawText ("GR", m2.withY (plot.getBottom() + 2.0f).withHeight (14.0f).expanded (4.0f, 0.0f), juce::Justification::centred);
 
             // reference diagonal
             g.setColour (juce::Colour (0xff4a5163));
-            g.drawLine (X (-80.0f), Y (-80.0f), X (0.0f), Y (0.0f), 1.0f);
+            g.drawLine (X (-100.0f), Y (-100.0f), X (0.0f), Y (0.0f), 1.0f);
 
             // transfer curve
             const float th = plug.thresh->get(), rg = plug.range->get(), ex = plug.ratio->get() - 1.0f;
             juce::Path path;
-            for (int i = 0; i <= 80; ++i)
+            for (int i = 0; i <= 100; ++i)
             {
-                const float in = -80.0f + (float) i;
+                const float in = -100.0f + (float) i;
                 const float out = in >= th ? in : in + juce::jmax (rg, -(th - in) * ex);
                 const auto pt = juce::Point<float> (X (in), Y (out));
                 if (i == 0) path.startNewSubPath (pt); else path.lineTo (pt);
@@ -1707,7 +1716,7 @@ namespace
 
             g.setColour (muted);
             g.setFont (juce::FontOptions (11.0f));
-            g.drawText ("IN (dB)", juce::Rectangle<float> (plot.getX(), plot.getBottom() + 0.0f, plot.getWidth(), 14.0f), juce::Justification::centredRight);
+            g.drawText ("INPUT (dB)", juce::Rectangle<float> (plot.getX(), plot.getBottom() + 2.0f, plot.getWidth(), 14.0f), juce::Justification::centredRight);
         }
 
         void addRow (juce::Slider& s, juce::Label& l, const juce::String& text, juce::RangedAudioParameter& prm, std::unique_ptr<juce::SliderParameterAttachment>& att)
