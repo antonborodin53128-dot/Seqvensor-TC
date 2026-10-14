@@ -1,5 +1,6 @@
 #include "Builtin.h"
 #include "ReverbCore.h"
+#include "OverdriveCore.h"
 #include "Text.h"
 
 #include <algorithm>
@@ -1998,6 +1999,198 @@ namespace
 
     juce::AudioProcessorEditor* ReverbPlugin::createEditor() { return new ReverbEditor (*this); }
 
+    // ------------------------------------------------------------ 808 overdrive pedal (zero latency, see OverdriveCore.h)
+    class OverdrivePlugin : public BuiltinBase
+    {
+    public:
+        OverdrivePlugin() : BuiltinBase ("od808", "808 Overdrive", "Mid-hump overdrive pedal (zero latency)")
+        {
+            drive = addLinear ("dr", "Drive", 0.0f, 100.0f, 40.0f);
+            tone = addLinear ("to", "Tone", 0.0f, 100.0f, 50.0f);
+            level = addLinear ("lv", "Level", -24.0f, 12.0f, 0.0f);
+            on = new juce::AudioParameterBool (juce::ParameterID { "on", 1 }, "On", true);
+            juce::AudioProcessor::addParameter (on);
+        }
+
+        void processBlock (juce::AudioBuffer<float>& buf, juce::MidiBuffer&) override
+        {
+            juce::ScopedNoDenormals noDenormals;
+            const int n = buf.getNumSamples(), nch = juce::jmin (2, buf.getNumChannels());
+            const bool active = on->get();
+            if (! active)
+            {
+                if (wasOn)
+                {
+                    ch[0].reset(); ch[1].reset();
+                    wasOn = false;
+                }
+                level_ = 1.0f;
+                return;
+            }
+            wasOn = true;
+            if (drive->get() != lastDrive || tone->get() != lastTone)
+            {
+                lastDrive = drive->get();
+                lastTone = tone->get();
+                for (auto& c : ch)
+                {
+                    c.setDrive (sr, lastDrive * 0.01f);
+                    c.setTone (sr, lastTone * 0.01f);
+                }
+            }
+            const float target = juce::Decibels::decibelsToGain (level->get());
+            const float step = (target - level_) / (float) juce::jmax (1, n);
+            for (int c = 0; c < nch; ++c)
+            {
+                auto* d = buf.getWritePointer (c);
+                float g = level_;
+                for (int i = 0; i < n; ++i)
+                {
+                    g += step;
+                    d[i] = ch[c].process (d[i]) * g;
+                }
+            }
+            level_ = target;
+        }
+
+        juce::AudioParameterFloat *drive, *tone, *level;
+        juce::AudioParameterBool* on;
+        juce::AudioProcessorEditor* createEditor() override;
+
+    protected:
+        void prepare() override
+        {
+            lastDrive = lastTone = -1.0f;
+            ch[0].reset(); ch[1].reset();
+            level_ = juce::Decibels::decibelsToGain (level->get());
+        }
+
+    private:
+        tcod::Channel ch[2];
+        float lastDrive = -1.0f, lastTone = -1.0f, level_ = 1.0f;
+        bool wasOn = true;
+    };
+
+    class OverdriveEditor : public juce::AudioProcessorEditor, private juce::Timer
+    {
+    public:
+        explicit OverdriveEditor (OverdrivePlugin& p) : juce::AudioProcessorEditor (p), plug (p)
+        {
+            setSize (400, 480);
+            addKnob (drS, drL, "DRIVE", *p.drive, drA);
+            addKnob (toS, toL, "TONE", *p.tone, toA);
+            addKnob (lvS, lvL, "LEVEL", *p.level, lvA);
+            drS.textFromValueFunction = [] (double v) { return juce::String ((int) std::round (v / 10.0)); };
+            toS.textFromValueFunction = [] (double v) { return juce::String ((int) std::round (v / 10.0)); };
+            lvS.textFromValueFunction = [] (double v) { return (v > 0 ? "+" : "") + juce::String (v, 1) + " dB"; };
+            for (auto* s : { &drS, &toS, &lvS })
+                s->updateText();
+            startTimerHz (15);
+        }
+
+        void paint (juce::Graphics& g) override
+        {
+            g.fillAll (juce::Colour (0xff15171c));
+            auto body = getLocalBounds().toFloat().reduced (14.0f);
+            juce::ColourGradient grad (juce::Colour (0xff3fa34d), body.getX(), body.getY(), juce::Colour (0xff1f6b2c), body.getX(), body.getBottom(), false);
+            g.setGradientFill (grad);
+            g.fillRoundedRectangle (body, 14.0f);
+            g.setColour (juce::Colour (0xff134a1d));
+            g.drawRoundedRectangle (body, 14.0f, 3.0f);
+
+            // screws
+            for (auto pt : { juce::Point<float> (body.getX() + 18, body.getY() + 18), { body.getRight() - 18, body.getY() + 18 },
+                             { body.getX() + 18, body.getBottom() - 18 }, { body.getRight() - 18, body.getBottom() - 18 } })
+            {
+                g.setColour (juce::Colour (0xffb9c4b9));
+                g.fillEllipse (pt.x - 5, pt.y - 5, 10, 10);
+                g.setColour (juce::Colour (0xff4d5a4d));
+                g.drawLine (pt.x - 3, pt.y - 3, pt.x + 3, pt.y + 3, 1.5f);
+            }
+
+            g.setColour (juce::Colours::white);
+            g.setFont (juce::FontOptions (30.0f, juce::Font::bold));
+            g.drawText ("808", juce::Rectangle<int> (0, 292, getWidth(), 40), juce::Justification::centred);
+            g.setFont (juce::FontOptions (15.0f, juce::Font::bold));
+            g.drawText ("OVERDRIVE", juce::Rectangle<int> (0, 326, getWidth(), 20), juce::Justification::centred);
+
+            // LED and foot switch
+            const bool o = plug.on->get();
+            g.setColour (o ? juce::Colour (0xffff3b30) : juce::Colour (0xff4a2a2a));
+            g.fillEllipse (getWidth() * 0.5f - 7.0f, 368.0f, 14.0f, 14.0f);
+            if (o)
+            {
+                g.setColour (juce::Colour (0x40ff3b30));
+                g.fillEllipse (getWidth() * 0.5f - 14.0f, 361.0f, 28.0f, 28.0f);
+            }
+            auto fs = footSwitch().toFloat();
+            juce::ColourGradient metal (juce::Colour (0xffe6e9ea), fs.getX(), fs.getY(), juce::Colour (0xff8d9496), fs.getRight(), fs.getBottom(), false);
+            g.setGradientFill (metal);
+            g.fillEllipse (fs);
+            g.setColour (juce::Colour (0xff3b4244));
+            g.drawEllipse (fs, 2.5f);
+            g.setColour (juce::Colour (0xff6b7476));
+            g.drawEllipse (fs.reduced (14.0f), 1.5f);
+            g.setColour (juce::Colour (0xffd7e8d7));
+            g.setFont (juce::FontOptions (11.0f, juce::Font::bold));
+            g.drawText (o ? "ON  -  click to bypass" : "BYPASSED  -  click to turn on", juce::Rectangle<int> (0, 452, getWidth(), 14), juce::Justification::centred);
+        }
+
+        void resized() override
+        {
+            const int w = (getWidth() - 56) / 3;
+            juce::Slider* sl[3] = { &drS, &toS, &lvS };
+            juce::Label* lb[3] = { &drL, &toL, &lvL };
+            for (int i = 0; i < 3; ++i)
+            {
+                auto c = juce::Rectangle<int> (28 + i * w, 36, w, 232);
+                lb[i]->setBounds (c.removeFromTop (22));
+                sl[i]->setBounds (c.removeFromTop (c.getHeight()).withTrimmedBottom (4));
+            }
+        }
+
+        void mouseDown (const juce::MouseEvent& e) override
+        {
+            if (footSwitch().toFloat().contains (e.position))
+            {
+                plug.on->beginChangeGesture();
+                *plug.on = ! plug.on->get();
+                plug.on->endChangeGesture();
+                repaint();
+            }
+        }
+
+    private:
+        juce::Rectangle<int> footSwitch() const { return juce::Rectangle<int> (getWidth() / 2 - 40, 388, 80, 60); }
+
+        void addKnob (juce::Slider& s, juce::Label& l, const juce::String& text, juce::RangedAudioParameter& prm, std::unique_ptr<juce::SliderParameterAttachment>& att)
+        {
+            s.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
+            s.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 70, 20);
+            s.setColour (juce::Slider::rotarySliderFillColourId, juce::Colour (0xfff2f4ee));
+            s.setColour (juce::Slider::rotarySliderOutlineColourId, juce::Colour (0xff134a1d));
+            s.setColour (juce::Slider::thumbColourId, juce::Colour (0xfff2f4ee));
+            s.setColour (juce::Slider::textBoxTextColourId, juce::Colours::white);
+            s.setColour (juce::Slider::textBoxOutlineColourId, juce::Colours::transparentBlack);
+            addAndMakeVisible (s);
+            l.setText (text, juce::dontSendNotification);
+            l.setJustificationType (juce::Justification::centred);
+            l.setColour (juce::Label::textColourId, juce::Colours::white);
+            l.setFont (juce::FontOptions (14.0f, juce::Font::bold));
+            addAndMakeVisible (l);
+            att = std::make_unique<juce::SliderParameterAttachment> (prm, s);
+        }
+
+        void timerCallback() override { repaint (0, 360, getWidth(), 120); }
+
+        OverdrivePlugin& plug;
+        juce::Slider drS, toS, lvS;
+        juce::Label drL, toL, lvL;
+        std::unique_ptr<juce::SliderParameterAttachment> drA, toA, lvA;
+    };
+
+    juce::AudioProcessorEditor* OverdrivePlugin::createEditor() { return new OverdriveEditor (*this); }
+
     std::unique_ptr<juce::AudioPluginInstance> makeBuiltin (const juce::String& id)
     {
         if (id == "TC:eq")
@@ -2008,10 +2201,12 @@ namespace
             return std::make_unique<GatePlugin>();
         if (id == "TC:reverb")
             return std::make_unique<ReverbPlugin>();
+        if (id == "TC:od808")
+            return std::make_unique<OverdrivePlugin>();
         return nullptr;
     }
 
-    const char* const allIds[] = { "TC:eq", "TC:comp", "TC:gate", "TC:reverb" };
+    const char* const allIds[] = { "TC:eq", "TC:comp", "TC:gate", "TC:reverb", "TC:od808" };
 }
 
 std::vector<juce::PluginDescription> BuiltinFormat::allDescriptions()
