@@ -58,6 +58,12 @@ namespace
             set ((1 + c) / 2, -(1 + c), (1 + c) / 2, 1 + al, -2 * c, 1 - al);
         }
 
+        void makeLowPass (double sr, float f, float q = 0.7071f)
+        {
+            const float w = 2.0f * pi * f / (float) sr, c = std::cos (w), al = std::sin (w) / (2.0f * q);
+            set ((1 - c) / 2, 1 - c, (1 - c) / 2, 1 + al, -2 * c, 1 - al);
+        }
+
         float process (int ch, float x)
         {
             const float y = b0 * x + z1[ch];
@@ -1448,16 +1454,335 @@ namespace
 
     juce::AudioProcessorEditor* CompPlugin::createEditor() { return new CompEditor (*this); }
 
+    // ------------------------------------------------------------ noise gate (zero latency)
+    // No look-ahead: the gate opens as fast as the Attack time allows (min 0.05 ms) and closes after Hold + Release.
+    // The detector can be filtered (Low Cut / High Cut) so that rumble or hiss does not open the gate (e.g. stage bleed).
+    class GatePlugin : public BuiltinBase
+    {
+    public:
+        GatePlugin() : BuiltinBase ("gate", "Gate", "Noise gate (zero latency)")
+        {
+            thresh = addLinear ("th", "Threshold", -80.0f, 0.0f, -45.0f);
+            range = addLinear ("rg", "Range", -80.0f, 0.0f, -80.0f);
+            attack = addFloat ("at", "Attack", 0.05f, 50.0f, 0.5f, 0.1f);
+            hold = addFloat ("ho", "Hold", 0.0f, 1000.0f, 80.0f, 0.15f);
+            release = addFloat ("re", "Release", 5.0f, 3000.0f, 150.0f, 0.1f);
+            hyst = addLinear ("hy", "Hysteresis", 0.0f, 20.0f, 4.0f);
+            lowCut = addFloat ("lc", "Low Cut", 20.0f, 2000.0f, 20.0f, 0.1f);
+            highCut = addFloat ("hc", "High Cut", 500.0f, 20000.0f, 20000.0f, 0.3f);
+            meter = new juce::AudioParameterChoice (juce::ParameterID { "me", 1 }, "Meter", juce::StringArray { "IN", "GR", "OUT" }, 1);
+            juce::AudioProcessor::addParameter (meter);
+        }
+
+        void processBlock (juce::AudioBuffer<float>& buf, juce::MidiBuffer&) override
+        {
+            juce::ScopedNoDenormals noDenormals;
+            const int n = buf.getNumSamples(), nch = juce::jmin (2, buf.getNumChannels());
+            if (nch == 0)
+                return;
+
+            const float th = thresh->get(), hy = hyst->get();
+            const float closedGain = juce::Decibels::decibelsToGain (range->get(), -90.0f);
+            const int holdSamples = (int) (sr * 0.001 * hold->get());
+            const float atkC = std::exp (-1.0f / (float) (sr * 0.001 * attack->get()));
+            const float relC = std::exp (-1.0f / (float) (sr * 0.001 * release->get()));
+
+            if (lastLc != lowCut->get() || lastHc != highCut->get())
+            {
+                lastLc = lowCut->get();
+                lastHc = highCut->get();
+                hp.makeHighPass (sr, lastLc);
+                lp.makeLowPass (sr, juce::jmin (lastHc, (float) (sr * 0.45)));
+            }
+            const bool filtered = lastLc > 21.0f || lastHc < 19900.0f;
+
+            float peakIn = 0.0f, peakOut = 0.0f;
+            auto* d0 = buf.getWritePointer (0);
+            auto* d1 = nch > 1 ? buf.getWritePointer (1) : nullptr;
+
+            for (int i = 0; i < n; ++i)
+            {
+                const float l = d0[i], r = d1 ? d1[i] : l;
+                peakIn = juce::jmax (peakIn, juce::jmax (std::abs (l), std::abs (r)));
+
+                float dl = l, dr = r;
+                if (filtered)
+                {
+                    dl = lp.process (0, hp.process (0, l));
+                    dr = d1 ? lp.process (1, hp.process (1, r)) : dl;
+                }
+                const float lvlDb = 20.0f * std::log10 (juce::jmax (juce::jmax (std::abs (dl), std::abs (dr)), 1.0e-6f));
+
+                if (lvlDb > th)
+                {
+                    open = true;
+                    holdLeft = holdSamples;
+                }
+                else if (lvlDb < th - hy)
+                {
+                    if (holdLeft > 0)
+                        --holdLeft;
+                    else
+                        open = false;
+                }
+                else if (open)
+                    holdLeft = juce::jmax (holdLeft, 0);
+
+                const float target = open ? 1.0f : closedGain;
+                const float c = target > gain ? atkC : relC;
+                gain = target + c * (gain - target);
+
+                d0[i] = l * gain;
+                if (d1) d1[i] = r * gain;
+                peakOut = juce::jmax (peakOut, juce::jmax (std::abs (d0[i]), d1 ? std::abs (d1[i]) : 0.0f));
+            }
+
+            inLevel.store (peakIn);
+            outLevel.store (peakOut);
+            reduction.store (juce::Decibels::gainToDecibels (gain, -90.0f));
+            isOpen.store (open);
+        }
+
+        juce::AudioProcessorEditor* createEditor() override;
+
+        juce::AudioParameterFloat *thresh, *range, *attack, *hold, *release, *hyst, *lowCut, *highCut;
+        juce::AudioParameterChoice* meter;
+        std::atomic<float> inLevel { 0.0f }, outLevel { 0.0f }, reduction { 0.0f };
+        std::atomic<bool> isOpen { false };
+
+    protected:
+        void prepare() override
+        {
+            gain = 1.0f; open = false; holdLeft = 0; lastLc = lastHc = -1.0f;
+            hp.reset(); lp.reset();
+        }
+
+    private:
+        Biquad hp, lp;
+        float gain = 1.0f, lastLc = -1.0f, lastHc = -1.0f;
+        bool open = false;
+        int holdLeft = 0;
+    };
+
+    class GateEditor : public juce::AudioProcessorEditor, private juce::Timer
+    {
+    public:
+        explicit GateEditor (GatePlugin& p) : juce::AudioProcessorEditor (p), plug (p)
+        {
+            setSize (640, 470);
+            auto addKnob = [this] (juce::Slider& s, juce::Label& l, const juce::String& text)
+            {
+                s.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
+                s.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 84, 18);
+                s.setColour (juce::Slider::rotarySliderFillColourId, accent);
+                s.setColour (juce::Slider::rotarySliderOutlineColourId, juce::Colour (0xff3a4152));
+                s.setColour (juce::Slider::thumbColourId, accent);
+                s.setColour (juce::Slider::textBoxTextColourId, text_);
+                s.setColour (juce::Slider::textBoxOutlineColourId, juce::Colours::transparentBlack);
+                addAndMakeVisible (s);
+                l.setText (text, juce::dontSendNotification);
+                l.setJustificationType (juce::Justification::centred);
+                l.setColour (juce::Label::textColourId, muted);
+                l.setFont (juce::FontOptions (13.0f, juce::Font::bold));
+                addAndMakeVisible (l);
+            };
+            addKnob (thS, thL, "THRESHOLD");
+            addKnob (rgS, rgL, "RANGE");
+            addKnob (atS, atL, "ATTACK");
+            addKnob (hoS, hoL, "HOLD");
+            addKnob (reS, reL, "RELEASE");
+            addKnob (hyS, hyL, "HYSTERESIS");
+            addKnob (lcS, lcL, "LOW CUT");
+            addKnob (hcS, hcL, "HIGH CUT");
+
+            thA = std::make_unique<juce::SliderParameterAttachment> (*p.thresh, thS);
+            rgA = std::make_unique<juce::SliderParameterAttachment> (*p.range, rgS);
+            atA = std::make_unique<juce::SliderParameterAttachment> (*p.attack, atS);
+            hoA = std::make_unique<juce::SliderParameterAttachment> (*p.hold, hoS);
+            reA = std::make_unique<juce::SliderParameterAttachment> (*p.release, reS);
+            hyA = std::make_unique<juce::SliderParameterAttachment> (*p.hyst, hyS);
+            lcA = std::make_unique<juce::SliderParameterAttachment> (*p.lowCut, lcS);
+            hcA = std::make_unique<juce::SliderParameterAttachment> (*p.highCut, hcS);
+
+            auto ms = [] (double v) { return v >= 1000.0 ? juce::String (v / 1000.0, 2) + " s" : (v < 10.0 ? juce::String (v, 2) : juce::String (v, 0)) + " ms"; };
+            auto hz = [] (double v) { return v >= 1000.0 ? juce::String (v / 1000.0, 1) + " kHz" : juce::String ((int) v) + " Hz"; };
+            thS.textFromValueFunction = [] (double v) { return juce::String (v, 1) + " dB"; };
+            rgS.textFromValueFunction = [] (double v) { return v <= -79.5 ? juce::String ("-inf") : juce::String (v, 1) + " dB"; };
+            atS.textFromValueFunction = ms;
+            hoS.textFromValueFunction = ms;
+            reS.textFromValueFunction = ms;
+            hyS.textFromValueFunction = [] (double v) { return juce::String (v, 1) + " dB"; };
+            lcS.textFromValueFunction = hz;
+            hcS.textFromValueFunction = hz;
+            for (auto* s : { &thS, &rgS, &atS, &hoS, &reS, &hyS, &lcS, &hcS })
+                s->updateText();
+
+            for (auto* b : { &mIn, &mGr, &mOut })
+            {
+                b->setClickingTogglesState (false);
+                b->setColour (juce::TextButton::buttonColourId, bg2);
+                b->setColour (juce::TextButton::buttonOnColourId, accent);
+                b->setColour (juce::TextButton::textColourOffId, text_);
+                b->setColour (juce::TextButton::textColourOnId, juce::Colour (0xff15171c));
+                addAndMakeVisible (b);
+            }
+            mIn.setButtonText ("IN");
+            mGr.setButtonText ("GR");
+            mOut.setButtonText ("OUT");
+            mIn.onClick = [this] { setMeter (0); };
+            mGr.onClick = [this] { setMeter (1); };
+            mOut.onClick = [this] { setMeter (2); };
+
+            startTimerHz (60);
+            timerCallback();
+        }
+
+        void paint (juce::Graphics& g) override
+        {
+            g.fillAll (bg);
+            g.setColour (text_);
+            g.setFont (juce::FontOptions (16.0f, juce::Font::bold));
+            g.drawText ("GATE", 16, 8, 200, 26, juce::Justification::centredLeft);
+
+            // open / closed lamp
+            const bool o = plug.isOpen.load();
+            g.setColour (o ? juce::Colour (0xff4cd964) : juce::Colour (0xff3a4152));
+            g.fillEllipse (110.0f, 15.0f, 12.0f, 12.0f);
+            g.setColour (muted);
+            g.setFont (juce::FontOptions (12.0f));
+            g.drawText (o ? "OPEN" : "CLOSED", 128, 8, 70, 26, juce::Justification::centredLeft);
+
+            auto f = meterArea.toFloat();
+            g.setColour (juce::Colour (0xff0d0f13));
+            g.fillRoundedRectangle (f.expanded (4.0f), 8.0f);
+            juce::ColourGradient face (juce::Colour (0xfff4e8c4), f.getCentreX(), f.getBottom(), juce::Colour (0xffcdb784), f.getX(), f.getY(), true);
+            g.setGradientFill (face);
+            g.fillRoundedRectangle (f, 6.0f);
+
+            const int mode = plug.meter->getIndex();
+            const float cx = f.getCentreX(), cy = f.getBottom() + f.getHeight() * 0.55f, rad = f.getHeight() * 1.45f;
+            const float a0 = -0.62f, a1 = 0.62f;
+            auto ang = [&] (float t) { return a0 + (a1 - a0) * t; };
+            auto pt = [&] (float t, float r) { return juce::Point<float> (cx + std::sin (ang (t)) * r, cy - std::cos (ang (t)) * r); };
+
+            g.saveState();
+            g.reduceClipRegion (meterArea);
+            g.setFont (juce::FontOptions (12.0f, juce::Font::bold));
+            // GR: 0 dB on the right, -60 dB on the left; IN/OUT: -60 dB on the left, 0 dB on the right
+            const int ticks = 30;
+            for (int i = 0; i <= ticks; ++i)
+            {
+                const float t = (float) i / (float) ticks;
+                const bool major = i % 5 == 0;
+                g.setColour (juce::Colour (0xff2b2417));
+                g.drawLine (juce::Line<float> (pt (t, rad - (major ? 16.0f : 9.0f)), pt (t, rad - 2.0f)), major ? 2.0f : 1.0f);
+                if (major)
+                {
+                    const int val = mode == 1 ? 60 - i * 2 : -60 + i * 2;
+                    g.drawText (juce::String (val), juce::Rectangle<float> (30.0f, 14.0f).withCentre (pt (t, rad - 30.0f)), juce::Justification::centred);
+                }
+            }
+            g.setFont (juce::FontOptions (13.0f, juce::Font::bold));
+            g.drawText (mode == 1 ? "GAIN REDUCTION  dB" : (mode == 0 ? "INPUT  dB" : "OUTPUT  dB"),
+                        meterArea.withTrimmedTop (meterArea.getHeight() / 2).withTrimmedBottom (meterArea.getHeight() / 4 - 6), juce::Justification::centred);
+
+            const float t = juce::jlimit (0.0f, 1.0f, needle);
+            auto tip = pt (t, rad - 3.0f);
+            auto base = pt (t, rad - f.getHeight() * 1.05f);
+            g.setColour (juce::Colour (0x40000000));
+            g.drawLine (juce::Line<float> (base.translated (2, 2), tip.translated (2, 2)), 3.0f);
+            g.setColour (juce::Colour (0xffb0201a));
+            g.drawLine (juce::Line<float> (base, tip), 2.2f);
+            g.restoreState();
+
+            g.setColour (juce::Colour (0xff1a1d24));
+            g.fillRect (meterArea.getX(), meterArea.getBottom() - 10, meterArea.getWidth(), 10);
+
+            g.setColour (muted);
+            g.setFont (juce::FontOptions (12.0f));
+            const float shownDb = mode == 1 ? grShown : juce::Decibels::gainToDecibels (mode == 0 ? inShown : outShown, -90.0f);
+            g.drawText ((shownDb <= -89.0f ? juce::String ("-inf") : juce::String (shownDb, 1)) + " dB",
+                        juce::Rectangle<int> (meterArea.getX(), meterArea.getBottom() + 4, meterArea.getWidth(), 16), juce::Justification::centred);
+        }
+
+        void resized() override
+        {
+            auto r = getLocalBounds().reduced (16, 8);
+            auto top = r.removeFromTop (30);
+            mOut.setBounds (top.removeFromRight (44));
+            mGr.setBounds (top.removeFromRight (44));
+            mIn.setBounds (top.removeFromRight (44));
+            meterArea = juce::Rectangle<int> (getWidth() / 2 - 180, 46, 360, 130);
+            r.removeFromTop (172);
+
+            auto place = [] (juce::Rectangle<int> row, std::initializer_list<std::pair<juce::Slider*, juce::Label*>> items)
+            {
+                const int w = row.getWidth() / (int) items.size();
+                for (auto pr : items)
+                {
+                    auto c = row.removeFromLeft (w);
+                    pr.second->setBounds (c.removeFromTop (18));
+                    pr.first->setBounds (c);
+                }
+            };
+            place (r.removeFromTop (118), { { &thS, &thL }, { &rgS, &rgL }, { &atS, &atL }, { &hoS, &hoL } });
+            r.removeFromTop (8);
+            place (r.removeFromTop (118), { { &reS, &reL }, { &hyS, &hyL }, { &lcS, &lcL }, { &hcS, &hcL } });
+        }
+
+    private:
+        void setMeter (int i)
+        {
+            plug.meter->beginChangeGesture();
+            *plug.meter = i;
+            plug.meter->endChangeGesture();
+        }
+
+        void timerCallback() override
+        {
+            const int me = plug.meter->getIndex();
+            mIn.setToggleState (me == 0, juce::dontSendNotification);
+            mGr.setToggleState (me == 1, juce::dontSendNotification);
+            mOut.setToggleState (me == 2, juce::dontSendNotification);
+
+            auto follow = [] (float& shown, float now)
+            {
+                if (now > shown) shown = now;
+                else shown += (now - shown) * 0.25f;
+            };
+            follow (inShown, plug.inLevel.load());
+            follow (outShown, plug.outLevel.load());
+            grShown += (plug.reduction.load() - grShown) * 0.6f;
+            const float target = me == 1 ? juce::jlimit (0.0f, 1.0f, 1.0f + grShown / 60.0f)
+                                         : juce::jlimit (0.0f, 1.0f, (juce::Decibels::gainToDecibels (me == 0 ? inShown : outShown, -60.0f) + 60.0f) / 60.0f);
+            needle += (target - needle) * (me == 1 ? 0.7f : 0.35f);
+            repaint (getLocalBounds().withHeight (meterArea.getBottom() + 30));
+        }
+
+        GatePlugin& plug;
+        juce::Slider thS, rgS, atS, hoS, reS, hyS, lcS, hcS;
+        juce::Label thL, rgL, atL, hoL, reL, hyL, lcL, hcL;
+        std::unique_ptr<juce::SliderParameterAttachment> thA, rgA, atA, hoA, reA, hyA, lcA, hcA;
+        juce::TextButton mIn, mGr, mOut;
+        juce::Rectangle<int> meterArea;
+        float inShown = 0.0f, outShown = 0.0f, grShown = 0.0f, needle = 1.0f;
+        juce::Colour bg { 0xff15171c }, bg2 { 0xff262b36 }, accent { 0xffff9a2e }, text_ { 0xffe8eaf0 }, muted { 0xff8b93a7 };
+    };
+
+    juce::AudioProcessorEditor* GatePlugin::createEditor() { return new GateEditor (*this); }
+
     std::unique_ptr<juce::AudioPluginInstance> makeBuiltin (const juce::String& id)
     {
         if (id == "TC:eq")
             return std::make_unique<EqPlugin>();
         if (id == "TC:comp")
             return std::make_unique<CompPlugin>();
+        if (id == "TC:gate")
+            return std::make_unique<GatePlugin>();
         return nullptr;
     }
 
-    const char* const allIds[] = { "TC:eq", "TC:comp" };
+    const char* const allIds[] = { "TC:eq", "TC:comp", "TC:gate" };
 }
 
 std::vector<juce::PluginDescription> BuiltinFormat::allDescriptions()

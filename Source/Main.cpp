@@ -38,7 +38,6 @@ public:
             setContentOwned (new MainComponent(), true);
             setResizable (true, true);
             setResizeLimits (760, 420, 4000, 3000);
-            setAlwaysOnTop (true);
 
             const auto stateFile = getStateFile();
             if (stateFile.existsAsFile())

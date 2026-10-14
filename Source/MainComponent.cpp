@@ -35,7 +35,6 @@ PluginWindow::PluginWindow (juce::AudioPluginInstance& pluginToShow, std::functi
 
     setContentOwned (editor, true);
     setResizable (editor->isResizable(), false);
-    setAlwaysOnTop (true);
     centreWithSize (getWidth(), getHeight());
     setVisible (true);
 }
@@ -1116,7 +1115,6 @@ void MainComponent::showMainMenu()
     menu.addItem (3, "Плагины: сканировать VST3..."_ru);
     menu.addSeparator();
     menu.addItem (4, "Добавить дорожку"_ru);
-    menu.addItem (5, "Поверх всех окон"_ru, true, pinned);
     menu.addItem (7, "Привязка клипов к сетке"_ru, true, timelineView.snap);
     menu.addItem (6, "Сохранить всё"_ru);
 
@@ -1132,7 +1130,6 @@ void MainComponent::showMainMenu()
                                 case 2: safe->showPluginChooser(); break;
                                 case 3: safe->showPluginScanner(); break;
                                 case 4: safe->addTrack(); break;
-                                case 5: safe->setPinned (! safe->pinned); break;
                                 case 6: safe->saveEverything (true); break;
                                 case 7: safe->timelineView.snap = ! safe->timelineView.snap; break;
                                 default: break;

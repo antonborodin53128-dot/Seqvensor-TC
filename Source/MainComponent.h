@@ -159,7 +159,7 @@ private:
     std::unique_ptr<juce::FileChooser> chooser;
     std::unique_ptr<juce::PropertiesFile> pluginScanProps;
     juce::Array<juce::int64> tapTimes;
-    bool pinned = true;
+    bool pinned = false;
     int autosaveCounter = 0;
     int slowCounter = 0;
     double lastScroll = -1.0e18, lastSpan = 0.0, lastBpm = 0.0;
