@@ -280,6 +280,31 @@ private:
     double faderDb = 0.0;
 };
 
+// Small pan knob: dark round body, orange pointer, thin ring.
+class PanKnobLook : public juce::LookAndFeel_V4
+{
+public:
+    void drawRotarySlider (juce::Graphics& g, int x, int y, int w, int h, float pos, float a0, float a1, juce::Slider&) override
+    {
+        auto r = juce::Rectangle<float> ((float) x, (float) y, (float) w, (float) h).reduced (2.0f);
+        const float d = juce::jmin (r.getWidth(), r.getHeight());
+        r = juce::Rectangle<float> (d, d).withCentre (r.getCentre());
+        const float ang = a0 + pos * (a1 - a0);
+
+        juce::ColourGradient grad (juce::Colour (0xff34383c), r.getX(), r.getY(), juce::Colour (0xff15181a), r.getX(), r.getBottom(), false);
+        g.setGradientFill (grad);
+        g.fillEllipse (r);
+        g.setColour (juce::Colour (0xff0b0d0e));
+        g.drawEllipse (r, 1.5f);
+
+        const auto c = r.getCentre();
+        const float rad = d * 0.5f;
+        g.setColour (Pal::accent);
+        g.drawLine (c.x + std::sin (ang) * rad * 0.40f, c.y - std::cos (ang) * rad * 0.40f,
+                    c.x + std::sin (ang) * rad * 0.88f, c.y - std::cos (ang) * rad * 0.88f, 2.5f);
+    }
+};
+
 // Plugin slot: click opens the plugin, press and drag moves it (Ctrl while dropping = copy).
 class SlotButton : public juce::TextButton, public juce::DragAndDropTarget
 {
@@ -293,7 +318,8 @@ public:
     void mouseDown (const juce::MouseEvent& e) override
     {
         justDragged = false;
-        if (e.mods.isPopupMenu())
+        rightPressed = e.mods.isPopupMenu();
+        if (rightPressed)
         {
             if (onRightClick)
                 onRightClick();
@@ -301,8 +327,19 @@ public:
         }
         juce::TextButton::mouseDown (e);
     }
+    void mouseUp (const juce::MouseEvent& e) override
+    {
+        if (rightPressed)
+        {
+            rightPressed = false;   // right button = bypass only, never a click
+            return;
+        }
+        juce::TextButton::mouseUp (e);
+    }
     void mouseDrag (const juce::MouseEvent& e) override
     {
+        if (rightPressed)
+            return;
         juce::TextButton::mouseDrag (e);
         if (justDragged || e.getDistanceFromDragStart() < 8 || ! dragPayload)
             return;
@@ -336,7 +373,7 @@ public:
     }
 
 private:
-    bool justDragged = false, dropHover = false;
+    bool justDragged = false, dropHover = false, rightPressed = false;
 };
 
 // One timeline row: channel controls on the left, the audio lane on the right.
@@ -390,6 +427,7 @@ private:
 
     StateButton muteButton { "MUTE", StateButton::Style::Text };
     StateButton soloButton { "SOLO", StateButton::Style::Text };
+    PanKnobLook panLook;
     juce::Slider panSlider;
     StateButton recButton { "REC", StateButton::Style::Dot };
     juce::ToggleButton compButton { "Комп."_ru };

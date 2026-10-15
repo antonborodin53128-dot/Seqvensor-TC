@@ -394,7 +394,7 @@ MainComponent::MainComponent()
         else if (tab == PlayerBar::Tab::Playlist)
             askText ("Новый плейлист"_ru, "Название:"_ru, "Плейлист"_ru, [this] (juce::String n) { createPlaylist (n); });
         else
-            showAddTrackMenu();
+            askText ("Новый трек"_ru, "Название:"_ru, "Трек"_ru, [this] (juce::String n) { createSequence (n, true); });
     };
     playerBar.cb.remove = [this] (PlayerBar::Tab tab)
     {

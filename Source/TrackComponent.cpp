@@ -80,6 +80,7 @@ TrackComponent::TrackComponent (Engine& engineToUse, std::shared_ptr<Track> trac
     soloButton.onClick = [this] { track->soloed = soloButton.getToggleState(); };
     addAndMakeVisible (soloButton);
 
+    panSlider.setLookAndFeel (&panLook);
     panSlider.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
     panSlider.setRotaryParameters (juce::MathConstants<float>::pi * 1.25f, juce::MathConstants<float>::pi * 2.75f, true);
     panSlider.setColour (juce::Slider::rotarySliderFillColourId, Pal::accent);
