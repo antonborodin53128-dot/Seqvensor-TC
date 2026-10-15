@@ -175,7 +175,7 @@ private:
 class GripHandle : public juce::Component, public juce::SettableTooltipClient
 {
 public:
-    std::function<void (int screenY, bool finished)> onDrag;
+    std::function<void()> onStart;   // the press turned into a drag
 
     GripHandle() { setMouseCursor (juce::MouseCursor::DraggingHandCursor); }
 
@@ -189,11 +189,18 @@ public:
     }
     void mouseEnter (const juce::MouseEvent&) override { hot = true; repaint(); }
     void mouseExit (const juce::MouseEvent&) override { hot = false; repaint(); }
-    void mouseDrag (const juce::MouseEvent& e) override { if (onDrag) onDrag (e.getScreenY(), false); }
-    void mouseUp (const juce::MouseEvent& e) override { if (onDrag && e.mouseWasDraggedSinceMouseDown()) onDrag (e.getScreenY(), true); }
+    void mouseDown (const juce::MouseEvent&) override { started = false; }
+    void mouseDrag (const juce::MouseEvent& e) override
+    {
+        if (! started && e.getDistanceFromDragStart() > 5 && onStart)
+        {
+            started = true;
+            onStart();
+        }
+    }
 
 private:
-    bool hot = false;
+    bool hot = false, started = false;
 };
 
 // Vertical stereo level meter.
@@ -324,7 +331,6 @@ public:
         std::function<void (std::shared_ptr<Track>, int, juce::Component*)> slotMenu;    // arrow of a slot
         std::function<void (std::shared_ptr<Track>, int, const juce::String&, bool)> slotDropped;   // plugin dropped on a slot (payload, copy)
         std::function<void (std::shared_ptr<Track>, juce::Component*)> outputMenu;
-        std::function<void (std::shared_ptr<Track>, int screenY, bool finished)> dragTrack;   // grip dragged
     };
 
     static constexpr int headerWidth = 480;
@@ -339,6 +345,7 @@ public:
     void refreshAll();   // button captions from the track state
     void updateLive();   // meters (timer)
     void repaintLane() { lane.repaint(); }
+    void endDragVisual() { if (getAlpha() < 1.0f) setAlpha (1.0f); }
     LaneComponent& getLane() { return lane; }
 
     std::shared_ptr<Track> getTrack() const { return track; }
@@ -373,4 +380,18 @@ private:
     LaneComponent lane;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (TrackComponent)
+};
+
+// The list of track strips: shows where a dragged strip would land and accepts the drop.
+class TrackListArea : public juce::Component, public juce::DragAndDropTarget
+{
+public:
+    std::function<void (const juce::String&, juce::Point<int>)> onMove, onDrop;
+    std::function<void()> onLeave;
+
+    bool isInterestedInDragSource (const SourceDetails& d) override { return d.description.toString().startsWith ("tctrack:"); }
+    void itemDragEnter (const SourceDetails& d) override { if (onMove) onMove (d.description.toString(), d.localPosition); }
+    void itemDragMove (const SourceDetails& d) override { if (onMove) onMove (d.description.toString(), d.localPosition); }
+    void itemDragExit (const SourceDetails&) override { if (onLeave) onLeave(); }
+    void itemDropped (const SourceDetails& d) override { if (onDrop) onDrop (d.description.toString(), d.localPosition); }
 };

@@ -6,7 +6,16 @@ TrackComponent::TrackComponent (Engine& engineToUse, std::shared_ptr<Track> trac
       lane (engineToUse, track, view, std::move (laneCallbacks))
 {
     grip.setTooltip ("Зажмите и перетащите, чтобы поменять дорожку местами"_ru);
-    grip.onDrag = [this] (int y, bool finished) { if (cb.dragTrack) cb.dragTrack (track, y, finished); };
+    grip.onStart = [this]
+    {
+        // like dragging a plugin: a picture of the strip follows the mouse, the original stays dimmed in its place
+        if (auto* container = juce::DragAndDropContainer::findParentDragContainerFor (this))
+        {
+            auto image = createComponentSnapshot (juce::Rectangle<int> (0, 0, headerWidth - 4, getHeight()), true);
+            setAlpha (0.35f);
+            container->startDragging ("tctrack:" + juce::String (track->id), this, juce::ScaledImage (image), true);
+        }
+    };
     addAndMakeVisible (grip);
 
     nameLabel.setText (track->name, juce::dontSendNotification);

@@ -117,7 +117,9 @@ private:
     void setPinned (bool pinned);
 
     void rebuildTracks();
-    void dragTrackRow (std::shared_ptr<Track> t, int screenY, bool finished);
+    int trackRowForDrag (const juce::String& description, juce::Point<int> pos, int& from) const;
+    void trackDragMove (const juce::String& description, juce::Point<int> pos);
+    void trackDropped (const juce::String& description, juce::Point<int> pos);
     void onPlayerRowMoved (PlayerBar::Tab tab, int from, int to);
     void refreshStrips();
     void layoutTracks();
@@ -160,7 +162,7 @@ private:
 
     // tracks
     juce::Viewport viewport;
-    juce::Component trackList;
+    TrackListArea trackList;
     struct DropLine : public juce::Component
     {
         DropLine() { setInterceptsMouseClicks (false, false); }

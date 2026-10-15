@@ -264,6 +264,9 @@ MainComponent::MainComponent()
     addTrackButton.setColour (juce::TextButton::buttonColourId, Pal::surfaceLo);
     trackList.addAndMakeVisible (addTrackButton);
     trackList.addChildComponent (trackDropLine);
+    trackList.onMove = [this] (const juce::String& d, juce::Point<int> p) { trackDragMove (d, p); };
+    trackList.onDrop = [this] (const juce::String& d, juce::Point<int> p) { trackDropped (d, p); };
+    trackList.onLeave = [this] { trackDropLine.setVisible (false); };
 
     viewport.setViewedComponent (&trackList, false);
     viewport.setScrollBarsShown (true, false);
@@ -477,7 +480,6 @@ void MainComponent::rebuildTracks()
                 safe->engine.removeTrack (t);
         });
     };
-    cb.dragTrack = [this] (std::shared_ptr<Track> t, int screenY, bool finished) { dragTrackRow (t, screenY, finished); };
     cb.inputMenu = [this] (std::shared_ptr<Track> t, juce::Component* c) { showInputMenu (t, c); };
     cb.slotClick = [this] (std::shared_ptr<Track> t, int i, juce::Component* c)
     {
@@ -514,39 +516,50 @@ void MainComponent::rebuildTracks()
     timelineDirty = true;
 }
 
-void MainComponent::dragTrackRow (std::shared_ptr<Track> t, int screenY, bool finished)
+int MainComponent::trackRowForDrag (const juce::String& description, juce::Point<int> pos, int& from) const
 {
+    const int id = description.fromFirstOccurrenceOf ("tctrack:", false, false).getIntValue();
     const auto tracksNow = engine.getTracks();
     const int n = (int) tracksNow.size();
-    int from = 0;
+    from = -1;
     for (int i = 0; i < n; ++i)
-        if (tracksNow[(size_t) i] == t)
+        if (tracksNow[(size_t) i]->id == id)
             from = i;
+    return juce::jlimit (0, juce::jmax (0, n - 1), pos.y / TrackComponent::rowHeight);
+}
 
-    const auto local = trackList.getLocalPoint (nullptr, juce::Point<int> (0, screenY));
-    const int to = juce::jlimit (0, juce::jmax (0, n - 1), local.y / TrackComponent::rowHeight);
-
-    if (finished)
-    {
-        trackDropLine.setVisible (false);
-        if (to != from)
-        {
-            juce::Component::SafePointer<MainComponent> safe (this);
-            juce::MessageManager::callAsync ([safe, t, to]
-            {
-                if (safe != nullptr)
-                    safe->engine.moveTrack (t, to);
-            });
-        }
+void MainComponent::trackDragMove (const juce::String& description, juce::Point<int> pos)
+{
+    int from = -1;
+    const int to = trackRowForDrag (description, pos, from);
+    if (from < 0)
         return;
-    }
 
-    const auto inViewport = viewport.getLocalPoint (nullptr, juce::Point<int> (0, screenY));
-    viewport.autoScroll (viewport.getWidth() / 2, inViewport.y, 40, 14);
+    const auto inViewport = viewport.getLocalPoint (&trackList, pos);
+    viewport.autoScroll (viewport.getWidth() / 2, inViewport.y, 50, 16);
 
     trackDropLine.setBounds (0, (to + (to > from ? 1 : 0)) * TrackComponent::rowHeight - 2, trackList.getWidth(), 4);
-    trackDropLine.setVisible (true);
+    trackDropLine.setVisible (to != from);
     trackDropLine.toFront (false);
+}
+
+void MainComponent::trackDropped (const juce::String& description, juce::Point<int> pos)
+{
+    int from = -1;
+    const int to = trackRowForDrag (description, pos, from);
+    trackDropLine.setVisible (false);
+    if (from < 0 || from == to)
+        return;
+    const int id = description.fromFirstOccurrenceOf ("tctrack:", false, false).getIntValue();
+    auto t = engine.findTrack (id);
+    if (t == nullptr)
+        return;
+    juce::Component::SafePointer<MainComponent> safe (this);
+    juce::MessageManager::callAsync ([safe, t, to]
+    {
+        if (safe != nullptr)
+            safe->engine.moveTrack (t, to);
+    });
 }
 
 void MainComponent::refreshStrips()
@@ -1489,6 +1502,13 @@ void MainComponent::changeListenerCallback (juce::ChangeBroadcaster* source)
 // is extrapolated with the wall clock and gently pulled towards the real one: smooth, never jumps back.
 void MainComponent::updateTimeline()
 {
+    if (! isDragAndDropActive())
+    {
+        // a strip drag ended (dropped or cancelled): bring the strips back to normal
+        for (auto* t : trackComponents)
+            t->endDragVisual();
+        trackDropLine.setVisible (false);
+    }
     {
         const bool rec = engine.isRecording();
         if (rec)
