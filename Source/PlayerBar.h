@@ -65,7 +65,7 @@ private:
     };
     void rowDrag (const juce::MouseEvent&);
     void rowUp (const juce::MouseEvent&);
-    int rowAt (const juce::MouseEvent&) const;
+    int rowAt (const juce::MouseEvent&);
     RowWatcher watcher { *this };
     int pendingRow = -1, dragFrom = -1, dragTo = -1;
 

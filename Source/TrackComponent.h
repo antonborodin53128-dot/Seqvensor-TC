@@ -158,7 +158,7 @@ private:
 };
 
 // Grip at the left of the track name: press and drag to move the whole track up / down.
-class GripHandle : public juce::Component
+class GripHandle : public juce::Component, public juce::SettableTooltipClient
 {
 public:
     std::function<void (int screenY, bool finished)> onDrag;

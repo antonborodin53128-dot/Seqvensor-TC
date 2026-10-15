@@ -242,7 +242,7 @@ void PlayerBar::listBoxItemClicked (int row, const juce::MouseEvent&)
     dragFrom = dragTo = -1;
 }
 
-int PlayerBar::rowAt (const juce::MouseEvent& e) const
+int PlayerBar::rowAt (const juce::MouseEvent& e)
 {
     const auto pos = e.getEventRelativeTo (&list).getPosition();
     return list.getRowContainingPosition (pos.x, juce::jlimit (0, list.getHeight() - 1, pos.y));
