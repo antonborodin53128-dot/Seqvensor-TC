@@ -78,6 +78,7 @@ public:
     bool startRecording (juce::String& message);
     void stopRecording();
     bool isRecording() const { return recording.load(); }
+    double getRecordedSeconds() const { return recording.load() ? (juce::Time::getMillisecondCounterHiRes() - recordStartMs.load()) * 0.001 : 0.0; }
     void moveTrack (const std::shared_ptr<Track>& track, int newIndex);   // the others shift
     std::vector<std::shared_ptr<Track>> getTracks() const;
     std::shared_ptr<Track> findTrack (int id) const;
@@ -232,6 +233,7 @@ private:
 
     double currentSampleRate = 48000.0;
     std::atomic<bool> recording { false };
+    std::atomic<double> recordStartMs { 0.0 };
     juce::TimeSliceThread recordThread { "TC record" };
     int currentBlockSize = 512;
     bool running = false;

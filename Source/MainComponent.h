@@ -154,6 +154,7 @@ private:
     IconButton playAllButton { IconButton::Icon::Play }, pauseAllButton { IconButton::Icon::Pause },
               stopAllButton { IconButton::Icon::Stop };
     IconButton recordButton { IconButton::Icon::Record };
+    juce::Label recTimeLabel;
 
     // tracks
     juce::Viewport viewport;

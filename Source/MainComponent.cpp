@@ -208,6 +208,11 @@ MainComponent::MainComponent()
                              "Папка - в главном меню."_ru);
     recordButton.onClick = [this] { toggleRecording(); };
     addAndMakeVisible (recordButton);
+    recTimeLabel.setJustificationType (juce::Justification::centredLeft);
+    recTimeLabel.setFont (juce::FontOptions (16.0f, juce::Font::bold));
+    recTimeLabel.setColour (juce::Label::textColourId, Pal::red);
+    recTimeLabel.setInterceptsMouseClicks (false, false);
+    addAndMakeVisible (recTimeLabel);
 
     keyLabel.setButtonText ("Тон: -"_ru);
     keyLabel.setColour (juce::TextButton::buttonColourId, juce::Colours::transparentBlack);
@@ -368,7 +373,7 @@ void MainComponent::resized()
     cpuLabel.setBounds (rowA.removeFromRight (110));
 
     // tempo, key, gear and the big transport buttons, centred in the whole window
-    const int groupW = 170 + 8 + 56 + 8 + 44 + 20 + 34 + 2 + 124 + 2 + 34 + 8 + 44 + 30 + 72 + 6 + 64 + 6 + 64;
+    const int groupW = 170 + 8 + 56 + 8 + 44 + 4 + 62 + 12 + 34 + 2 + 124 + 2 + 34 + 8 + 44 + 30 + 72 + 6 + 64 + 6 + 64;
     auto group = juce::Rectangle<int> (groupW, rowA.getHeight()).withCentre ({ getWidth() / 2, rowA.getCentreY() });
     const auto groupBox = group;
     bpmSlider.setBounds (group.removeFromLeft (170));
@@ -376,6 +381,8 @@ void MainComponent::resized()
     tapButton.setBounds (group.removeFromLeft (56));
     group.removeFromLeft (8);
     recordButton.setBounds (group.removeFromLeft (44));
+    group.removeFromLeft (4);
+    recTimeLabel.setBounds (group.removeFromLeft (62));
     group.removeFromLeft (20);
     keyDown.setBounds (group.removeFromLeft (34));
     group.removeFromLeft (2);
@@ -1478,6 +1485,22 @@ void MainComponent::changeListenerCallback (juce::ChangeBroadcaster* source)
 // is extrapolated with the wall clock and gently pulled towards the real one: smooth, never jumps back.
 void MainComponent::updateTimeline()
 {
+    {
+        const bool rec = engine.isRecording();
+        if (rec)
+        {
+            const double t = engine.getRecordedSeconds();
+            recordButton.setSpin ((float) std::fmod (t * 5.0, 6.2831853));
+            const int s = (int) t;
+            recTimeLabel.setText (juce::String::formatted ("%02d:%02d", s / 60, s % 60), juce::dontSendNotification);
+        }
+        else if (recTimeLabel.getText().isNotEmpty())
+        {
+            recTimeLabel.setText ({}, juce::dontSendNotification);
+            recordButton.setActive (false);
+        }
+    }
+
     const double now = juce::Time::getMillisecondCounterHiRes() * 0.001;
     const double engineClock = engine.getClockSeconds();
     if (engineClock != engineClockSeen)
@@ -2493,7 +2516,10 @@ void MainComponent::toggleRecording()
     juce::String message;
     const bool ok = engine.startRecording (message);
     recordButton.setActive (ok);
-    say (ok ? message : message);
+    if (ok)
+        say (message);
+    else
+        juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, "Запись"_ru, message);
 }
 
 void MainComponent::chooseRecordFolder()

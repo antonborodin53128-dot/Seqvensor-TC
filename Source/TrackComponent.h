@@ -62,6 +62,7 @@ public:
 
     void setIcon (Icon i) { icon = i; repaint(); }
     void setActive (bool a) { if (a != active) { active = a; repaint(); } }
+    void setSpin (float angle) { spin = angle; repaint(); }   // Record icon: rotating ring while recording
 
     void paintButton (juce::Graphics& g, bool over, bool down) override
     {
@@ -121,6 +122,14 @@ public:
             case Icon::Record:
                 g.setColour (active ? juce::Colours::white : Pal::red);
                 g.fillEllipse (c.x - s * 1.1f, c.y - s * 1.1f, s * 2.2f, s * 2.2f);
+                if (active)
+                {
+                    juce::Path ring;
+                    const float rr = s * 1.9f;
+                    ring.addCentredArc (c.x, c.y, rr, rr, 0.0f, spin, spin + 1.9f, true);
+                    ring.addCentredArc (c.x, c.y, rr, rr, 0.0f, spin + juce::MathConstants<float>::pi, spin + juce::MathConstants<float>::pi + 1.9f, true);
+                    g.strokePath (ring, juce::PathStrokeType (2.5f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+                }
                 break;
             case Icon::Plus:
                 g.fillRoundedRectangle (juce::Rectangle<float> (s * 2.2f, 2.2f).withCentre (c), 1.0f);
@@ -159,6 +168,7 @@ public:
 private:
     Icon icon;
     bool active = false;
+    float spin = 0.0f;
 };
 
 // Grip at the left of the track name: press and drag to move the whole track up / down.

@@ -1404,11 +1404,18 @@ bool Engine::startRecording (juce::String& message)
     }
 
     recordThread.startThread();
-    int started = 0;
+    int started = 0, armed = 0;
+    juce::StringArray noInput;
     for (auto& t : getTracks())
     {
-        if (! t->recArmed.load() || (t->inputL.load() < 0 && t->busId.load() < 0))
+        if (! t->recArmed.load())
             continue;
+        ++armed;
+        if (t->inputL.load() < 0 && t->busId.load() < 0)
+        {
+            noInput.add (t->name);
+            continue;
+        }
 
         auto base = t->name.removeCharacters ("\\/:*?\"<>|").trim();
         if (base.isEmpty())
@@ -1424,10 +1431,12 @@ bool Engine::startRecording (juce::String& message)
     if (started == 0)
     {
         recordThread.stopThread (2000);
-        message = "Нет дорожек для записи: включите REC на дорожке и выберите вход";
+        message = armed == 0 ? "Ни на одной дорожке не включена кнопка REC.\nВключите REC (красный кружок) на нужных дорожках и нажмите запись ещё раз."
+                             : "У дорожек с включённым REC не выбран вход (кнопка \"Вход\" на дорожке):\n" + noInput.joinIntoString ("\n");
         return false;
     }
     recording.store (true);
+    recordStartMs.store (juce::Time::getMillisecondCounterHiRes());
     message = "Запись: дорожек " + juce::String (started);
     return true;
 }
