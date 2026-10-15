@@ -1859,28 +1859,25 @@ void MainComponent::deleteSelectedRows (PlayerBar::Tab tab)
         auto seq = engine.getActiveSequence();
         const juce::String cur = seq != nullptr ? seq->name : juce::String();
 
+        // the files go FIRST: refreshPlayerBar() (called when the open song changes) adds every song that
+        // still exists but is in no playlist back to the playlist, which made deleted tracks "come back"
         for (auto& d : doomed)
         {
             library.removeFromPlaylists (d);
             playlist.items.removeString (d);
+            const auto file = library.sequenceFile (d);
+            engine.discardSequences (file);   // also when it is the open one: nothing is saved back
+            file.deleteFile();
         }
 
         auto others = library.sequenceNames();
-        for (auto& d : doomed)
-            others.removeString (d);
 
-        if (doomed.contains (cur))
+        if (doomed.contains (cur) || engine.getActiveSequence() == nullptr)
         {
-            // the open song goes away: open a neighbour (or an empty one if nothing is left)
+            // the open song went away: open a neighbour (or an empty one if nothing is left)
             juce::String next = ! playlist.items.isEmpty() && others.contains (playlist.items[0]) ? playlist.items[0]
                                 : others.isEmpty() ? juce::String ("Трек 1"_ru) : others[0];
             switchToSequence (next, playlist.items.indexOf (next));
-        }
-        for (auto& d : doomed)
-        {
-            const auto file = library.sequenceFile (d);
-            engine.forgetSequence (file);
-            file.deleteFile();
         }
         if (others.isEmpty())
             engine.saveActiveSequence();   // creates the empty replacement
@@ -2054,7 +2051,6 @@ void MainComponent::loadPlaylistByName (juce::String name)
         refreshPlayerBar();
         library.saveSession (seq != nullptr ? seq->name : juce::String(), p.name);
     }
-    playerBar.showTab (PlayerBar::Tab::Tracks, true);
 }
 
 void MainComponent::createPlaylist (const juce::String& wanted)
