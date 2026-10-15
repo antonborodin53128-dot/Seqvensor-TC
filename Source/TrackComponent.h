@@ -287,7 +287,7 @@ public:
         std::function<void (std::shared_ptr<Track>, juce::Component*)> outputMenu;
     };
 
-    static constexpr int headerWidth = 440;
+    static constexpr int headerWidth = 480;
     static constexpr int rowHeight = 132;
 
     TrackComponent (Engine& engineToUse, std::shared_ptr<Track> trackToUse, TimelineView& view,
@@ -320,6 +320,8 @@ private:
     bool slotUsed[Track::numSlots] {};
 
     StateButton muteButton { "MUTE", StateButton::Style::Text };
+    StateButton soloButton { "SOLO", StateButton::Style::Text };
+    juce::Slider panSlider;
     StateButton recButton { "REC", StateButton::Style::Dot };
     juce::ToggleButton compButton { "Комп."_ru };
 

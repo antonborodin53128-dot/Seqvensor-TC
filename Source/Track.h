@@ -51,6 +51,9 @@ public:
     std::atomic<int> outputPair { 0 };   // 0 = outputs 1-2, 1 = outputs 3-4 ..., -1 = no output
     std::atomic<float> gainLinear { 1.0f };
     std::atomic<bool> muted { false };
+    std::atomic<bool> soloed { false };
+    std::atomic<bool> othersSoloed { false };   // set by the engine every chunk: some other track is in solo
+    std::atomic<float> pan { 0.0f };            // -1 = left ... +1 = right
     std::atomic<bool> recArmed { false };
     std::atomic<bool> compensate { false };
     std::atomic<bool> metronomeOn { false };
@@ -127,6 +130,7 @@ private:
     juce::MidiBuffer midi;
     juce::AudioBuffer<float> delayBuf;
     int delayWritePos = 0;
+    float lastPanL = 1.0f, lastPanR = 1.0f;
     std::atomic<int> extraDelay { 0 };
     std::atomic<int> cachedLatency { 0 };
 

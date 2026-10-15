@@ -60,6 +60,27 @@ TrackComponent::TrackComponent (Engine& engineToUse, std::shared_ptr<Track> trac
     muteButton.onClick = [this] { track->muted = muteButton.getToggleState(); };
     addAndMakeVisible (muteButton);
 
+    soloButton.setColours (Pal::yellow.darker (0.45f), Pal::surface, juce::Colour (0xffffe9a8), Pal::hairline, Pal::textDim);
+    soloButton.setToggleState (track->soloed.load(), juce::dontSendNotification);
+    soloButton.setTooltip ("Соло: слышны только дорожки с включённым соло"_ru);
+    soloButton.onClick = [this] { track->soloed = soloButton.getToggleState(); };
+    addAndMakeVisible (soloButton);
+
+    panSlider.setSliderStyle (juce::Slider::LinearHorizontal);
+    panSlider.setTextBoxStyle (juce::Slider::NoTextBox, true, 0, 0);
+    panSlider.setRange (-1.0, 1.0, 0.01);
+    panSlider.setDoubleClickReturnValue (true, 0.0);
+    panSlider.setValue (track->pan.load(), juce::dontSendNotification);
+    auto panTip = [this]
+    {
+        const int v = (int) std::round (panSlider.getValue() * 100.0);
+        panSlider.setTooltip ("Панорама: "_ru + (v == 0 ? juce::String ("центр"_ru) : (v < 0 ? "L" : "R") + juce::String (std::abs (v)))
+                              + " (двойной клик - в центр)"_ru);
+    };
+    panTip();
+    panSlider.onValueChange = [this, panTip] { track->pan = (float) panSlider.getValue(); panTip(); };
+    addAndMakeVisible (panSlider);
+
     recButton.setToggleState (track->recArmed.load(), juce::dontSendNotification);
     recButton.setTooltip ("Готовность к записи дорожки"_ru);
     recButton.onClick = [this] { track->recArmed = recButton.getToggleState(); };
@@ -195,13 +216,17 @@ void TrackComponent::resized()
     }
 
     // column C: mute, rec, compensation
-    auto colC = h.removeFromLeft (60);
+    auto colC = h.removeFromLeft (100);
     h.removeFromLeft (8);
-    muteButton.setBounds (colC.removeFromTop (30));
+    auto msRow = colC.removeFromTop (28);
+    muteButton.setBounds (msRow.removeFromLeft (48));
+    soloButton.setBounds (msRow.removeFromRight (48));
     colC.removeFromTop (4);
-    recButton.setBounds (colC.removeFromTop (30));
+    recButton.setBounds (colC.removeFromTop (26));
     colC.removeFromTop (4);
     compButton.setBounds (colC.removeFromTop (22));
+    colC.removeFromTop (4);
+    panSlider.setBounds (colC.removeFromTop (22));
 
     // column D: numeric peak, fader and meter
     readout.setBounds (h.removeFromTop (20));

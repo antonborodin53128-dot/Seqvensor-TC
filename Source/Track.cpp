@@ -482,15 +482,25 @@ void Track::processChunk (const float* const* inputs, int numInputs,
 
     // fader; the signal for other tracks (bus) is taken after the fader, before mute
     const float g = gainLinear.load();
+    const float p = juce::jlimit (-1.0f, 1.0f, pan.load());
+    const float targetL = p > 0.0f ? std::cos (p * juce::MathConstants<float>::halfPi) : 1.0f;
+    const float targetR = p < 0.0f ? std::cos (-p * juce::MathConstants<float>::halfPi) : 1.0f;
+    const float stepL = (targetL - lastPanL) / (float) juce::jmax (1, n);
+    const float stepR = (targetR - lastPanR) / (float) juce::jmax (1, n);
+    float pL = lastPanL, pR = lastPanR;
     for (int i = 0; i < n; ++i)
     {
-        l[i] *= g;
-        r[i] *= g;
+        pL += stepL;
+        pR += stepR;
+        l[i] *= g * pL;
+        r[i] *= g * pR;
     }
+    lastPanL = targetL;
+    lastPanR = targetR;
     juce::FloatVectorOperations::copy (busOut.getWritePointer (0), l, n);
     juce::FloatVectorOperations::copy (busOut.getWritePointer (1), r, n);
 
-    if (muted.load())
+    if (muted.load() || (othersSoloed.load() && ! soloed.load()))
     {
         juce::FloatVectorOperations::clear (l, n);
         juce::FloatVectorOperations::clear (r, n);

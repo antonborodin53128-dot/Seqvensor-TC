@@ -542,6 +542,12 @@ void Engine::audioDeviceIOCallbackWithContext (const float* const* inputChannelD
             }
         }
 
+        bool anySolo = false;
+        for (auto* t : order)
+            anySolo = anySolo || t->soloed.load();
+        for (auto* t : order)
+            t->othersSoloed.store (anySolo);
+
         for (auto* t : order)
         {
             const Track* source = nullptr;
@@ -1071,6 +1077,8 @@ namespace
             te->setAttribute ("out", t->outputPair.load());
             te->setAttribute ("gain", (double) t->gainLinear.load());
             te->setAttribute ("mute", t->muted.load());
+            te->setAttribute ("solo", t->soloed.load());
+            te->setAttribute ("pan", (double) t->pan.load());
             te->setAttribute ("transpose", t->transposeOn.load());
             te->setAttribute ("rec", t->recArmed.load());
             te->setAttribute ("comp", t->compensate.load());
@@ -1185,6 +1193,8 @@ void Engine::fillSequence (const std::shared_ptr<Sequence>& seq)
         track->outputPair = te->getIntAttribute ("out", 0);
         track->gainLinear = (float) te->getDoubleAttribute ("gain", 1.0);
         track->muted = te->getBoolAttribute ("mute", false);
+        track->soloed = te->getBoolAttribute ("solo", false);
+        track->pan = (float) te->getDoubleAttribute ("pan", 0.0);
         track->transposeOn = te->getBoolAttribute ("transpose", true);
         track->recArmed = te->getBoolAttribute ("rec", false);
         track->compensate = te->getBoolAttribute ("comp", false);
