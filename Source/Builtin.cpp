@@ -2403,8 +2403,9 @@ namespace
             retune = addFloat ("rt", "Retune Speed", 0.0f, 400.0f, 30.0f, 0.12f);
             human = addLinear ("hu", "Humanize", 0.0f, 100.0f, 10.0f);
             flex = addLinear ("fx", "Flex Tune", 0.0f, 100.0f, 15.0f);
-            voicesP = addLinear ("vo", "Voices", 0.0f, 6.0f, 0.0f);
-            spreadP = addLinear ("sp", "Spread", 0.0f, 100.0f, 40.0f);
+            harmLevel = addLinear ("hl", "Harmony", 0.0f, 100.0f, 60.0f);
+            widthP = addLinear ("wd", "Width", 0.0f, 100.0f, 60.0f);
+            synthP = addLinear ("sy", "Synth", 0.0f, 100.0f, 0.0f);
             detune = addLinear ("de", "Detune", 430.0f, 450.0f, 440.0f);
             classic = new juce::AudioParameterBool (juce::ParameterID { "cl", 1 }, "Classic", false);
             hq = new juce::AudioParameterBool (juce::ParameterID { "hq", 1 }, "HQ", false);
@@ -2415,6 +2416,12 @@ namespace
             for (auto* p : { (juce::AudioProcessorParameter*) classic, (juce::AudioProcessorParameter*) hq, (juce::AudioProcessorParameter*) on,
                              (juce::AudioProcessorParameter*) range, (juce::AudioProcessorParameter*) key })
                 juce::AudioProcessor::addParameter (p);
+            for (int k = 0; k < 4; ++k)
+            {
+                harm[k] = new juce::AudioParameterChoice (juce::ParameterID { "h" + juce::String (k), 1 }, "Voice " + juce::String (k + 1),
+                                                          juce::StringArray { "Off", "-Oct", "-5th", "-3rd", "+3rd", "+4th", "+5th", "+6th", "+Oct" }, 0);
+                juce::AudioProcessor::addParameter (harm[k]);
+            }
             for (int i = 0; i < 12; ++i)
             {
                 note[i] = new juce::AudioParameterBool (juce::ParameterID { "n" + juce::String (i), 1 }, juce::String (tunekeys::noteNames[i]), true);
@@ -2436,8 +2443,12 @@ namespace
             p.classic = classic->get();
             p.hq = hq->get();
             p.refHz = detune->get();
-            p.voices = (int) std::lround (voicesP->get());
-            p.spread = spreadP->get();
+            static const int steps[9] = { 0, -7, -4, -2, 2, 3, 4, 5, 7 };
+            for (int k = 0; k < 4; ++k)
+                p.harmony[k] = steps[harm[k]->getIndex()];
+            p.harmLevel = harmLevel->get();
+            p.width = widthP->get();
+            p.synth = synthP->get();
             std::uint16_t m = 0;
             for (int i = 0; i < 12; ++i)
                 if (note[i]->get())
@@ -2477,7 +2488,8 @@ namespace
             ramp = w;
         }
 
-        juce::AudioParameterFloat *retune, *human, *flex, *voicesP, *spreadP, *detune;
+        juce::AudioParameterFloat *retune, *human, *flex, *harmLevel, *widthP, *synthP, *detune;
+        juce::AudioParameterChoice* harm[4];
         juce::AudioParameterBool *classic, *hq, *on, *note[12];
         juce::AudioParameterChoice* range;
         juce::AudioParameterInt* key;
@@ -2538,15 +2550,36 @@ namespace
         explicit TuneEditor (TunePlugin& p) : juce::AudioProcessorEditor (p), plug (p)
         {
             setLookAndFeel (&look);
-            setSize (860, 520);
+            setSize (860, 600);
 
             knob (rtS, "Retune Speed", *p.retune, rtA, teal, 0);
             knob (huS, "Humanize", *p.human, huA, juce::Colour (0xff8a63d2), 0);
             knob (fxS, "Flex Tune", *p.flex, fxA, juce::Colour (0xffe6d94a), 0);
-            knob (voS, "Voices", *p.voicesP, voA, juce::Colour (0xff4fb3ff), 0);
-            knob (spS, "Spread", *p.spreadP, spA, juce::Colour (0xffff9a4d), 0);
-            voS.setNumDecimalPlacesToDisplay (0);
-            voS.setRange (0.0, 6.0, 1.0);
+            knob (voS, "Harmony", *p.harmLevel, voA, juce::Colour (0xff4fb3ff), 0);
+            knob (spS, "Width", *p.widthP, spA, juce::Colour (0xffff9a4d), 0);
+            knob (syS, "Synth", *p.synthP, syA, juce::Colour (0xffe05cc0), 0);
+            for (int k = 0; k < 4; ++k)
+            {
+                harmBtn[k].setColour (juce::TextButton::textColourOffId, juce::Colours::white);
+                harmBtn[k].onClick = [this, k]
+                {
+                    juce::PopupMenu m;
+                    for (int i = 0; i < plug.harm[k]->choices.size(); ++i)
+                        m.addItem (i + 1, plug.harm[k]->choices[i], true, plug.harm[k]->getIndex() == i);
+                    m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&harmBtn[k]), [this, k] (int r)
+                    {
+                        if (r > 0)
+                        {
+                            plug.harm[k]->beginChangeGesture();
+                            *plug.harm[k] = r - 1;
+                            plug.harm[k]->endChangeGesture();
+                            refreshTexts();
+                        }
+                    });
+                };
+                harmBtn[k].setTooltip ("Harmony voice: interval above / below the sung note, in steps of the chosen scale");
+                addAndMakeVisible (harmBtn[k]);
+            }
 
             detuneS.setSliderStyle (juce::Slider::LinearBar);
             detuneS.setTextBoxIsEditable (true);
@@ -2709,9 +2742,13 @@ namespace
             g.drawText ("Mode", modeLL.getX(), modeLL.getY() - 14, 80, 12, juce::Justification::centredLeft);
             g.setColour (juce::Colour (0xff2a3338));
             g.drawLine (30.0f, 408.0f, left.getRight() - 20.0f, 408.0f);
+            g.drawLine (30.0f, 492.0f, left.getRight() - 20.0f, 492.0f);
+            g.setColour (muted);
+            g.setFont (juce::FontOptions (11.0f));
+            g.drawText ("Harmony voices (scale steps from the sung note)", 40, 506, 400, 14, juce::Justification::centredLeft);
 
             // right panel
-            for (auto* s : { &rtS, &huS, &fxS, &voS, &spS })
+            for (auto* s : { &rtS, &huS, &fxS, &voS, &spS, &syS })
             {
                 g.setColour (muted.brighter (0.4f));
                 g.setFont (juce::FontOptions (s == &rtS ? 16.0f : 13.0f));
@@ -2741,8 +2778,11 @@ namespace
             rtS.setBounds (r.getX() + 60, 70, 170, 170);
             huS.setBounds (r.getX() + 28, 296, 84, 84);
             fxS.setBounds (r.getX() + 130, 296, 84, 84);
-            voS.setBounds (r.getX() + 28, 410, 84, 84);
-            spS.setBounds (r.getX() + 130, 410, 84, 84);
+            voS.setBounds (r.getX() + 8, 430, 72, 84);
+            spS.setBounds (r.getX() + 79, 430, 72, 84);
+            syS.setBounds (r.getX() + 150, 430, 72, 84);
+            for (int k = 0; k < 4; ++k)
+                harmBtn[k].setBounds (40 + k * 130, 538, 118, 30);
             styleModern.setBounds (r.getX() + 20, 250, 98, 26);
             styleClassic.setBounds (r.getX() + 126, 250, 98, 26);
         }
@@ -2829,6 +2869,12 @@ namespace
             if (cur != tunekeys::maskFor (plug.key->get()))
                 name = "Custom";
             keyBtn.setButtonText (name);
+            for (int k = 0; k < 4; ++k)
+            {
+                const int idx = plug.harm[k]->getIndex();
+                harmBtn[k].setButtonText (idx == 0 ? "Voice " + juce::String (k + 1) + ": off" : "Voice " + juce::String (k + 1) + ": " + plug.harm[k]->choices[idx]);
+                harmBtn[k].setColour (juce::TextButton::buttonColourId, idx == 0 ? juce::Colour (0xff161c1f) : juce::Colour (0xff4fb3ff).withAlpha (0.3f));
+            }
 
             auto style = [] (juce::TextButton& b, bool on, juce::Colour c)
             {
@@ -2853,8 +2899,9 @@ namespace
 
         TunePlugin& plug;
         TuneLook look;
-        juce::Slider rtS, huS, fxS, voS, spS, detuneS;
-        std::unique_ptr<juce::SliderParameterAttachment> rtA, huA, fxA, voA, spA, detuneA;
+        juce::Slider rtS, huS, fxS, voS, spS, syS, detuneS;
+        std::unique_ptr<juce::SliderParameterAttachment> rtA, huA, fxA, voA, spA, syA, detuneA;
+        juce::TextButton harmBtn[4];
         juce::TextButton rangeBtn, keyBtn, modeLL, modeHQ, styleModern, styleClassic;
         const juce::Colour teal { 0xff19d3b0 }, muted { 0xff8b97a0 };
     };

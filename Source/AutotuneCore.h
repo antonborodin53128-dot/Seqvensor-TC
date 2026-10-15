@@ -29,8 +29,10 @@ namespace tctune
         float refHz = 440.0f;
         std::uint16_t mask = 0x0FFF;    // allowed pitch classes, bit 0 = C
         float rangeLowHz = 70.0f, rangeHighHz = 900.0f;
-        int voices = 0;             // extra "choir" voices 0..6
-        float spread = 30.0f;       // 0..100: detune, timing and drift of those voices
+        int harmony[4] = { 0, 0, 0, 0 };   // scale steps above (+) / below (-) the sung note, 0 = voice off
+        float harmLevel = 60.0f;    // 0..100
+        float width = 50.0f;        // 0..100: pan + small delay between the voices
+        float synth = 0.0f;         // 0..100: harmony voices stop following the vibrato of the singer
     };
 
     class Core
@@ -58,17 +60,14 @@ namespace tctune
                 Voice& vo = voices[v];
                 vo = Voice {};
                 vo.h[0].d = vo.h[1].d = nominalDelay();
-                // fixed personality of each voice: detune sign / size, timing, drift speed, pan
-                static const float det[maxVoices] = { 0.0f, -1.0f, 0.8f, -0.55f, 1.0f, -0.3f, 0.6f };
-                static const float tim[maxVoices] = { 0.0f, 0.7f, 1.0f, 0.35f, 0.85f, 0.55f, 0.2f };
-                static const float lfo[maxVoices] = { 0.0f, 0.37f, 0.53f, 0.71f, 0.43f, 0.61f, 0.89f };
-                static const float pan[maxVoices] = { 0.0f, -0.8f, 0.8f, -0.4f, 0.4f, -1.0f, 1.0f };
-                vo.detune = det[v];
+                static const float tim[maxVoices] = { 0.0f, 0.55f, 0.9f, 0.3f, 0.75f };
+                static const float pan[maxVoices] = { 0.0f, -0.9f, 0.9f, -0.5f, 0.5f };
                 vo.timing = tim[v];
-                vo.lfoRate = lfo[v];
-                vo.lfoPhase = 0.17f * (float) v;
                 vo.pan = pan[v];
             }
+            for (int k = 0; k < 4; ++k)
+                harmGoal[k] = harmCur[k] = 0.0f;
+            harmGain = 0.0f;
             period = (float) (sr / 150.0);
             haveTarget = false;
             sCur = sGoal = 0.0f;
@@ -96,11 +95,13 @@ namespace tctune
 
         void process (float* l, float* r, int n)
         {
-            const int nv = std::max (0, std::min (maxVoices - 1, params.voices));
-            const float sp = params.spread * 0.01f;
-            const float voiceGain = nv > 0 ? 0.8f / std::sqrt ((float) nv) : 0.0f;
-            const float mainGain = nv > 0 ? 1.0f / std::sqrt (1.0f + 0.25f * (float) nv) : 1.0f;
             const float fl = fadeLen (params.hq);
+            const float wd = params.width * 0.01f;
+            int nOn = 0;
+            for (int k = 0; k < 4; ++k)
+                nOn += params.harmony[k] != 0 ? 1 : 0;
+            const float voiceGain = nOn > 0 ? params.harmLevel * 0.01f * 0.9f / std::sqrt ((float) nOn) : 0.0f;
+            const float mainGain = 1.0f / std::sqrt (1.0f + 0.3f * (float) nOn * params.harmLevel * 0.01f);
 
             for (int i = 0; i < n; ++i)
             {
@@ -117,22 +118,22 @@ namespace tctune
                     analyse();
                 }
                 ratio += (ratioTarget - ratio) * rampCoef;
+                harmGain += (harmTargetGain - harmGain) * 0.002f;
 
                 float outL = 0.0f, outR = 0.0f;
-                for (int v = 0; v <= nv; ++v)
+                for (int v = 0; v <= 4; ++v)
                 {
+                    if (v > 0 && params.harmony[v - 1] == 0)
+                        continue;
                     Voice& vo = voices[v];
                     float rho = ratio;
                     float extra = 0.0f;
                     if (v > 0)
                     {
-                        // slow drift + fixed detune, in cents; timing offset in samples
-                        vo.lfoPhase += vo.lfoRate / (float) sr;
-                        if (vo.lfoPhase > 1.0f)
-                            vo.lfoPhase -= 1.0f;
-                        const float cents = sp * (28.0f * vo.detune + 14.0f * std::sin (6.2831853f * vo.lfoPhase));
-                        rho *= std::exp2 (cents / 1200.0f);
-                        extra = sp * vo.timing * (float) (sr * 0.028);
+                        const float target = ratio * std::exp2 (harmCur[v - 1] / 12.0f);
+                        vo.ratioSm += (target - vo.ratioSm) * 0.01f;
+                        rho = vo.ratioSm;
+                        extra = wd * vo.timing * (float) (sr * 0.012);
                     }
 
                     vo.h[0].d += 1.0f - rho;
@@ -151,9 +152,10 @@ namespace tctune
                     else
                     {
                         const float m = 0.5f * (wl + wr);
-                        const float pl = 0.5f * (1.0f - vo.pan * 0.8f * std::max (0.2f, sp)), pr = 1.0f - pl;
-                        outL += (wl * 0.5f + m * pl) * voiceGain * 0.95f;
-                        outR += (wr * 0.5f + m * pr) * voiceGain * 0.95f;
+                        const float p = vo.pan * wd;                       // -1 .. +1
+                        const float gl = std::sqrt (0.5f * (1.0f - p)), gr = std::sqrt (0.5f * (1.0f + p));
+                        outL += m * gl * 1.41f * voiceGain * harmGain * mainGain;
+                        outR += m * gr * 1.41f * voiceGain * harmGain * mainGain;
                     }
                 }
                 l[i] = outL;
@@ -170,12 +172,12 @@ namespace tctune
         std::atomic<float> outInCents { 0.0f };       // detected pitch minus target, cents
 
     private:
-        static constexpr int maxVoices = 7;
+        static constexpr int maxVoices = 5;
         struct Head { float d = 0.0f; };
         struct Voice
         {
             Head h[2];
-            float fade = 1.0f, detune = 0.0f, timing = 0.0f, lfoRate = 0.0f, lfoPhase = 0.0f, pan = 0.0f;
+            float fade = 1.0f, timing = 0.0f, pan = 0.0f, ratioSm = 1.0f;
         };
 
         float fadeLen (bool hqMode) const { return (float) (sr * (hqMode ? 0.003 : 0.0015)); }
@@ -209,6 +211,44 @@ namespace tctune
                 vo.h[0].d = std::min (std::max (vo.h[0].d, 2.0f), (float) (ringSize - 64));
             }
             vo.h[1].d = std::min (std::max (vo.h[1].d, 2.0f), (float) (ringSize - 64));
+        }
+
+        // note `steps` scale steps above (+) or below (-) `note`, inside the allowed notes
+        int harmonyNote (int note, int steps) const
+        {
+            if (steps == 7 || steps == -7)
+                return note + (steps > 0 ? 12 : -12);
+
+            int pcs[12], count = 0;
+            for (int pc = 0; pc < 12; ++pc)
+                if (params.mask & (1u << pc))
+                    pcs[count++] = pc;
+
+            const int pc = ((note % 12) + 12) % 12;
+            if (count >= 12 || count < 3)
+            {
+                // chromatic (no scale to follow): plain major-scale intervals
+                switch (steps)
+                {
+                    case 2: return note + 4;
+                    case 3: return note + 5;
+                    case 4: return note + 7;
+                    case 5: return note + 9;
+                    case -2: return note - 3;
+                    case -3: return note - 5;
+                    case -4: return note - 7;
+                    case -5: return note - 8;
+                    default: return note;
+                }
+            }
+            int idx = 0;
+            for (int i = 0; i < count; ++i)
+                if (pcs[i] == pc)
+                    idx = i;
+            const int deg = idx + steps;
+            const int oct = deg >= 0 ? deg / count : -((-deg + count - 1) / count);
+            const int within = deg - oct * count;
+            return (note - pc) + oct * 12 + pcs[within];
         }
 
         // ---------------------------------------------------------------- analysis
@@ -423,6 +463,16 @@ namespace tctune
                         tc *= 1.0f + params.humanize * 0.01f * 6.0f * std::min (1.0f, heldTime / 0.6f);
 
                     outMidi.store (midi);
+                    for (int k = 0; k < 4; ++k)
+                    {
+                        if (params.harmony[k] == 0)
+                            continue;
+                        const int hn = harmonyNote (bestNote, params.harmony[k]);
+                        // synth = 0: a fixed interval above the (corrected) note, the singer's vibrato is carried along;
+                        // synth = 1: the voice is locked onto the exact note of the interval (flat, synthesiser-like)
+                        const float sy = params.synth * 0.01f;
+                        harmGoal[k] = (1.0f - sy) * (float) (hn - bestNote) + sy * ((float) hn - midi - sCur);
+                    }
                     outTarget.store (((bestNote % 12) + 12) % 12);
                     outInCents.store (-(float) (bestNote - midi) * 100.0f);
                 }
@@ -446,6 +496,11 @@ namespace tctune
             // per-sample ramp towards the new ratio over one hop
             rampCoef = 1.0f - std::exp (-1.0f / (0.5f * hop));
             outShiftCents.store (sCur * 100.0f);
+
+            const float aH = 1.0f - std::exp (-hopSec / (0.004f + 0.016f * (1.0f - params.synth * 0.01f)));
+            for (int k = 0; k < 4; ++k)
+                harmCur[k] += (harmGoal[k] - harmCur[k]) * aH;
+            harmTargetGain = active && haveTarget ? 1.0f : 0.0f;
         }
 
         // ---------------------------------------------------------------- state
@@ -470,6 +525,7 @@ namespace tctune
         int targetNote = 0;
         float sCur = 0.0f, sGoal = 0.0f;
         bool hasPitch = false;
+        float harmGoal[4] = { 0, 0, 0, 0 }, harmCur[4] = { 0, 0, 0, 0 }, harmGain = 0.0f, harmTargetGain = 0.0f;
         int voicedRun = 0, unvoicedRun = 0;
         float lastF0 = 0.0f;
         float med[3] = { 0, 0, 0 };
