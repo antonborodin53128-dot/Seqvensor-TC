@@ -21,7 +21,8 @@ public:
     {
         std::function<void (Tab, int id)> rowClick, rowDouble;
         std::function<void (Tab)> add, remove;
-        std::function<void()> save, previous, next, heightChanged;
+        std::function<void (Tab)> save;
+        std::function<void()> previous, next, heightChanged;
         std::function<void (Tab, int from, int to)> rowMoved;   // a row was dragged to a new place
     };
 

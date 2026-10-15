@@ -40,12 +40,16 @@ public:
 private:
     // top bar / menus
     void showMainMenu();
-    void exportScene();
+    void exportScene (juce::String songName = {});
     void chooseRecordFolder();
     void toggleRecording();
-    void importScene();
-    void exportSequence();
-    void importSequence();
+    void importSceneFile (const juce::File& file);
+    void importSequenceFile (const juce::File& file);
+    void importPlaylistFile (const juce::File& file);
+    void importFromFile();
+    void exportPlaylist (juce::String name = {});
+    void saveSelectionToFile (PlayerBar::Tab tab);
+    void exportSequence (juce::String project = {});
     void showAudioSettings();
     void showPluginChooser();
     void showPluginScanner();

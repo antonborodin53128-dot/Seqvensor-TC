@@ -17,8 +17,8 @@ PlayerBar::PlayerBar() : list ("songs", nullptr)
     addAndMakeVisible (list);
     list.addMouseListener (&watcher, true);
 
-    saveButton.setTooltip ("Сохранить всё"_ru);
-    saveButton.onClick = [this] { if (cb.save) cb.save(); };
+    saveButton.setTooltip ("Сохранить в файл выбранное: секвенцию, плейлист или трек"_ru);
+    saveButton.onClick = [this] { if (cb.save) cb.save (tab); };
     trashButton.onClick = [this] { if (cb.remove) cb.remove (tab); };
     plusButton.onClick = [this] { if (cb.add) cb.add (tab); };
     prevButton.setTooltip ("Предыдущий трек"_ru);
