@@ -97,6 +97,7 @@ void Engine::syncLiveSource()
 
 void Engine::shutdown()
 {
+    stopRecording();
     if (! running && tracks.empty())
         return;
 
@@ -1370,4 +1371,72 @@ void Engine::relocateSequences (const juce::File& oldDir, const juce::File& newD
         moved[seq->file.getFullPathName()] = seq;
     }
     sequenceCache.swap (moved);
+}
+
+juce::File Engine::getRecordFolder() const
+{
+    const auto saved = getDataDirectory().getChildFile ("record-folder.txt").loadFileAsString().trim();
+    if (saved.isNotEmpty())
+        return juce::File (saved);
+    return juce::File::getSpecialLocation (juce::File::userDocumentsDirectory).getChildFile ("TC Records");
+}
+
+void Engine::setRecordFolder (const juce::File& folder)
+{
+    getDataDirectory().getChildFile ("record-folder.txt").replaceWithText (folder.getFullPathName());
+}
+
+bool Engine::startRecording (juce::String& message)
+{
+    if (recording.load())
+        return true;
+    if (! isAudioAlive())
+    {
+        message = "Аудиоустройство не запущено";
+        return false;
+    }
+
+    const auto folder = getRecordFolder();
+    if (! folder.createDirectory().wasOk())
+    {
+        message = "Не удалось открыть папку записи";
+        return false;
+    }
+
+    recordThread.startThread();
+    int started = 0;
+    for (auto& t : getTracks())
+    {
+        if (! t->recArmed.load() || (t->inputL.load() < 0 && t->busId.load() < 0))
+            continue;
+
+        auto base = t->name.removeCharacters ("\\/:*?\"<>|").trim();
+        if (base.isEmpty())
+            base = "Track";
+        auto file = folder.getChildFile (base + ".wav");
+        for (int i = 2; file.exists() && i < 10000; ++i)
+            file = folder.getChildFile (base + " " + juce::String (i) + ".wav");
+
+        if (t->startRecording (file, currentSampleRate, recordThread))
+            ++started;
+    }
+
+    if (started == 0)
+    {
+        recordThread.stopThread (2000);
+        message = "Нет дорожек для записи: включите REC на дорожке и выберите вход";
+        return false;
+    }
+    recording.store (true);
+    message = "Запись: дорожек " + juce::String (started);
+    return true;
+}
+
+void Engine::stopRecording()
+{
+    if (! recording.exchange (false))
+        return;
+    for (auto& t : getTracks())
+        t->stopRecording();
+    recordThread.stopThread (3000);
 }

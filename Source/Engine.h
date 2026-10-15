@@ -71,6 +71,13 @@ public:
     // Tracks (message thread).
     std::shared_ptr<Track> addTrack (const juce::String& name, int forcedId = -1);
     void removeTrack (const std::shared_ptr<Track>& track);
+
+    // Recording: every armed track writes its input to <recordFolder>/<track name>.wav (never overwrites: "name 2.wav" ...)
+    juce::File getRecordFolder() const;
+    void setRecordFolder (const juce::File& folder);
+    bool startRecording (juce::String& message);
+    void stopRecording();
+    bool isRecording() const { return recording.load(); }
     void moveTrack (const std::shared_ptr<Track>& track, int newIndex);   // the others shift
     std::vector<std::shared_ptr<Track>> getTracks() const;
     std::shared_ptr<Track> findTrack (int id) const;
@@ -224,6 +231,8 @@ private:
                              FileAnalysis a, std::function<void (std::shared_ptr<Clip>)> analysed);
 
     double currentSampleRate = 48000.0;
+    std::atomic<bool> recording { false };
+    juce::TimeSliceThread recordThread { "TC record" };
     int currentBlockSize = 512;
     bool running = false;
     std::atomic<juce::int64> callbackCount { 0 };

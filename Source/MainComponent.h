@@ -41,6 +41,8 @@ private:
     // top bar / menus
     void showMainMenu();
     void exportScene();
+    void chooseRecordFolder();
+    void toggleRecording();
     void importScene();
     void showAudioSettings();
     void showPluginChooser();
@@ -151,6 +153,7 @@ private:
     juce::Label cpuLabel;
     IconButton playAllButton { IconButton::Icon::Play }, pauseAllButton { IconButton::Icon::Pause },
               stopAllButton { IconButton::Icon::Stop };
+    IconButton recordButton { IconButton::Icon::Record };
 
     // tracks
     juce::Viewport viewport;

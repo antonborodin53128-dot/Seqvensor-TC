@@ -204,6 +204,11 @@ MainComponent::MainComponent()
     tapButton.onClick = [this] { tapTempo(); };
     addAndMakeVisible (tapButton);
 
+    recordButton.setTooltip ("Запись: пишет входы всех дорожек с нажатой кнопкой REC, пока кнопка включена. "_ru
+                             "Папка - в главном меню."_ru);
+    recordButton.onClick = [this] { toggleRecording(); };
+    addAndMakeVisible (recordButton);
+
     keyLabel.setButtonText ("Тон: -"_ru);
     keyLabel.setColour (juce::TextButton::buttonColourId, juce::Colours::transparentBlack);
     keyLabel.setColour (juce::TextButton::buttonOnColourId, juce::Colours::transparentBlack);
@@ -363,12 +368,14 @@ void MainComponent::resized()
     cpuLabel.setBounds (rowA.removeFromRight (110));
 
     // tempo, key, gear and the big transport buttons, centred in the whole window
-    const int groupW = 170 + 8 + 56 + 20 + 34 + 2 + 124 + 2 + 34 + 8 + 44 + 30 + 72 + 6 + 64 + 6 + 64;
+    const int groupW = 170 + 8 + 56 + 8 + 44 + 20 + 34 + 2 + 124 + 2 + 34 + 8 + 44 + 30 + 72 + 6 + 64 + 6 + 64;
     auto group = juce::Rectangle<int> (groupW, rowA.getHeight()).withCentre ({ getWidth() / 2, rowA.getCentreY() });
     const auto groupBox = group;
     bpmSlider.setBounds (group.removeFromLeft (170));
     group.removeFromLeft (8);
     tapButton.setBounds (group.removeFromLeft (56));
+    group.removeFromLeft (8);
+    recordButton.setBounds (group.removeFromLeft (44));
     group.removeFromLeft (20);
     keyDown.setBounds (group.removeFromLeft (34));
     group.removeFromLeft (2);
@@ -1157,6 +1164,7 @@ void MainComponent::showMainMenu()
     menu.addItem (7, "Привязка клипов к сетке"_ru, true, timelineView.snap);
     menu.addItem (6, "Сохранить всё"_ru);
     menu.addSeparator();
+    menu.addItem (10, "Запись: папка - "_ru + engine.getRecordFolder().getFullPathName() + "  (изменить...)"_ru);
     menu.addItem (8, "Сцена: сохранить в файл (для другого ПК)..."_ru);
     menu.addItem (9, "Сцена: загрузить из файла..."_ru);
 
@@ -1173,6 +1181,7 @@ void MainComponent::showMainMenu()
                                 case 3: safe->showPluginScanner(); break;
                                 case 4: safe->addTrack(); break;
                                 case 6: safe->saveEverything (true); break;
+                                case 10: safe->chooseRecordFolder(); break;
                                 case 8: safe->exportScene(); break;
                                 case 9: safe->importScene(); break;
                                 case 7: safe->timelineView.snap = ! safe->timelineView.snap; break;
@@ -2467,5 +2476,36 @@ void MainComponent::importScene()
                               safe->addToPlaylist (name);
                               safe->switchToSequence (name, safe->playlist.items.indexOf (name));
                               safe->say ("Сцена загружена: "_ru + name);
+                          });
+}
+
+
+void MainComponent::toggleRecording()
+{
+    if (engine.isRecording())
+    {
+        engine.stopRecording();
+        recordButton.setActive (false);
+        say ("Запись остановлена. Файлы: "_ru + engine.getRecordFolder().getFullPathName());
+        return;
+    }
+
+    juce::String message;
+    const bool ok = engine.startRecording (message);
+    recordButton.setActive (ok);
+    say (ok ? message : message);
+}
+
+void MainComponent::chooseRecordFolder()
+{
+    chooser = std::make_unique<juce::FileChooser> ("Папка для записи"_ru, engine.getRecordFolder());
+    juce::Component::SafePointer<MainComponent> safe (this);
+    chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectDirectories,
+                          [safe] (const juce::FileChooser& fc)
+                          {
+                              if (safe == nullptr || fc.getResult() == juce::File())
+                                  return;
+                              safe->engine.setRecordFolder (fc.getResult());
+                              safe->say ("Папка записи: "_ru + fc.getResult().getFullPathName());
                           });
 }

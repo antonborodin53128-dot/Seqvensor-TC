@@ -100,6 +100,11 @@ public:
                        const Track* busSource, const ChunkClock& clock);
     const juce::AudioBuffer<float>& getBusOut() const { return busOut; }
 
+    // Recording of the raw input of this track into a wav file. Message thread; the audio thread only feeds the writer.
+    bool startRecording (const juce::File& file, double sampleRate, juce::TimeSliceThread& thread);
+    void stopRecording();
+    bool isRecording() const { return recActive.load(); }
+
     // Used by the engine to keep the audio thread out of chain edits.
     juce::CriticalSection chainLock;
 
@@ -115,6 +120,9 @@ private:
     std::vector<std::shared_ptr<Clip>> clips;
     juce::SpinLock clipLock;
 
+    std::unique_ptr<juce::AudioFormatWriter::ThreadedWriter> recWriter;
+    juce::CriticalSection recLock;
+    std::atomic<bool> recActive { false };
     int clickPos = -1;
     bool clickAccent = false;
     const std::atomic<double>* bpmSource = nullptr;

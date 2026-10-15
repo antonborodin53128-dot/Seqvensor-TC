@@ -56,7 +56,7 @@ private:
 class IconButton : public juce::Button
 {
 public:
-    enum class Icon { Play, Pause, Stop, Close, Gear, Menu, Arrow, Prev, Next, Save, Trash, Plus };
+    enum class Icon { Play, Pause, Stop, Close, Gear, Menu, Arrow, Prev, Next, Save, Trash, Plus, Record };
 
     explicit IconButton (Icon i) : juce::Button ({}), icon (i) {}
 
@@ -66,7 +66,7 @@ public:
     void paintButton (juce::Graphics& g, bool over, bool down) override
     {
         auto r = getLocalBounds().toFloat().reduced (1.0f);
-        g.setColour (active ? Pal::green.darker (0.25f)
+        g.setColour (active ? (icon == Icon::Record ? Pal::red.darker (0.2f) : Pal::green.darker (0.25f))
                             : down ? Pal::surfaceHi.brighter (0.2f) : over ? Pal::surfaceHi : Pal::surface);
         g.fillRoundedRectangle (r, Pal::radius);
         g.setColour (Pal::hairline);
@@ -118,6 +118,10 @@ public:
                 g.drawRoundedRectangle (juce::Rectangle<float> (s * 1.8f, s * 1.9f).withCentre ({ c.x, c.y + s * 0.2f }), 2.5f, 1.8f);
                 break;
             }
+            case Icon::Record:
+                g.setColour (active ? juce::Colours::white : Pal::red);
+                g.fillEllipse (c.x - s * 1.1f, c.y - s * 1.1f, s * 2.2f, s * 2.2f);
+                break;
             case Icon::Plus:
                 g.fillRoundedRectangle (juce::Rectangle<float> (s * 2.2f, 2.2f).withCentre (c), 1.0f);
                 g.fillRoundedRectangle (juce::Rectangle<float> (2.2f, s * 2.2f).withCentre (c), 1.0f);

@@ -461,6 +461,16 @@ void Track::processChunk (const float* const* inputs, int numInputs,
             juce::FloatVectorOperations::clear (r, n);
     }
 
+    if (recActive.load())
+    {
+        const juce::ScopedTryLock rl (recLock);
+        if (rl.isLocked() && recWriter != nullptr)
+        {
+            const float* chans[2] = { l, r };
+            recWriter->write (chans, n);
+        }
+    }
+
     renderClips (n, clock);      // audio clips from the timeline are added to the source
     renderClicks (n, clock);
     runChain (n);
@@ -584,4 +594,34 @@ void Track::applyExtraDelay (int n)
         }
     }
     delayWritePos = (delayWritePos + n) % size;
+}
+
+bool Track::startRecording (const juce::File& file, double sr, juce::TimeSliceThread& thread)
+{
+    stopRecording();
+    file.getParentDirectory().createDirectory();
+    std::unique_ptr<juce::FileOutputStream> stream (file.createOutputStream());
+    if (stream == nullptr)
+        return false;
+
+    juce::WavAudioFormat wav;
+    const bool mono = inputR.load() < 0 && busId.load() < 0;
+    std::unique_ptr<juce::AudioFormatWriter> writer (wav.createWriterFor (stream.get(), sr, mono ? 1u : 2u, 24, {}, 0));
+    if (writer == nullptr)
+        return false;
+    stream.release();   // the writer owns it now
+
+    {
+        const juce::ScopedLock sl (recLock);
+        recWriter.reset (new juce::AudioFormatWriter::ThreadedWriter (writer.release(), thread, 65536));
+    }
+    recActive.store (true);
+    return true;
+}
+
+void Track::stopRecording()
+{
+    recActive.store (false);
+    const juce::ScopedLock sl (recLock);
+    recWriter.reset();   // flushes and closes the file
 }
