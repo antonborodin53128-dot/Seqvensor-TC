@@ -213,6 +213,8 @@ void PlayerBar::paintListBoxItem (int row, juce::Graphics& g, int w, int h, bool
     if (row < 0 || row >= (int) list_.size())
         return;
     const auto& item = list_[(size_t) row];
+    if (row == dragFrom && dragTo >= 0)
+        g.setOpacity (0.35f);
 
     auto r = juce::Rectangle<float> (4.0f, 1.0f, (float) w - 8.0f, (float) h - 2.0f);
     if (item.header)
@@ -270,35 +272,75 @@ int PlayerBar::rowAt (const juce::MouseEvent& e)
 void PlayerBar::rowDrag (const juce::MouseEvent& e)
 {
     const auto& list_ = rows[(int) tab];
-    if (pendingRow < 0 || pendingRow >= (int) list_.size() || list_.size() < 2)
+    if (dragFrom >= 0 || pendingRow < 0 || pendingRow >= (int) list_.size() || list_.size() < 2)
         return;
-    if (dragFrom < 0 && e.getDistanceFromDragStart() < 8)
+    if (e.getDistanceFromDragStart() < 8)
+        return;
+    auto* container = juce::DragAndDropContainer::findParentDragContainerFor (this);
+    if (container == nullptr)
         return;
 
-    dragFrom = pendingRow;
-    int to = rowAt (e);
-    if (to < 0)
-        to = e.getEventRelativeTo (&list).getPosition().y < 0 ? 0 : (int) list_.size() - 1;
-    dragTo = juce::jlimit (0, (int) list_.size() - 1, to);
+    // like dragging a plugin: a picture of the row follows the mouse
+    const int row = pendingRow;
+    const int w = list.getWidth(), h = list.getRowHeight();
+    juce::Image image (juce::Image::ARGB, w, h, true);
+    {
+        juce::Graphics g (image);
+        g.fillAll (Pal::surfaceHi.withAlpha (0.95f));
+        paintListBoxItem (row, g, w, h, true);
+    }
+    dragFrom = row;
+    dragTo = row;
+    pendingRow = -1;
+    list.repaint();
+    container->startDragging ("tcrow:" + juce::String ((int) tab) + ":" + juce::String (row), this, juce::ScaledImage (image), true);
+}
+
+int PlayerBar::rowForDragPosition (juce::Point<int> p) const
+{
+    const int n = (int) rows[(int) tab].size();
+    const int scroll = list.getViewport() != nullptr ? list.getViewport()->getViewPositionY() : 0;
+    return juce::jlimit (0, juce::jmax (0, n - 1), (p.y - list.getY() + scroll) / juce::jmax (1, list.getRowHeight()));
+}
+
+bool PlayerBar::isInterestedInDragSource (const SourceDetails& d)
+{
+    return d.description.toString().startsWith ("tcrow:" + juce::String ((int) tab) + ":");
+}
+
+void PlayerBar::itemDragEnter (const SourceDetails& d) { itemDragMove (d); }
+
+void PlayerBar::itemDragMove (const SourceDetails& d)
+{
+    dragTo = rowForDragPosition (d.localPosition);
     list.scrollToEnsureRowIsOnscreen (dragTo);
     repaint();
+}
+
+void PlayerBar::itemDragExit (const SourceDetails&)
+{
+    dragTo = dragFrom;
+    repaint();
+}
+
+void PlayerBar::itemDropped (const SourceDetails& d)
+{
+    const int from = d.description.toString().fromLastOccurrenceOf (":", false, false).getIntValue();
+    const int to = rowForDragPosition (d.localPosition);
+    const auto t = tab;
+    dragFrom = dragTo = -1;
+    list.repaint();
+    repaint();
+    if (from != to && cb.rowMoved)
+        cb.rowMoved (t, from, to);
 }
 
 void PlayerBar::rowUp (const juce::MouseEvent& e)
 {
     const bool extend = e.mods.isCtrlDown() || e.mods.isShiftDown() || e.mods.isCommandDown();
     const auto t = tab;
-    const int from = dragFrom, to = dragTo, click = pendingRow;
-    const bool dragged = dragFrom >= 0;
-    pendingRow = dragFrom = dragTo = -1;
-    repaint();
-
-    if (dragged)
-    {
-        if (from != to && to >= 0 && cb.rowMoved)
-            cb.rowMoved (t, from, to);
-        return;
-    }
+    const int click = pendingRow;
+    pendingRow = -1;
 
     const auto& list_ = rows[(int) t];
     if (! extend && click >= 0 && click < (int) list_.size() && ! list_[(size_t) click].header && cb.rowClick)
@@ -307,7 +349,7 @@ void PlayerBar::rowUp (const juce::MouseEvent& e)
 
 void PlayerBar::paintOverChildren (juce::Graphics& g)
 {
-    if (dragFrom < 0 || dragTo < 0)
+    if (dragFrom < 0 || dragTo < 0 || dragTo == dragFrom)
         return;
     const int rh = list.getRowHeight();
     const int scroll = list.getViewport() != nullptr ? list.getViewport()->getViewPositionY() : 0;

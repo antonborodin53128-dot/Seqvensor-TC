@@ -461,6 +461,12 @@ void Track::processChunk (const float* const* inputs, int numInputs,
             juce::FloatVectorOperations::clear (r, n);
     }
 
+    renderClips (n, clock);      // audio clips from the timeline are added to the source
+    renderClicks (n, clock);
+    runChain (n);
+    applyExtraDelay (n);
+
+    // recording: everything on the track (input + clips, after the plugins), but not the metronome, which is added below
     if (recActive.load())
     {
         const juce::ScopedTryLock rl (recLock);
@@ -470,11 +476,6 @@ void Track::processChunk (const float* const* inputs, int numInputs,
             recWriter->write (chans, n);
         }
     }
-
-    renderClips (n, clock);      // audio clips from the timeline are added to the source
-    renderClicks (n, clock);
-    runChain (n);
-    applyExtraDelay (n);
 
     juce::FloatVectorOperations::add (l, clickBuf.getReadPointer (0), n);
     juce::FloatVectorOperations::add (r, clickBuf.getReadPointer (1), n);
@@ -605,7 +606,7 @@ bool Track::startRecording (const juce::File& file, double sr, juce::TimeSliceTh
         return false;
 
     juce::WavAudioFormat wav;
-    const bool mono = inputR.load() < 0 && busId.load() < 0;
+    const bool mono = false;
     std::unique_ptr<juce::AudioFormatWriter> writer (wav.createWriterFor (stream.get(), sr, mono ? 1u : 2u, 24, {}, 0));
     if (writer == nullptr)
         return false;

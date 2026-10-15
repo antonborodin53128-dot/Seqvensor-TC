@@ -4,7 +4,7 @@
 
 // Left: three tabs (Seq / Playlist / Tracks) with a list under them. Right: the "now playing" plate with the
 // big previous / next buttons on both sides. Play / pause / stop live in the top bar.
-class PlayerBar : public juce::Component, private juce::ListBoxModel
+class PlayerBar : public juce::Component, public juce::DragAndDropTarget, private juce::ListBoxModel
 {
 public:
     enum class Tab { Seq = 0, Playlist = 1, Tracks = 2 };
@@ -50,6 +50,13 @@ public:
     void mouseDown (const juce::MouseEvent&) override;
     void paintOverChildren (juce::Graphics&) override;
 
+    // DragAndDropTarget (rows of the list are dragged to a new place)
+    bool isInterestedInDragSource (const SourceDetails&) override;
+    void itemDragEnter (const SourceDetails&) override;
+    void itemDragMove (const SourceDetails&) override;
+    void itemDragExit (const SourceDetails&) override;
+    void itemDropped (const SourceDetails&) override;
+
 private:
     // ListBoxModel
     int getNumRows() override { return (int) rows[(int) tab].size(); }
@@ -70,6 +77,7 @@ private:
     void rowDrag (const juce::MouseEvent&);
     void rowUp (const juce::MouseEvent&);
     int rowAt (const juce::MouseEvent&);
+    int rowForDragPosition (juce::Point<int> p) const;
     RowWatcher watcher { *this };
     int pendingRow = -1, dragFrom = -1, dragTo = -1;
 

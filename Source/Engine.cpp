@@ -1445,11 +1445,6 @@ bool Engine::startRecording (juce::String& message)
         if (! t->recArmed.load())
             continue;
         ++armed;
-        if (t->inputL.load() < 0 && t->busId.load() < 0)
-        {
-            noInput.add (t->name);
-            continue;
-        }
 
         auto base = t->name.removeCharacters ("\\/:*?\"<>|").trim();
         if (base.isEmpty())
@@ -1466,7 +1461,7 @@ bool Engine::startRecording (juce::String& message)
     {
         recordThread.stopThread (2000);
         message = armed == 0 ? "Ни на одной дорожке не включена кнопка REC.\nВключите REC (красный кружок) на нужных дорожках и нажмите запись ещё раз."_ru
-                             : "У дорожек с включённым REC не выбран вход (кнопка «Вход» на дорожке):\n"_ru + noInput.joinIntoString ("\n");
+                             : "Не удалось создать файлы записи"_ru;
         return false;
     }
     recording.store (true);
