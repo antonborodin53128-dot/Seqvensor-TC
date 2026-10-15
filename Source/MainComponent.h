@@ -44,6 +44,8 @@ private:
     void chooseRecordFolder();
     void toggleRecording();
     void importScene();
+    void exportSequence();
+    void importSequence();
     void showAudioSettings();
     void showPluginChooser();
     void showPluginScanner();

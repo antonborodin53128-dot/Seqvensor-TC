@@ -1347,6 +1347,39 @@ void Engine::forgetSequence (const juce::File& file)
     }
 }
 
+void Engine::discardSequences (const juce::File& fileOrFolder)
+{
+    bool activeGone = false;
+    {
+        const juce::ScopedLock sl (tracksLock);
+        for (auto it = sequenceCache.begin(); it != sequenceCache.end();)
+        {
+            const auto& f = it->second->file;
+            if (f == fileOrFolder || f.isAChildOf (fileOrFolder))
+            {
+                if (it->second == activeSequence)
+                    activeGone = true;
+                it = sequenceCache.erase (it);
+            }
+            else
+                ++it;
+        }
+    }
+    if (activeGone)
+    {
+        stopAll();
+        std::vector<std::shared_ptr<Track>> old;
+        {
+            const juce::ScopedLock sl (tracksLock);
+            old = tracks;
+            tracks.clear();
+            activeSequence.reset();
+        }
+        if (onTracksChanged)
+            onTracksChanged();
+    }
+}
+
 void Engine::renameSequenceFile (const juce::File& from, const juce::File& to)
 {
     const juce::ScopedLock sl (tracksLock);

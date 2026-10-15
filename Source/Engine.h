@@ -167,6 +167,8 @@ public:
     void dropSequences (const std::vector<juce::File>& keep);              // frees cached sequences (the active one stays)
     void renameSequenceFile (const juce::File& from, const juce::File& to);
     void forgetSequence (const juce::File& file);
+    // the file or the whole folder is about to be replaced on disk: forget it, even if it is the active one (nothing is saved)
+    void discardSequences (const juce::File& fileOrFolder);
     void pruneAnalysisCacheSoon();   // drops cached analyses of audio files no project uses any more (background)
     void relocateSequences (const juce::File& oldDir, const juce::File& newDir);   // a folder was renamed
 

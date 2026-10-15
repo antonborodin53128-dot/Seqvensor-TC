@@ -1172,8 +1172,10 @@ void MainComponent::showMainMenu()
     menu.addItem (6, "Сохранить всё"_ru);
     menu.addSeparator();
     menu.addItem (10, "Запись: папка - "_ru + engine.getRecordFolder().getFullPathName() + "  (изменить...)"_ru);
-    menu.addItem (8, "Сцена: сохранить в файл (для другого ПК)..."_ru);
-    menu.addItem (9, "Сцена: загрузить из файла..."_ru);
+    menu.addItem (11, "Секвенция: сохранить в файл (всё: композиции, плейлисты, аудио)..."_ru);
+    menu.addItem (12, "Секвенция: загрузить из файла (заменяет секвенцию с тем же именем)..."_ru);
+    menu.addItem (8, "Композиция: сохранить в файл..."_ru);
+    menu.addItem (9, "Композиция: загрузить из файла (заменяет композицию с тем же именем)..."_ru);
 
     juce::Component::SafePointer<MainComponent> safe (this);
     menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&menuButton),
@@ -1189,6 +1191,8 @@ void MainComponent::showMainMenu()
                                 case 4: safe->addTrack(); break;
                                 case 6: safe->saveEverything (true); break;
                                 case 10: safe->chooseRecordFolder(); break;
+                                case 11: safe->exportSequence(); break;
+                                case 12: safe->importSequence(); break;
                                 case 8: safe->exportScene(); break;
                                 case 9: safe->importScene(); break;
                                 case 7: safe->timelineView.snap = ! safe->timelineView.snap; break;
@@ -2369,9 +2373,76 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
 }
 
 
-// ---------------------------------------------------------------- scene files
-// A scene file (.tcscene) is a zip: song.xml + every audio file of the song (paths inside are relative),
-// so it opens on any PC. Plugins are stored by name and state: the other PC needs the same VST3s.
+// ---------------------------------------------------------------- scene / sequence files
+// A scene file (.tcscene) = one composition, a sequence file (.tcseq) = a whole sequence (all compositions and
+// playlists). Both are zips with relative audio paths, so they open on any PC. Loading REPLACES what has the same
+// name. Plugins are stored by name and state: the other PC needs the same VST3s.
+
+namespace
+{
+    // audio paths of every clip -> "audio/<unique name>", the files are added to the zip
+    void packClips (juce::XmlElement& xml, juce::ZipFile::Builder& builder, std::map<juce::String, juce::String>& packed,
+                    juce::StringArray& usedNames, int& missing)
+    {
+        for (auto* track : xml.getChildWithTagNameIterator ("TRACK"))
+            for (auto* ce : track->getChildWithTagNameIterator ("CLIP"))
+            {
+                const auto path = ce->getStringAttribute ("file");
+                juce::File f (path);
+                if (! f.existsAsFile())
+                {
+                    ++missing;
+                    continue;
+                }
+                auto it = packed.find (path);
+                if (it == packed.end())
+                {
+                    auto name = Library::uniqueName (usedNames, f.getFileName());
+                    usedNames.add (name);
+                    builder.addFile (f, 0, "audio/" + name);
+                    it = packed.emplace (path, "audio/" + name).first;
+                }
+                ce->setAttribute ("file", it->second);
+            }
+    }
+
+    void unpackClips (juce::XmlElement& xml, const juce::File& mediaDir)
+    {
+        for (auto* track : xml.getChildWithTagNameIterator ("TRACK"))
+            for (auto* ce : track->getChildWithTagNameIterator ("CLIP"))
+            {
+                const auto rel = ce->getStringAttribute ("file");
+                if (rel.startsWith ("audio/"))
+                    ce->setAttribute ("file", mediaDir.getChildFile (rel).getFullPathName());
+            }
+    }
+
+    void addText (juce::ZipFile::Builder& builder, const juce::String& text, const juce::String& entryName)
+    {
+        builder.addEntry (new juce::MemoryInputStream (text.toRawUTF8(), text.getNumBytesAsUTF8(), true), 0, entryName,
+                          juce::Time::getCurrentTime());
+    }
+
+    juce::String readEntry (juce::ZipFile& zip, const juce::String& entryName)
+    {
+        const int i = zip.getIndexOfFileName (entryName);
+        if (i < 0)
+            return {};
+        std::unique_ptr<juce::InputStream> in (zip.createStreamForEntry (i));
+        return in != nullptr ? in->readEntireStreamAsString() : juce::String();
+    }
+
+    bool writeZip (juce::ZipFile::Builder& builder, const juce::File& target)
+    {
+        target.deleteFile();
+        juce::FileOutputStream out (target);
+        if (out.failedToOpen())
+            return false;
+        builder.writeToStream (out, nullptr);
+        out.flush();
+        return true;
+    }
+}
 
 void MainComponent::exportScene()
 {
@@ -2383,20 +2454,20 @@ void MainComponent::exportScene()
     }
     engine.saveActiveSequence();
 
-    chooser = std::make_unique<juce::FileChooser> ("Сохранить сцену в файл"_ru,
+    chooser = std::make_unique<juce::FileChooser> ("Сохранить композицию в файл"_ru,
                                                    juce::File::getSpecialLocation (juce::File::userDocumentsDirectory)
                                                        .getChildFile (Library::sanitize (seq->name) + ".tcscene"),
                                                    "*.tcscene");
     juce::Component::SafePointer<MainComponent> safe (this);
     const auto songFile = seq->file;
+    const auto songName = seq->name;
     chooser->launchAsync (juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::canSelectFiles
                               | juce::FileBrowserComponent::warnAboutOverwriting,
-                          [safe, songFile] (const juce::FileChooser& fc)
+                          [safe, songFile, songName] (const juce::FileChooser& fc)
                           {
                               if (safe == nullptr || fc.getResult() == juce::File())
                                   return;
                               auto target = fc.getResult().withFileExtension ("tcscene");
-
                               auto xml = juce::XmlDocument::parse (songFile);
                               if (xml == nullptr)
                               {
@@ -2405,52 +2476,26 @@ void MainComponent::exportScene()
                               }
 
                               juce::ZipFile::Builder builder;
-                              std::map<juce::String, juce::String> packed;   // full path -> name inside the zip
-                              juce::StringArray usedNames;
+                              std::map<juce::String, juce::String> packed;
+                              juce::StringArray used;
                               int missing = 0;
+                              packClips (*xml, builder, packed, used, missing);
+                              addText (builder, xml->toString(), "song.xml");
+                              addText (builder, songName, "name.txt");
 
-                              for (auto* clip : xml->getChildWithTagNameIterator ("TRACK"))
-                                  for (auto* ce : clip->getChildWithTagNameIterator ("CLIP"))
-                                  {
-                                      const auto path = ce->getStringAttribute ("file");
-                                      juce::File f (path);
-                                      if (! f.existsAsFile())
-                                      {
-                                          ++missing;
-                                          continue;
-                                      }
-                                      auto it = packed.find (path);
-                                      if (it == packed.end())
-                                      {
-                                          auto name = Library::uniqueName (usedNames, f.getFileName());
-                                          usedNames.add (name);
-                                          builder.addFile (f, 0, "audio/" + name);
-                                          it = packed.emplace (path, "audio/" + name).first;
-                                      }
-                                      ce->setAttribute ("file", it->second);
-                                  }
-
-                              const auto text = xml->toString();
-                              builder.addEntry (new juce::MemoryInputStream (text.toRawUTF8(), text.getNumBytesAsUTF8(), true),
-                                                0, "song.xml", juce::Time::getCurrentTime());
-
-                              target.deleteFile();
-                              juce::FileOutputStream out (target);
-                              if (out.failedToOpen())
+                              if (! writeZip (builder, target))
                               {
                                   safe->say ("Не удалось записать файл"_ru);
                                   return;
                               }
-                              builder.writeToStream (out, nullptr);
-                              out.flush();
-                              safe->say ("Сцена сохранена: "_ru + target.getFileName()
+                              safe->say ("Композиция сохранена: "_ru + target.getFileName()
                                          + (missing > 0 ? " (нет файлов: "_ru + juce::String (missing) + ")" : juce::String()));
                           });
 }
 
 void MainComponent::importScene()
 {
-    chooser = std::make_unique<juce::FileChooser> ("Загрузить сцену из файла"_ru,
+    chooser = std::make_unique<juce::FileChooser> ("Загрузить композицию из файла"_ru,
                                                    juce::File::getSpecialLocation (juce::File::userDocumentsDirectory), "*.tcscene");
     juce::Component::SafePointer<MainComponent> safe (this);
     chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
@@ -2461,77 +2506,166 @@ void MainComponent::importScene()
                               const auto file = fc.getResult();
 
                               juce::ZipFile zip (file);
-                              const int songIndex = zip.getIndexOfFileName ("song.xml");
-                              if (songIndex < 0)
+                              if (zip.getIndexOfFileName ("song.xml") < 0)
                               {
-                                  safe->say ("Это не файл сцены TC"_ru);
+                                  safe->say ("Это не файл композиции TC"_ru);
                                   return;
                               }
 
-                              const auto name = Library::uniqueName (safe->library.sequenceNames(),
-                                                                     Library::sanitize (file.getFileNameWithoutExtension()));
-                              auto mediaDir = safe->engine.getDataDirectory().getChildFile ("Media").getChildFile (name);
+                              auto wanted = readEntry (zip, "name.txt").trim();
+                              const auto name = Library::sanitize (wanted.isEmpty() ? file.getFileNameWithoutExtension() : wanted);
+                              auto mediaDir = safe->engine.getDataDirectory().getChildFile ("Media").getChildFile ("scene_" + name);
+
+                              safe->engine.saveActiveSequence();
+                              const auto target = safe->library.sequenceFile (name);
+                              const bool existed = target.existsAsFile();
+                              safe->engine.discardSequences (target);   // the old one (even if it is open) is replaced
+
+                              mediaDir.deleteRecursively();
                               mediaDir.createDirectory();
                               if (! zip.uncompressTo (mediaDir, true).wasOk())
                               {
-                                  safe->say ("Не удалось распаковать сцену"_ru);
+                                  safe->say ("Не удалось распаковать композицию"_ru);
                                   return;
                               }
-
                               auto xml = juce::XmlDocument::parse (mediaDir.getChildFile ("song.xml"));
                               mediaDir.getChildFile ("song.xml").deleteFile();
+                              mediaDir.getChildFile ("name.txt").deleteFile();
                               if (xml == nullptr)
                               {
-                                  safe->say ("Файл сцены повреждён"_ru);
+                                  safe->say ("Файл повреждён"_ru);
                                   return;
                               }
+                              unpackClips (*xml, mediaDir);
+                              target.replaceWithText (xml->toString());
 
-                              for (auto* track : xml->getChildWithTagNameIterator ("TRACK"))
-                                  for (auto* ce : track->getChildWithTagNameIterator ("CLIP"))
-                                  {
-                                      const auto rel = ce->getStringAttribute ("file");
-                                      if (rel.startsWith ("audio/"))
-                                          ce->setAttribute ("file", mediaDir.getChildFile (rel).getFullPathName());
-                                  }
-
-                              safe->engine.saveActiveSequence();
-                              safe->library.sequenceFile (name).replaceWithText (xml->toString());
-                              safe->addToPlaylist (name);
+                              if (! safe->playlist.items.contains (name))
+                                  safe->addToPlaylist (name);
                               safe->switchToSequence (name, safe->playlist.items.indexOf (name));
-                              safe->say ("Сцена загружена: "_ru + name);
+                              safe->say ((existed ? "Композиция заменена: "_ru : "Композиция загружена: "_ru) + name);
                           });
 }
 
-
-void MainComponent::toggleRecording()
+void MainComponent::exportSequence()
 {
-    if (engine.isRecording())
+    const auto project = library.getProject();
+    if (project.isEmpty())
     {
-        engine.stopRecording();
-        recordButton.setActive (false);
-        say ("Запись остановлена. Файлы: "_ru + engine.getRecordFolder().getFullPathName());
+        say ("Нет открытой секвенции"_ru);
         return;
     }
+    saveEverything (false);
 
-    juce::String message;
-    const bool ok = engine.startRecording (message);
-    recordButton.setActive (ok);
-    if (ok)
-        say (message);
-    else
-        juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, "Запись"_ru, message);
-}
-
-void MainComponent::chooseRecordFolder()
-{
-    chooser = std::make_unique<juce::FileChooser> ("Папка для записи"_ru, engine.getRecordFolder());
+    chooser = std::make_unique<juce::FileChooser> ("Сохранить секвенцию в файл"_ru,
+                                                   juce::File::getSpecialLocation (juce::File::userDocumentsDirectory)
+                                                       .getChildFile (Library::sanitize (project) + ".tcseq"),
+                                                   "*.tcseq");
     juce::Component::SafePointer<MainComponent> safe (this);
-    chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectDirectories,
-                          [safe] (const juce::FileChooser& fc)
+    const auto dir = library.projectDir (project);
+    chooser->launchAsync (juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::canSelectFiles
+                              | juce::FileBrowserComponent::warnAboutOverwriting,
+                          [safe, dir, project] (const juce::FileChooser& fc)
                           {
                               if (safe == nullptr || fc.getResult() == juce::File())
                                   return;
-                              safe->engine.setRecordFolder (fc.getResult());
-                              safe->say ("Папка записи: "_ru + fc.getResult().getFullPathName());
+                              auto target = fc.getResult().withFileExtension ("tcseq");
+
+                              juce::ZipFile::Builder builder;
+                              std::map<juce::String, juce::String> packed;
+                              juce::StringArray used;
+                              int missing = 0, songs = 0;
+                              std::vector<std::unique_ptr<juce::XmlElement>> keep;
+
+                              for (auto& f : dir.getChildFile ("Compositions").findChildFiles (juce::File::findFiles, false, "*.xml"))
+                                  if (auto xml = juce::XmlDocument::parse (f))
+                                  {
+                                      packClips (*xml, builder, packed, used, missing);
+                                      addText (builder, xml->toString(), "Compositions/" + f.getFileName());
+                                      ++songs;
+                                  }
+                              for (auto& f : dir.getChildFile ("Playlists").findChildFiles (juce::File::findFiles, false, "*.xml;*.txt"))
+                                  addText (builder, f.loadFileAsString(), "Playlists/" + f.getFileName());
+                              addText (builder, project, "name.txt");
+
+                              if (! writeZip (builder, target))
+                              {
+                                  safe->say ("Не удалось записать файл"_ru);
+                                  return;
+                              }
+                              safe->say ("Секвенция сохранена: "_ru + target.getFileName() + " (композиций: "_ru + juce::String (songs) + ")"
+                                         + (missing > 0 ? ", нет файлов: "_ru + juce::String (missing) : juce::String()));
+                          });
+}
+
+void MainComponent::importSequence()
+{
+    chooser = std::make_unique<juce::FileChooser> ("Загрузить секвенцию из файла"_ru,
+                                                   juce::File::getSpecialLocation (juce::File::userDocumentsDirectory), "*.tcseq");
+    juce::Component::SafePointer<MainComponent> safe (this);
+    chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
+                          [safe] (const juce::FileChooser& fc)
+                          {
+                              if (safe == nullptr || ! fc.getResult().existsAsFile())
+                                  return;
+                              const auto file = fc.getResult();
+
+                              juce::ZipFile zip (file);
+                              const auto stored = readEntry (zip, "name.txt").trim();
+                              if (stored.isEmpty())
+                              {
+                                  safe->say ("Это не файл секвенции TC"_ru);
+                                  return;
+                              }
+                              const auto name = Library::sanitize (stored);
+                              auto& lib = safe->library;
+                              const auto dir = lib.projectDir (name);
+                              const bool existed = dir.isDirectory();
+                              const bool wasCurrent = lib.getProject() == name;
+                              auto mediaDir = safe->engine.getDataDirectory().getChildFile ("Media").getChildFile ("seq_" + name);
+
+                              safe->saveEverything (false);
+                              safe->engine.discardSequences (dir);    // nothing of the old one is saved back
+                              dir.deleteRecursively();
+                              mediaDir.deleteRecursively();
+                              mediaDir.createDirectory();
+                              if (! zip.uncompressTo (mediaDir, true).wasOk())
+                              {
+                                  safe->say ("Не удалось распаковать секвенцию"_ru);
+                                  return;
+                              }
+                              mediaDir.getChildFile ("name.txt").deleteFile();
+
+                              auto comps = dir.getChildFile ("Compositions");
+                              auto lists = dir.getChildFile ("Playlists");
+                              comps.createDirectory();
+                              lists.createDirectory();
+                              int songs = 0;
+                              for (auto& f : mediaDir.getChildFile ("Compositions").findChildFiles (juce::File::findFiles, false, "*.xml"))
+                                  if (auto xml = juce::XmlDocument::parse (f))
+                                  {
+                                      unpackClips (*xml, mediaDir);
+                                      comps.getChildFile (f.getFileName()).replaceWithText (xml->toString());
+                                      ++songs;
+                                  }
+                              for (auto& f : mediaDir.getChildFile ("Playlists").findChildFiles (juce::File::findFiles, false, "*"))
+                                  f.copyFileTo (lists.getChildFile (f.getFileName()));
+                              mediaDir.getChildFile ("Compositions").deleteRecursively();
+                              mediaDir.getChildFile ("Playlists").deleteRecursively();
+
+                              if (wasCurrent)
+                              {
+                                  // the open sequence was replaced: open it again from disk
+                                  lib.setProject (name);
+                                  safe->playlist = Playlist();
+                                  safe->playlistIndex = -1;
+                                  const auto pl = lib.playlistNames();
+                                  if (! pl.isEmpty())
+                                      lib.loadPlaylist (pl[0], safe->playlist);
+                                  safe->enterProject ({});
+                              }
+                              else
+                                  safe->switchProject (name);
+                              safe->say ((existed ? "Секвенция заменена: "_ru : "Секвенция загружена: "_ru) + name
+                                         + " (композиций: "_ru + juce::String (songs) + ")");
                           });
 }
