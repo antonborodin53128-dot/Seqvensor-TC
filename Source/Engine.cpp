@@ -467,12 +467,14 @@ void Engine::audioDeviceStopped()
 
 void Engine::updateCompensation()
 {
-    int maxLatency = 0;
+    // "Comp" on a track: the delay of its chain is applied to every OTHER track (several comp tracks add up)
+    int total = 0;
     for (auto& t : tracks)
-        maxLatency = juce::jmax (maxLatency, t->getCachedLatencySamples());
+        if (t->compensate.load())
+            total += t->getCachedLatencySamples();
 
     for (auto& t : tracks)
-        t->setExtraDelay (t->compensate.load() ? maxLatency - t->getCachedLatencySamples() : 0);
+        t->setExtraDelay (total - (t->compensate.load() ? t->getCachedLatencySamples() : 0));
 }
 
 void Engine::audioDeviceIOCallbackWithContext (const float* const* inputChannelData, int numInputChannels,

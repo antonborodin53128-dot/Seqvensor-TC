@@ -105,8 +105,7 @@ TrackComponent::TrackComponent (Engine& engineToUse, std::shared_ptr<Track> trac
     addAndMakeVisible (recButton);
 
     compButton.setToggleState (track->compensate.load(), juce::dontSendNotification);
-    compButton.setTooltip ("Выровнять эту дорожку по задержке самой медленной цепочки. "_ru
-                           "Выключено - дорожка идёт без дополнительной задержки."_ru);
+    compButton.setTooltip ("Задержка цепочки этой дорожки применяется ко всем остальным дорожкам. У нескольких дорожек задержки суммируются."_ru);
     compButton.onClick = [this] { track->compensate = compButton.getToggleState(); };
     addAndMakeVisible (compButton);
 
@@ -263,6 +262,6 @@ void TrackComponent::updateLive()
 
     const double sr = juce::jmax (1.0, engine.getSampleRate());
     const double ms = track->getCachedLatencySamples() * 1000.0 / sr;
-    compButton.setTooltip ("Задержка цепочки: "_ru + juce::String (ms, 1) + " мс. Выровнять эту дорожку по задержке "_ru
-                           "самой медленной цепочки (выключено - без дополнительной задержки)."_ru);
+    compButton.setTooltip ("Задержка цепочки: "_ru + juce::String (ms, 1) + " мс. Включено - эта задержка применяется ко всем остальным дорожкам "_ru
+                           "(у нескольких дорожек задержки суммируются)."_ru);
 }
