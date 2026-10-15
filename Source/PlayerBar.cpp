@@ -10,7 +10,7 @@ PlayerBar::PlayerBar() : list ("songs", nullptr)
 {
     list.setModel (this);
     list.setRowHeight (28);
-    list.setMultipleSelection (true);
+    list.setMultipleSelectionEnabled (true);
     list.setWantsKeyboardFocus (false);   // Space and the arrows belong to the main window
     list.setOutlineThickness (0);
     list.setColour (juce::ListBox::backgroundColourId, juce::Colours::transparentBlack);
