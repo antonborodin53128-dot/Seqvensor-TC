@@ -40,6 +40,8 @@ public:
 private:
     // top bar / menus
     void showMainMenu();
+    void exportScene();
+    void importScene();
     void showAudioSettings();
     void showPluginChooser();
     void showPluginScanner();

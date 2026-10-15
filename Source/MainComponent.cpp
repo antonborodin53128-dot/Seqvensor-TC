@@ -6,6 +6,7 @@
 #endif
 #include "MainComponent.h"
 #include "TempoDetect.h"
+#include "Builtin.h"
 
 // ---------------------------------------------------------------- plugin window
 
@@ -1155,6 +1156,9 @@ void MainComponent::showMainMenu()
     menu.addItem (4, "Добавить дорожку"_ru);
     menu.addItem (7, "Привязка клипов к сетке"_ru, true, timelineView.snap);
     menu.addItem (6, "Сохранить всё"_ru);
+    menu.addSeparator();
+    menu.addItem (8, "Сцена: сохранить в файл (для другого ПК)..."_ru);
+    menu.addItem (9, "Сцена: загрузить из файла..."_ru);
 
     juce::Component::SafePointer<MainComponent> safe (this);
     menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&menuButton),
@@ -1169,6 +1173,8 @@ void MainComponent::showMainMenu()
                                 case 3: safe->showPluginScanner(); break;
                                 case 4: safe->addTrack(); break;
                                 case 6: safe->saveEverything (true); break;
+                                case 8: safe->exportScene(); break;
+                                case 9: safe->importScene(); break;
                                 case 7: safe->timelineView.snap = ! safe->timelineView.snap; break;
                                 default: break;
                             }
@@ -1451,7 +1457,12 @@ void MainComponent::tapTempo()
 void MainComponent::changeListenerCallback (juce::ChangeBroadcaster* source)
 {
     if (source == &engine.knownPlugins)
+    {
+        // the built-in effects cannot be removed from the list ("Remove" / "Clear list" in the scanner dialog)
+        for (auto& d : BuiltinFormat::allDescriptions())
+            engine.knownPlugins.addType (d);
         engine.savePluginList();
+    }
 }
 
 // Runs once per screen refresh. The audio clock only advances once per audio block, so the displayed position
@@ -2323,4 +2334,138 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
         return true;
     }
     return false;
+}
+
+
+// ---------------------------------------------------------------- scene files
+// A scene file (.tcscene) is a zip: song.xml + every audio file of the song (paths inside are relative),
+// so it opens on any PC. Plugins are stored by name and state: the other PC needs the same VST3s.
+
+void MainComponent::exportScene()
+{
+    auto seq = engine.getActiveSequence();
+    if (seq == nullptr)
+    {
+        say ("Нет открытой композиции"_ru);
+        return;
+    }
+    engine.saveActiveSequence();
+
+    chooser = std::make_unique<juce::FileChooser> ("Сохранить сцену в файл"_ru,
+                                                   juce::File::getSpecialLocation (juce::File::userDocumentsDirectory)
+                                                       .getChildFile (Library::sanitize (seq->name) + ".tcscene"),
+                                                   "*.tcscene");
+    juce::Component::SafePointer<MainComponent> safe (this);
+    const auto songFile = seq->file;
+    chooser->launchAsync (juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::canSelectFiles
+                              | juce::FileBrowserComponent::warnAboutOverwriting,
+                          [safe, songFile] (const juce::FileChooser& fc)
+                          {
+                              if (safe == nullptr || fc.getResult() == juce::File())
+                                  return;
+                              auto target = fc.getResult().withFileExtension ("tcscene");
+
+                              auto xml = juce::XmlDocument::parse (songFile);
+                              if (xml == nullptr)
+                              {
+                                  safe->say ("Не удалось прочитать композицию"_ru);
+                                  return;
+                              }
+
+                              juce::ZipFile::Builder builder;
+                              std::map<juce::String, juce::String> packed;   // full path -> name inside the zip
+                              juce::StringArray usedNames;
+                              int missing = 0;
+
+                              for (auto* clip : xml->getChildWithTagNameIterator ("TRACK"))
+                                  for (auto* ce : clip->getChildWithTagNameIterator ("CLIP"))
+                                  {
+                                      const auto path = ce->getStringAttribute ("file");
+                                      juce::File f (path);
+                                      if (! f.existsAsFile())
+                                      {
+                                          ++missing;
+                                          continue;
+                                      }
+                                      auto it = packed.find (path);
+                                      if (it == packed.end())
+                                      {
+                                          auto name = Library::uniqueName (usedNames, f.getFileName());
+                                          usedNames.add (name);
+                                          builder.addFile (f, 0, "audio/" + name);
+                                          it = packed.emplace (path, "audio/" + name).first;
+                                      }
+                                      ce->setAttribute ("file", it->second);
+                                  }
+
+                              const auto text = xml->toString();
+                              builder.addEntry (new juce::MemoryInputStream (text.toRawUTF8(), text.getNumBytesAsUTF8(), true),
+                                                0, "song.xml", juce::Time::getCurrentTime());
+
+                              target.deleteFile();
+                              juce::FileOutputStream out (target);
+                              if (out.failedToOpen())
+                              {
+                                  safe->say ("Не удалось записать файл"_ru);
+                                  return;
+                              }
+                              builder.writeToStream (out, nullptr);
+                              out.flush();
+                              safe->say ("Сцена сохранена: "_ru + target.getFileName()
+                                         + (missing > 0 ? " (нет файлов: "_ru + juce::String (missing) + ")" : juce::String()));
+                          });
+}
+
+void MainComponent::importScene()
+{
+    chooser = std::make_unique<juce::FileChooser> ("Загрузить сцену из файла"_ru,
+                                                   juce::File::getSpecialLocation (juce::File::userDocumentsDirectory), "*.tcscene");
+    juce::Component::SafePointer<MainComponent> safe (this);
+    chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
+                          [safe] (const juce::FileChooser& fc)
+                          {
+                              if (safe == nullptr || ! fc.getResult().existsAsFile())
+                                  return;
+                              const auto file = fc.getResult();
+
+                              juce::ZipFile zip (file);
+                              const int songIndex = zip.getIndexOfFileName ("song.xml");
+                              if (songIndex < 0)
+                              {
+                                  safe->say ("Это не файл сцены TC"_ru);
+                                  return;
+                              }
+
+                              const auto name = Library::uniqueName (safe->library.sequenceNames(),
+                                                                     Library::sanitize (file.getFileNameWithoutExtension()));
+                              auto mediaDir = safe->engine.getDataDirectory().getChildFile ("Media").getChildFile (name);
+                              mediaDir.createDirectory();
+                              if (! zip.uncompressTo (mediaDir, true).wasOk())
+                              {
+                                  safe->say ("Не удалось распаковать сцену"_ru);
+                                  return;
+                              }
+
+                              auto xml = juce::XmlDocument::parse (mediaDir.getChildFile ("song.xml"));
+                              mediaDir.getChildFile ("song.xml").deleteFile();
+                              if (xml == nullptr)
+                              {
+                                  safe->say ("Файл сцены повреждён"_ru);
+                                  return;
+                              }
+
+                              for (auto* track : xml->getChildWithTagNameIterator ("TRACK"))
+                                  for (auto* ce : track->getChildWithTagNameIterator ("CLIP"))
+                                  {
+                                      const auto rel = ce->getStringAttribute ("file");
+                                      if (rel.startsWith ("audio/"))
+                                          ce->setAttribute ("file", mediaDir.getChildFile (rel).getFullPathName());
+                                  }
+
+                              safe->engine.saveActiveSequence();
+                              safe->library.sequenceFile (name).replaceWithText (xml->toString());
+                              safe->addToPlaylist (name);
+                              safe->switchToSequence (name, safe->playlist.items.indexOf (name));
+                              safe->say ("Сцена загружена: "_ru + name);
+                          });
 }
