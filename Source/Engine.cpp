@@ -5,6 +5,7 @@
 #include "LiveStretch.h"
 #include "KeyDetect.h"
 #include "Builtin.h"
+#include "Text.h"
 
 Engine::Engine()
 {
@@ -1392,14 +1393,14 @@ bool Engine::startRecording (juce::String& message)
         return true;
     if (! isAudioAlive())
     {
-        message = "Аудиоустройство не запущено";
+        message = "Аудиоустройство не запущено"_ru;
         return false;
     }
 
     const auto folder = getRecordFolder();
     if (! folder.createDirectory().wasOk())
     {
-        message = "Не удалось открыть папку записи";
+        message = "Не удалось открыть папку записи"_ru;
         return false;
     }
 
@@ -1431,13 +1432,13 @@ bool Engine::startRecording (juce::String& message)
     if (started == 0)
     {
         recordThread.stopThread (2000);
-        message = armed == 0 ? "Ни на одной дорожке не включена кнопка REC.\nВключите REC (красный кружок) на нужных дорожках и нажмите запись ещё раз."
-                             : "У дорожек с включённым REC не выбран вход (кнопка \"Вход\" на дорожке):\n" + noInput.joinIntoString ("\n");
+        message = armed == 0 ? "Ни на одной дорожке не включена кнопка REC.\nВключите REC (красный кружок) на нужных дорожках и нажмите запись ещё раз."_ru
+                             : "У дорожек с включённым REC не выбран вход (кнопка «Вход» на дорожке):\n"_ru + noInput.joinIntoString ("\n");
         return false;
     }
     recording.store (true);
     recordStartMs.store (juce::Time::getMillisecondCounterHiRes());
-    message = "Запись: дорожек " + juce::String (started);
+    message = "Запись: дорожек "_ru + juce::String (started);
     return true;
 }
 
