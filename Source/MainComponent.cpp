@@ -10,7 +10,72 @@
 
 // ---------------------------------------------------------------- plugin window
 
-PluginWindow::PluginWindow (juce::AudioPluginInstance& pluginToShow, std::function<void (PluginWindow*)> onCloseRequested)
+// content of a plugin window: a thin bar with the on / off switch above the editor of the plugin
+class PluginFrame : public juce::Component, private juce::ComponentListener, private juce::Timer
+{
+public:
+    static constexpr int barHeight = 34;
+
+    PluginFrame (juce::AudioProcessorEditor* editorToOwn, std::function<bool()> isBypassed, std::function<void()> toggleBypass)
+        : editor (editorToOwn), bypassed (std::move (isBypassed)), toggle (std::move (toggleBypass)),
+          power (IconButton::Icon::Power)
+    {
+        addAndMakeVisible (editor.get());
+        editor->addComponentListener (this);
+        power.setTooltip ("Включить / выключить плагин"_ru);
+        power.onClick = [this] { if (toggle) toggle(); refreshState(); };
+        addAndMakeVisible (power);
+        refreshState();
+        setSize (juce::jmax (260, editor->getWidth()), editor->getHeight() + barHeight);
+        startTimerHz (8);
+    }
+
+    ~PluginFrame() override { editor->removeComponentListener (this); }
+
+    void paint (juce::Graphics& g) override
+    {
+        g.fillAll (Pal::surface);
+        g.setColour (on ? Pal::text : Pal::textDim);
+        g.setFont (juce::FontOptions (14.0f, juce::Font::bold));
+        g.drawText (on ? "Включён"_ru : "Выключен (обход)"_ru, 52, 0, getWidth() - 60, barHeight, juce::Justification::centredLeft);
+    }
+
+    void resized() override
+    {
+        power.setBounds (10, 4, 34, barHeight - 8);
+        editor->setTopLeftPosition (0, barHeight);
+        if (editor->getWidth() != getWidth() || editor->getHeight() != getHeight() - barHeight)
+            editor->setSize (getWidth(), getHeight() - barHeight);
+    }
+
+private:
+    void componentMovedOrResized (juce::Component& c, bool, bool wasResized) override
+    {
+        if (&c == editor.get() && wasResized && (getWidth() != editor->getWidth() || getHeight() != editor->getHeight() + barHeight))
+            setSize (juce::jmax (260, editor->getWidth()), editor->getHeight() + barHeight);
+    }
+
+    void timerCallback() override { refreshState(); }
+    void refreshState()
+    {
+        const bool now = bypassed ? ! bypassed() : true;
+        if (now != on)
+        {
+            on = now;
+            repaint();
+        }
+        power.setActive (on);
+    }
+
+    std::unique_ptr<juce::AudioProcessorEditor> editor;
+    std::function<bool()> bypassed;
+    std::function<void()> toggle;
+    IconButton power;
+    bool on = true;
+};
+
+PluginWindow::PluginWindow (juce::AudioPluginInstance& pluginToShow, std::function<void (PluginWindow*)> onCloseRequested,
+                            std::function<bool()> isBypassed, std::function<void()> toggleBypass)
     : juce::DocumentWindow (pluginToShow.getName(), Pal::surface, juce::DocumentWindow::closeButton),
       plugin (&pluginToShow),
       onClose (std::move (onCloseRequested))
@@ -34,8 +99,9 @@ PluginWindow::PluginWindow (juce::AudioPluginInstance& pluginToShow, std::functi
     if (editor == nullptr)
         editor = new juce::GenericAudioProcessorEditor (*plugin);
 
-    setContentOwned (editor, true);
-    setResizable (editor->isResizable(), false);
+    const bool resizableEditor = editor->isResizable();
+    setContentOwned (new PluginFrame (editor, std::move (isBypassed), std::move (toggleBypass)), true);
+    setResizable (resizableEditor, false);
     centreWithSize (getWidth(), getHeight());
     setVisible (true);
 }
@@ -485,6 +551,15 @@ void MainComponent::rebuildTracks()
             showSlotMenu (t, i, c);            // empty slot: choose a plugin
         else
             openPluginEditor (t, i);
+    };
+    cb.slotBypass = [this] (std::shared_ptr<Track> t, int i)
+    {
+        if (auto* s = t->getSlot (i))
+        {
+            s->bypass = ! s->bypass.load();
+            t->refreshLatency();
+            refreshStrips();
+        }
     };
     cb.slotMenu = [this] (std::shared_ptr<Track> t, int i, juce::Component* c) { showSlotMenu (t, i, c); };
     cb.outputMenu = [this] (std::shared_ptr<Track> t, juce::Component* c) { showOutputMenu (t, c); };
@@ -1149,6 +1224,29 @@ void MainComponent::openPluginEditor (const std::shared_ptr<Track>& track, int s
         }
 
     juce::Component::SafePointer<MainComponent> safe (this);
+    auto* instance = slot->plugin.get();
+    std::weak_ptr<Track> weakTrack = track;
+    auto findSlot = [weakTrack, instance]() -> Track::Slot*
+    {
+        if (auto t = weakTrack.lock())
+            for (int i = 0; i < Track::numSlots; ++i)
+                if (auto* sl = t->getSlot (i))
+                    if (sl->plugin.get() == instance)
+                        return sl;
+        return nullptr;
+    };
+    auto isBypassed = [findSlot] { auto* sl = findSlot(); return sl != nullptr && sl->bypass.load(); };
+    auto toggle = [safe, weakTrack, findSlot]
+    {
+        if (auto* sl = findSlot())
+        {
+            sl->bypass = ! sl->bypass.load();
+            if (auto t = weakTrack.lock())
+                t->refreshLatency();
+            if (safe != nullptr)
+                safe->refreshStrips();
+        }
+    };
     pluginWindows.add (new PluginWindow (*slot->plugin, [safe] (PluginWindow* w)
     {
         juce::MessageManager::callAsync ([safe, w]
@@ -1156,7 +1254,7 @@ void MainComponent::openPluginEditor (const std::shared_ptr<Track>& track, int s
             if (safe != nullptr)
                 safe->pluginWindows.removeObject (w, true);
         });
-    }));
+    }, isBypassed, toggle));
 }
 
 void MainComponent::closeEditorsFor (juce::AudioPluginInstance* plugin)

@@ -56,7 +56,7 @@ private:
 class IconButton : public juce::Button
 {
 public:
-    enum class Icon { Play, Pause, Stop, Close, Gear, Menu, Arrow, Prev, Next, Save, Trash, Plus, Record };
+    enum class Icon { Play, Pause, Stop, Close, Gear, Menu, Arrow, Prev, Next, Save, Trash, Plus, Record, Power };
 
     explicit IconButton (Icon i) : juce::Button ({}), icon (i) {}
 
@@ -131,6 +131,15 @@ public:
                     g.strokePath (ring, juce::PathStrokeType (2.5f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
                 }
                 break;
+            case Icon::Power:
+            {
+                const float rr = s * 1.15f;
+                juce::Path arc;
+                arc.addCentredArc (c.x, c.y + s * 0.1f, rr, rr, 0.0f, 0.6f, juce::MathConstants<float>::twoPi - 0.6f, true);
+                g.strokePath (arc, juce::PathStrokeType (2.0f));
+                g.drawLine (c.x, c.y - s * 1.3f, c.x, c.y - s * 0.1f, 2.0f);
+                break;
+            }
             case Icon::Plus:
                 g.fillRoundedRectangle (juce::Rectangle<float> (s * 2.2f, 2.2f).withCentre (c), 1.0f);
                 g.fillRoundedRectangle (juce::Rectangle<float> (2.2f, s * 2.2f).withCentre (c), 1.0f);
@@ -329,11 +338,12 @@ public:
         std::function<void (std::shared_ptr<Track>, juce::Component*)> inputMenu;
         std::function<void (std::shared_ptr<Track>, int, juce::Component*)> slotClick;   // name of a slot
         std::function<void (std::shared_ptr<Track>, int, juce::Component*)> slotMenu;    // arrow of a slot
+        std::function<void (std::shared_ptr<Track>, int)> slotBypass;                    // power button of a slot
         std::function<void (std::shared_ptr<Track>, int, const juce::String&, bool)> slotDropped;   // plugin dropped on a slot (payload, copy)
         std::function<void (std::shared_ptr<Track>, juce::Component*)> outputMenu;
     };
 
-    static constexpr int headerWidth = 480;
+    static constexpr int headerWidth = 500;
     static constexpr int rowHeight = 132;
 
     TrackComponent (Engine& engineToUse, std::shared_ptr<Track> trackToUse, TimelineView& view,
@@ -366,6 +376,8 @@ private:
                                              IconButton (IconButton::Icon::Arrow), IconButton (IconButton::Icon::Arrow),
                                              IconButton (IconButton::Icon::Arrow) };
     bool slotUsed[Track::numSlots] {};
+    IconButton slotPower[Track::numSlots] { IconButton (IconButton::Icon::Power), IconButton (IconButton::Icon::Power), IconButton (IconButton::Icon::Power),
+                                            IconButton (IconButton::Icon::Power), IconButton (IconButton::Icon::Power) };
 
     StateButton muteButton { "MUTE", StateButton::Style::Text };
     StateButton soloButton { "SOLO", StateButton::Style::Text };

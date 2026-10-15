@@ -11,7 +11,8 @@
 class PluginWindow : public juce::DocumentWindow
 {
 public:
-    PluginWindow (juce::AudioPluginInstance& pluginToShow, std::function<void (PluginWindow*)> onCloseRequested);
+    PluginWindow (juce::AudioPluginInstance& pluginToShow, std::function<void (PluginWindow*)> onCloseRequested,
+                  std::function<bool()> isBypassed = {}, std::function<void()> toggleBypass = {});
 
     void closeButtonPressed() override { if (onClose) onClose (this); }
     juce::AudioPluginInstance* getPlugin() const { return plugin; }

@@ -64,6 +64,10 @@ TrackComponent::TrackComponent (Engine& engineToUse, std::shared_ptr<Track> trac
         };
         addAndMakeVisible (slotButtons[i]);
 
+        slotPower[i].setTooltip ("Включить / выключить плагин (обход)"_ru);
+        slotPower[i].onClick = [this, i] { if (cb.slotBypass) cb.slotBypass (track, i); };
+        addChildComponent (slotPower[i]);
+
         slotArrows[i].setTooltip ("Меню слота: обход, заменить, убрать"_ru);
         slotArrows[i].onClick = [this, i] { if (cb.slotMenu) cb.slotMenu (track, i, &slotArrows[i]); };
         addChildComponent (slotArrows[i]);
@@ -174,6 +178,8 @@ void TrackComponent::refreshAll()
             b.setTooltip ("Открыть окно плагина: "_ru + slot->description.manufacturerName + " - " + slot->description.name);
         }
         slotArrows[i].setVisible (slot != nullptr);
+        slotPower[i].setVisible (slot != nullptr);
+        slotPower[i].setActive (slot != nullptr && ! slot->bypass.load());
     }
 
     // output
@@ -216,15 +222,18 @@ void TrackComponent::resized()
     metroButton.setBounds (colA.removeFromTop (26));
 
     // column B: five plugin slots
-    auto colB = h.removeFromLeft (122);
+    auto colB = h.removeFromLeft (142);
     h.removeFromLeft (8);
     for (int i = 0; i < Track::numSlots; ++i)
     {
         auto row = colB.removeFromTop (20);
         if (slotUsed[i])
+        {
+            slotPower[i].setBounds (row.removeFromLeft (20));
+            row.removeFromLeft (2);
             slotArrows[i].setBounds (row.removeFromRight (18));
-        if (slotUsed[i])
             row.removeFromRight (2);
+        }
         slotButtons[i].setBounds (row);
         colB.removeFromTop (4);
     }
