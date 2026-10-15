@@ -186,6 +186,22 @@ void Engine::removeTrack (const std::shared_ptr<Track>& track)
         onTracksChanged();
 }
 
+void Engine::moveTrack (const std::shared_ptr<Track>& track, int newIndex)
+{
+    {
+        const juce::ScopedLock sl (tracksLock);
+        auto it = std::find (tracks.begin(), tracks.end(), track);
+        if (it == tracks.end())
+            return;
+        auto keep = *it;
+        tracks.erase (it);
+        newIndex = juce::jlimit (0, (int) tracks.size(), newIndex);
+        tracks.insert (tracks.begin() + newIndex, keep);
+    }
+    if (onTracksChanged)
+        onTracksChanged();
+}
+
 std::vector<std::shared_ptr<Track>> Engine::getTracks() const
 {
     const juce::ScopedLock sl (tracksLock);

@@ -252,6 +252,7 @@ MainComponent::MainComponent()
     addTrackButton.onClick = [this] { addTrack(); };
     addTrackButton.setColour (juce::TextButton::buttonColourId, Pal::surfaceLo);
     trackList.addAndMakeVisible (addTrackButton);
+    trackList.addChildComponent (trackDropLine);
 
     viewport.setViewedComponent (&trackList, false);
     viewport.setScrollBarsShown (true, false);
@@ -282,6 +283,7 @@ MainComponent::MainComponent()
     playerBar.cb.save = [this] { saveEverything (true); };
     playerBar.cb.previous = [this] { stepSong (-1); };
     playerBar.cb.next = [this] { stepSong (1); };
+    playerBar.cb.rowMoved = [this] (PlayerBar::Tab tab, int from, int to) { onPlayerRowMoved (tab, from, to); };
     playerBar.cb.rowClick = [this] (PlayerBar::Tab tab, int id) { onPlayerRowClicked (tab, id); };
     playerBar.cb.rowDouble = [this] (PlayerBar::Tab tab, int id)
     {
@@ -460,6 +462,7 @@ void MainComponent::rebuildTracks()
                 safe->engine.removeTrack (t);
         });
     };
+    cb.dragTrack = [this] (std::shared_ptr<Track> t, int screenY, bool finished) { dragTrackRow (t, screenY, finished); };
     cb.inputMenu = [this] (std::shared_ptr<Track> t, juce::Component* c) { showInputMenu (t, c); };
     cb.slotClick = [this] (std::shared_ptr<Track> t, int i, juce::Component* c)
     {
@@ -494,6 +497,41 @@ void MainComponent::rebuildTracks()
     }
     layoutTracks();
     timelineDirty = true;
+}
+
+void MainComponent::dragTrackRow (std::shared_ptr<Track> t, int screenY, bool finished)
+{
+    const auto tracksNow = engine.getTracks();
+    const int n = (int) tracksNow.size();
+    int from = 0;
+    for (int i = 0; i < n; ++i)
+        if (tracksNow[(size_t) i] == t)
+            from = i;
+
+    const auto local = trackList.getLocalPoint (nullptr, juce::Point<int> (0, screenY));
+    const int to = juce::jlimit (0, juce::jmax (0, n - 1), local.y / TrackComponent::rowHeight);
+
+    if (finished)
+    {
+        trackDropLine.setVisible (false);
+        if (to != from)
+        {
+            juce::Component::SafePointer<MainComponent> safe (this);
+            juce::MessageManager::callAsync ([safe, t, to]
+            {
+                if (safe != nullptr)
+                    safe->engine.moveTrack (t, to);
+            });
+        }
+        return;
+    }
+
+    const auto inViewport = viewport.getLocalPoint (nullptr, juce::Point<int> (0, screenY));
+    viewport.autoScroll (viewport.getWidth() / 2, inViewport.y, 40, 14);
+
+    trackDropLine.setBounds (0, (to + (to > from ? 1 : 0)) * TrackComponent::rowHeight - 2, trackList.getWidth(), 4);
+    trackDropLine.setVisible (true);
+    trackDropLine.toFront (false);
 }
 
 void MainComponent::refreshStrips()
@@ -1768,6 +1806,39 @@ void MainComponent::refreshPlayerBar()
     playerBar.setRows (PlayerBar::Tab::Tracks, std::move (trackRows));
 }
 
+void MainComponent::onPlayerRowMoved (PlayerBar::Tab tab, int from, int to)
+{
+    auto moveIn = [from, to] (juce::StringArray& a)
+    {
+        if (from < 0 || from >= a.size() || to < 0 || to >= a.size())
+            return false;
+        const auto s = a[from];
+        a.remove (from);
+        a.insert (to, s);
+        return true;
+    };
+
+    if (tab == PlayerBar::Tab::Seq)
+    {
+        auto a = library.projectNames();
+        if (moveIn (a))
+            library.setProjectOrder (a);
+    }
+    else if (tab == PlayerBar::Tab::Playlist)
+    {
+        auto a = library.playlistNames();
+        if (moveIn (a))
+            library.setPlaylistOrder (a);
+    }
+    else if (moveIn (playlist.items))
+    {
+        auto seq = engine.getActiveSequence();
+        playlistIndex = seq != nullptr ? playlist.items.indexOf (seq->name) : -1;
+        savePlaylistNow();
+    }
+    refreshPlayerBar();
+}
+
 void MainComponent::onPlayerRowClicked (PlayerBar::Tab tab, int id)
 {
     if (tab == PlayerBar::Tab::Seq)
@@ -2026,6 +2097,7 @@ void MainComponent::renamePlaylist()
                      return;
 
                  library.playlistFile (playlist.name).deleteFile();
+                 library.renamePlaylistInOrder (playlist.name, newName);
                  playlist.name = newName;
                  savePlaylistNow();
                  refreshPlayerBar();

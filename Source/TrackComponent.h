@@ -157,6 +157,31 @@ private:
     bool active = false;
 };
 
+// Grip at the left of the track name: press and drag to move the whole track up / down.
+class GripHandle : public juce::Component
+{
+public:
+    std::function<void (int screenY, bool finished)> onDrag;
+
+    GripHandle() { setMouseCursor (juce::MouseCursor::DraggingHandCursor); }
+
+    void paint (juce::Graphics& g) override
+    {
+        g.setColour (hot ? Pal::text : Pal::textDim);
+        auto c = getLocalBounds().toFloat().getCentre();
+        for (int row = -2; row <= 2; ++row)
+            for (int col = -1; col <= 0; ++col)
+                g.fillEllipse (c.x + (float) col * 5.0f + 0.5f, c.y + (float) row * 6.0f - 1.5f, 3.0f, 3.0f);
+    }
+    void mouseEnter (const juce::MouseEvent&) override { hot = true; repaint(); }
+    void mouseExit (const juce::MouseEvent&) override { hot = false; repaint(); }
+    void mouseDrag (const juce::MouseEvent& e) override { if (onDrag) onDrag (e.getScreenY(), false); }
+    void mouseUp (const juce::MouseEvent& e) override { if (onDrag && e.mouseWasDraggedSinceMouseDown()) onDrag (e.getScreenY(), true); }
+
+private:
+    bool hot = false;
+};
+
 // Vertical stereo level meter.
 class LevelMeter : public juce::Component
 {
@@ -285,6 +310,7 @@ public:
         std::function<void (std::shared_ptr<Track>, int, juce::Component*)> slotMenu;    // arrow of a slot
         std::function<void (std::shared_ptr<Track>, int, const juce::String&, bool)> slotDropped;   // plugin dropped on a slot (payload, copy)
         std::function<void (std::shared_ptr<Track>, juce::Component*)> outputMenu;
+        std::function<void (std::shared_ptr<Track>, int screenY, bool finished)> dragTrack;   // grip dragged
     };
 
     static constexpr int headerWidth = 480;
@@ -308,6 +334,7 @@ private:
     std::shared_ptr<Track> track;
     Callbacks cb;
 
+    GripHandle grip;
     juce::Label nameLabel;
     IconButton removeButton { IconButton::Icon::Close };
     juce::TextButton inputButton, outputButton;

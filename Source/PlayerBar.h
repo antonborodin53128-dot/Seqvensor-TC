@@ -22,6 +22,7 @@ public:
         std::function<void (Tab, int id)> rowClick, rowDouble;
         std::function<void (Tab)> add, remove;
         std::function<void()> save, previous, next, heightChanged;
+        std::function<void (Tab, int from, int to)> rowMoved;   // a row was dragged to a new place
     };
 
     static constexpr int closedHeight = 100;
@@ -45,6 +46,7 @@ public:
     void paint (juce::Graphics&) override;
     void resized() override;
     void mouseDown (const juce::MouseEvent&) override;
+    void paintOverChildren (juce::Graphics&) override;
 
 private:
     // ListBoxModel
@@ -52,6 +54,20 @@ private:
     void paintListBoxItem (int row, juce::Graphics&, int w, int h, bool selected) override;
     void listBoxItemClicked (int row, const juce::MouseEvent&) override;
     void listBoxItemDoubleClicked (int row, const juce::MouseEvent&) override;
+
+    // clicks are fired on mouse-up so that a press-and-drag can move a row instead of selecting it
+    struct RowWatcher : public juce::MouseListener
+    {
+        explicit RowWatcher (PlayerBar& o) : owner (o) {}
+        void mouseDrag (const juce::MouseEvent& e) override { owner.rowDrag (e); }
+        void mouseUp (const juce::MouseEvent& e) override { owner.rowUp (e); }
+        PlayerBar& owner;
+    };
+    void rowDrag (const juce::MouseEvent&);
+    void rowUp (const juce::MouseEvent&);
+    int rowAt (const juce::MouseEvent&) const;
+    RowWatcher watcher { *this };
+    int pendingRow = -1, dragFrom = -1, dragTo = -1;
 
     void updateTabUi();
     juce::Rectangle<int> tabRect (int index) const;

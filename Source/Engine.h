@@ -71,6 +71,7 @@ public:
     // Tracks (message thread).
     std::shared_ptr<Track> addTrack (const juce::String& name, int forcedId = -1);
     void removeTrack (const std::shared_ptr<Track>& track);
+    void moveTrack (const std::shared_ptr<Track>& track, int newIndex);   // the others shift
     std::vector<std::shared_ptr<Track>> getTracks() const;
     std::shared_ptr<Track> findTrack (int id) const;
     // true if taking the audio of track `sourceId` into `track` would create a loop

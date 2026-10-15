@@ -13,6 +13,7 @@ PlayerBar::PlayerBar() : list ("songs", nullptr)
     list.setOutlineThickness (0);
     list.setColour (juce::ListBox::backgroundColourId, juce::Colours::transparentBlack);
     addAndMakeVisible (list);
+    list.addMouseListener (&watcher, true);
 
     saveButton.setTooltip ("Сохранить всё"_ru);
     saveButton.onClick = [this] { if (cb.save) cb.save(); };
@@ -192,6 +193,8 @@ void PlayerBar::paint (juce::Graphics& g)
 
 void PlayerBar::mouseDown (const juce::MouseEvent& e)
 {
+    if (e.eventComponent != this)
+        return;
     for (int i = 0; i < 3; ++i)
         if (tabRect (i).contains (e.getPosition()))
         {
@@ -235,9 +238,62 @@ void PlayerBar::paintListBoxItem (int row, juce::Graphics& g, int w, int h, bool
 
 void PlayerBar::listBoxItemClicked (int row, const juce::MouseEvent&)
 {
+    pendingRow = row;
+    dragFrom = dragTo = -1;
+}
+
+int PlayerBar::rowAt (const juce::MouseEvent& e) const
+{
+    const auto pos = e.getEventRelativeTo (&list).getPosition();
+    return list.getRowContainingPosition (pos.x, juce::jlimit (0, list.getHeight() - 1, pos.y));
+}
+
+void PlayerBar::rowDrag (const juce::MouseEvent& e)
+{
     const auto& list_ = rows[(int) tab];
-    if (row >= 0 && row < (int) list_.size() && ! list_[(size_t) row].header && cb.rowClick)
-        cb.rowClick (tab, list_[(size_t) row].id);
+    if (pendingRow < 0 || pendingRow >= (int) list_.size() || list_.size() < 2)
+        return;
+    if (dragFrom < 0 && e.getDistanceFromDragStart() < 8)
+        return;
+
+    dragFrom = pendingRow;
+    int to = rowAt (e);
+    if (to < 0)
+        to = e.getEventRelativeTo (&list).getPosition().y < 0 ? 0 : (int) list_.size() - 1;
+    dragTo = juce::jlimit (0, (int) list_.size() - 1, to);
+    list.scrollToEnsureRowIsOnscreen (dragTo);
+    repaint();
+}
+
+void PlayerBar::rowUp (const juce::MouseEvent&)
+{
+    const auto t = tab;
+    const int from = dragFrom, to = dragTo, click = pendingRow;
+    const bool dragged = dragFrom >= 0;
+    pendingRow = dragFrom = dragTo = -1;
+    repaint();
+
+    if (dragged)
+    {
+        if (from != to && to >= 0 && cb.rowMoved)
+            cb.rowMoved (t, from, to);
+        return;
+    }
+
+    const auto& list_ = rows[(int) t];
+    if (click >= 0 && click < (int) list_.size() && ! list_[(size_t) click].header && cb.rowClick)
+        cb.rowClick (t, list_[(size_t) click].id);
+}
+
+void PlayerBar::paintOverChildren (juce::Graphics& g)
+{
+    if (dragFrom < 0 || dragTo < 0)
+        return;
+    const int rh = list.getRowHeight();
+    const int scroll = list.getViewport() != nullptr ? list.getViewport()->getViewPositionY() : 0;
+    const int y = list.getY() + (dragTo + (dragTo > dragFrom ? 1 : 0)) * rh - scroll;
+    g.setColour (Pal::accent);
+    g.fillRoundedRectangle ((float) list.getX() + 6.0f, (float) y - 1.5f, (float) list.getWidth() - 12.0f, 3.0f, 1.5f);
 }
 
 void PlayerBar::listBoxItemDoubleClicked (int row, const juce::MouseEvent&)

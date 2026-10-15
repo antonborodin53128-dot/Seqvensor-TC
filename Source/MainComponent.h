@@ -111,6 +111,8 @@ private:
     void setPinned (bool pinned);
 
     void rebuildTracks();
+    void dragTrackRow (std::shared_ptr<Track> t, int screenY, bool finished);
+    void onPlayerRowMoved (PlayerBar::Tab tab, int from, int to);
     void refreshStrips();
     void layoutTracks();
     void timerCallback() override;
@@ -151,6 +153,11 @@ private:
     // tracks
     juce::Viewport viewport;
     juce::Component trackList;
+    struct DropLine : public juce::Component
+    {
+        DropLine() { setInterceptsMouseClicks (false, false); }
+        void paint (juce::Graphics& g) override { g.setColour (Pal::accent); g.fillRoundedRectangle (getLocalBounds().toFloat().reduced (8.0f, 0.0f), 2.0f); }
+    } trackDropLine;
     juce::OwnedArray<TrackComponent> trackComponents;
     juce::TextButton addTrackButton { "+ Добавить дорожку"_ru };
     juce::Label emptyHint;

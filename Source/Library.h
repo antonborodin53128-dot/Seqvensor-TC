@@ -51,8 +51,12 @@ public:
         for (auto& d : root.findChildFiles (juce::File::findDirectories, false))
             result.add (d.getFileName());
         result.sort (true);
-        return result;
+        return applyOrder (root, result);
     }
+
+    // user order (drag and drop) of the sequences / playlists; the rest stays alphabetical at the end
+    void setProjectOrder (const juce::StringArray& n) const { saveOrder (root, n); }
+    void setPlaylistOrder (const juce::StringArray& n) const { saveOrder (playlistDir(), n); }
 
     const juce::String& getProject() const { return project; }
 
@@ -70,6 +74,7 @@ public:
     {
         if (! projectDir (from).moveFileTo (projectDir (to)))
             return false;
+        renameInOrder (root, from, to);
         if (project == from)
             project = to;
         return true;
@@ -82,7 +87,8 @@ public:
 
     // ---- playlists of the current sequence
     juce::File playlistFile (const juce::String& name) const { return playlistDir().getChildFile (sanitize (name) + ".xml"); }
-    juce::StringArray playlistNames() const { return names (playlistDir()); }
+    juce::StringArray playlistNames() const { return applyOrder (playlistDir(), names (playlistDir())); }
+    void renamePlaylistInOrder (const juce::String& from, const juce::String& to) const { renameInOrder (playlistDir(), from, to); }
 
     bool loadPlaylist (const juce::String& name, Playlist& out) const
     {
@@ -160,6 +166,38 @@ public:
     }
 
 private:
+    static juce::File orderFile (const juce::File& dir) { return dir.getChildFile ("order.txt"); }
+
+    static juce::StringArray applyOrder (const juce::File& dir, const juce::StringArray& alphabetical)
+    {
+        juce::StringArray saved, result;
+        saved.addLines (orderFile (dir).loadFileAsString());
+        for (auto& s : saved)
+            if (alphabetical.contains (s) && ! result.contains (s))
+                result.add (s);
+        for (auto& s : alphabetical)
+            if (! result.contains (s))
+                result.add (s);
+        return result;
+    }
+
+    static void saveOrder (const juce::File& dir, const juce::StringArray& n)
+    {
+        orderFile (dir).replaceWithText (n.joinIntoString ("\n"));
+    }
+
+    static void renameInOrder (const juce::File& dir, const juce::String& from, const juce::String& to)
+    {
+        juce::StringArray saved;
+        saved.addLines (orderFile (dir).loadFileAsString());
+        const int i = saved.indexOf (from);
+        if (i >= 0)
+        {
+            saved.set (i, to);
+            saveOrder (dir, saved);
+        }
+    }
+
     juce::File compositionDir() const { return root.getChildFile (sanitize (project)).getChildFile ("Compositions"); }
     juce::File playlistDir() const { return root.getChildFile (sanitize (project)).getChildFile ("Playlists"); }
 

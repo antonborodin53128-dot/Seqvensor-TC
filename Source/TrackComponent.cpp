@@ -5,6 +5,10 @@ TrackComponent::TrackComponent (Engine& engineToUse, std::shared_ptr<Track> trac
     : engine (engineToUse), track (std::move (trackToUse)), cb (std::move (callbacks)),
       lane (engineToUse, track, view, std::move (laneCallbacks))
 {
+    grip.setTooltip ("Зажмите и перетащите, чтобы поменять дорожку местами"_ru);
+    grip.onDrag = [this] (int y, bool finished) { if (cb.dragTrack) cb.dragTrack (track, y, finished); };
+    addAndMakeVisible (grip);
+
     nameLabel.setText (track->name, juce::dontSendNotification);
     nameLabel.setEditable (false, true, false);
     nameLabel.setJustificationType (juce::Justification::centredLeft);
@@ -193,6 +197,7 @@ void TrackComponent::resized()
     h.removeFromLeft (8);
     auto nameRow = colA.removeFromTop (28);
     removeButton.setBounds (nameRow.removeFromRight (20).withSizeKeepingCentre (20, 20));
+    grip.setBounds (nameRow.removeFromLeft (16));
     nameLabel.setBounds (nameRow);
     colA.removeFromTop (4);
     inputButton.setBounds (colA.removeFromTop (26));
