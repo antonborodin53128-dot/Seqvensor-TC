@@ -51,6 +51,7 @@ TrackComponent::TrackComponent (Engine& engineToUse, std::shared_ptr<Track> trac
             if (cb.slotClick)
                 cb.slotClick (track, i, &slotButtons[i]);
         };
+        slotButtons[i].onRightClick = [this, i] { if (cb.slotBypass && track->getSlot (i) != nullptr) cb.slotBypass (track, i); };
         slotButtons[i].dragPayload = [this, i]() -> juce::var
         {
             if (track->getSlot (i) == nullptr)
@@ -63,10 +64,6 @@ TrackComponent::TrackComponent (Engine& engineToUse, std::shared_ptr<Track> trac
                 cb.slotDropped (track, i, payload, copy);
         };
         addAndMakeVisible (slotButtons[i]);
-
-        slotPower[i].setTooltip ("Включить / выключить плагин (обход)"_ru);
-        slotPower[i].onClick = [this, i] { if (cb.slotBypass) cb.slotBypass (track, i); };
-        addChildComponent (slotPower[i]);
 
         slotArrows[i].setTooltip ("Меню слота: обход, заменить, убрать"_ru);
         slotArrows[i].onClick = [this, i] { if (cb.slotMenu) cb.slotMenu (track, i, &slotArrows[i]); };
@@ -83,7 +80,11 @@ TrackComponent::TrackComponent (Engine& engineToUse, std::shared_ptr<Track> trac
     soloButton.onClick = [this] { track->soloed = soloButton.getToggleState(); };
     addAndMakeVisible (soloButton);
 
-    panSlider.setSliderStyle (juce::Slider::LinearHorizontal);
+    panSlider.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
+    panSlider.setRotaryParameters (juce::MathConstants<float>::pi * 1.25f, juce::MathConstants<float>::pi * 2.75f, true);
+    panSlider.setColour (juce::Slider::rotarySliderFillColourId, Pal::accent);
+    panSlider.setColour (juce::Slider::rotarySliderOutlineColourId, Pal::hairline);
+    panSlider.setColour (juce::Slider::thumbColourId, Pal::text);
     panSlider.setTextBoxStyle (juce::Slider::NoTextBox, true, 0, 0);
     panSlider.setRange (-1.0, 1.0, 0.01);
     panSlider.setDoubleClickReturnValue (true, 0.0);
@@ -175,11 +176,9 @@ void TrackComponent::refreshAll()
             b.setButtonText (slot->description.name);
             b.setColour (juce::TextButton::buttonColourId, slot->bypass.load() ? Pal::surfaceHi : Pal::accent.withMultipliedBrightness (0.5f));
             b.setColour (juce::TextButton::textColourOffId, juce::Colours::white);
-            b.setTooltip ("Открыть окно плагина: "_ru + slot->description.manufacturerName + " - " + slot->description.name);
+            b.setTooltip ("Левая кнопка - открыть плагин, правая - bypass. "_ru + slot->description.manufacturerName + " - " + slot->description.name);
         }
         slotArrows[i].setVisible (slot != nullptr);
-        slotPower[i].setVisible (slot != nullptr);
-        slotPower[i].setActive (slot != nullptr && ! slot->bypass.load());
     }
 
     // output
@@ -222,15 +221,13 @@ void TrackComponent::resized()
     metroButton.setBounds (colA.removeFromTop (26));
 
     // column B: five plugin slots
-    auto colB = h.removeFromLeft (142);
+    auto colB = h.removeFromLeft (122);
     h.removeFromLeft (8);
     for (int i = 0; i < Track::numSlots; ++i)
     {
         auto row = colB.removeFromTop (20);
         if (slotUsed[i])
         {
-            slotPower[i].setBounds (row.removeFromLeft (20));
-            row.removeFromLeft (2);
             slotArrows[i].setBounds (row.removeFromRight (18));
             row.removeFromRight (2);
         }
@@ -245,11 +242,10 @@ void TrackComponent::resized()
     muteButton.setBounds (msRow.removeFromLeft (48));
     soloButton.setBounds (msRow.removeFromRight (48));
     colC.removeFromTop (4);
+    panSlider.setBounds (colC.removeFromRight (46).removeFromTop (58));
     recButton.setBounds (colC.removeFromTop (26));
     colC.removeFromTop (4);
     compButton.setBounds (colC.removeFromTop (22));
-    colC.removeFromTop (4);
-    panSlider.setBounds (colC.removeFromTop (22));
 
     // column D: numeric peak, fader and meter
     readout.setBounds (h.removeFromTop (20));

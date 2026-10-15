@@ -1086,7 +1086,7 @@ void MainComponent::showSlotMenu (const std::shared_ptr<Track>& track, int slotI
     if (slot != nullptr)
     {
         menu.addItem (1, "Открыть окно плагина"_ru);
-        menu.addItem (3, "Обход (bypass)"_ru, true, slot->bypass.load());
+        menu.addItem (3, "Bypass", true, slot->bypass.load());
         menu.addItem (4, "Убрать из слота"_ru);
         menu.addSeparator();
 

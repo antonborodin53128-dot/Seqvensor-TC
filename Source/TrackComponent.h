@@ -286,10 +286,21 @@ class SlotButton : public juce::TextButton, public juce::DragAndDropTarget
 public:
     std::function<juce::var()> dragPayload;                                  // void = this slot cannot be dragged
     std::function<void (const juce::String& payload, bool copy)> onDropped;
+    std::function<void()> onRightClick;                                      // right click = bypass
 
     bool consumeDragFlag() { const bool d = justDragged; justDragged = false; return d; }
 
-    void mouseDown (const juce::MouseEvent& e) override { justDragged = false; juce::TextButton::mouseDown (e); }
+    void mouseDown (const juce::MouseEvent& e) override
+    {
+        justDragged = false;
+        if (e.mods.isPopupMenu())
+        {
+            if (onRightClick)
+                onRightClick();
+            return;
+        }
+        juce::TextButton::mouseDown (e);
+    }
     void mouseDrag (const juce::MouseEvent& e) override
     {
         juce::TextButton::mouseDrag (e);
@@ -343,7 +354,7 @@ public:
         std::function<void (std::shared_ptr<Track>, juce::Component*)> outputMenu;
     };
 
-    static constexpr int headerWidth = 500;
+    static constexpr int headerWidth = 480;
     static constexpr int rowHeight = 132;
 
     TrackComponent (Engine& engineToUse, std::shared_ptr<Track> trackToUse, TimelineView& view,
@@ -376,8 +387,6 @@ private:
                                              IconButton (IconButton::Icon::Arrow), IconButton (IconButton::Icon::Arrow),
                                              IconButton (IconButton::Icon::Arrow) };
     bool slotUsed[Track::numSlots] {};
-    IconButton slotPower[Track::numSlots] { IconButton (IconButton::Icon::Power), IconButton (IconButton::Icon::Power), IconButton (IconButton::Icon::Power),
-                                            IconButton (IconButton::Icon::Power), IconButton (IconButton::Icon::Power) };
 
     StateButton muteButton { "MUTE", StateButton::Style::Text };
     StateButton soloButton { "SOLO", StateButton::Style::Text };
