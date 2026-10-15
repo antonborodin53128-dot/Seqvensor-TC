@@ -2759,7 +2759,7 @@ namespace
                 }
             if (resetRect().contains (e.position))
                 setKey (plug.key->get());
-            if (powerRect().contains (e.position))
+            if (powerRect().toFloat().contains (e.position))
                 setBool (*plug.on, ! plug.on->get());
         }
 
