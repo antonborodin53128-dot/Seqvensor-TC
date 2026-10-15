@@ -2,6 +2,7 @@
 #include "ReverbCore.h"
 #include "OverdriveCore.h"
 #include "AmpCore.h"
+#include "AutotuneCore.h"
 #include "Text.h"
 
 #include <algorithm>
@@ -2364,6 +2365,502 @@ namespace
 
     juce::AudioProcessorEditor* AmpPlugin::createEditor() { return new AmpEditor (*this); }
 
+
+    // ------------------------------------------------------------ autotune (short bounded delay, see AutotuneCore.h)
+    namespace tunekeys
+    {
+        const char* const noteNames[12] = { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
+        const char* const scaleNames[5] = { "Major", "Minor", "Major Pentatonic", "Minor Pentatonic", "Chromatic" };
+        const int scaleSteps[5][12] = { { 0, 2, 4, 5, 7, 9, 11, -1, -1, -1, -1, -1 }, { 0, 2, 3, 5, 7, 8, 10, -1, -1, -1, -1, -1 },
+                                        { 0, 2, 4, 7, 9, -1, -1, -1, -1, -1, -1, -1 }, { 0, 3, 5, 7, 10, -1, -1, -1, -1, -1, -1, -1 },
+                                        { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 } };
+
+        // key index: 0 = Chromatic, 1 + root * 4 + scale (scale 0..3)
+        inline std::uint16_t maskFor (int key)
+        {
+            if (key <= 0)
+                return 0x0FFF;
+            const int root = (key - 1) / 4, sc = (key - 1) % 4;
+            std::uint16_t m = 0;
+            for (int s : scaleSteps[sc])
+                if (s >= 0)
+                    m |= (std::uint16_t) (1u << ((root + s) % 12));
+            return m;
+        }
+        inline juce::String keyName (int key)
+        {
+            if (key <= 0)
+                return "Chromatic";
+            return juce::String (noteNames[(key - 1) / 4]) + " " + scaleNames[(key - 1) % 4];
+        }
+    }
+
+    class TunePlugin : public BuiltinBase
+    {
+    public:
+        TunePlugin() : BuiltinBase ("tune", "Autotune", "Pitch correction with note keyboard, retune speed and choir voices")
+        {
+            retune = addFloat ("rt", "Retune Speed", 0.0f, 400.0f, 30.0f, 0.12f);
+            human = addLinear ("hu", "Humanize", 0.0f, 100.0f, 10.0f);
+            flex = addLinear ("fx", "Flex Tune", 0.0f, 100.0f, 15.0f);
+            voicesP = addLinear ("vo", "Voices", 0.0f, 6.0f, 0.0f);
+            spreadP = addLinear ("sp", "Spread", 0.0f, 100.0f, 40.0f);
+            detune = addLinear ("de", "Detune", 430.0f, 450.0f, 440.0f);
+            classic = new juce::AudioParameterBool (juce::ParameterID { "cl", 1 }, "Classic", false);
+            hq = new juce::AudioParameterBool (juce::ParameterID { "hq", 1 }, "HQ", false);
+            on = new juce::AudioParameterBool (juce::ParameterID { "on", 1 }, "On", true);
+            range = new juce::AudioParameterChoice (juce::ParameterID { "ra", 1 }, "Vocal Range",
+                                                    juce::StringArray { "Soprano", "Alto/Tenor", "Low Male", "Instrument" }, 1);
+            key = new juce::AudioParameterInt (juce::ParameterID { "ky", 1 }, "Key", 0, 48, 0);
+            for (auto* p : { (juce::AudioProcessorParameter*) classic, (juce::AudioProcessorParameter*) hq, (juce::AudioProcessorParameter*) on,
+                             (juce::AudioProcessorParameter*) range, (juce::AudioProcessorParameter*) key })
+                juce::AudioProcessor::addParameter (p);
+            for (int i = 0; i < 12; ++i)
+            {
+                note[i] = new juce::AudioParameterBool (juce::ParameterID { "n" + juce::String (i), 1 }, juce::String (tunekeys::noteNames[i]), true);
+                juce::AudioProcessor::addParameter (note[i]);
+            }
+        }
+
+        void processBlock (juce::AudioBuffer<float>& buf, juce::MidiBuffer&) override
+        {
+            juce::ScopedNoDenormals noDenormals;
+            const int n = buf.getNumSamples(), nch = juce::jmin (2, buf.getNumChannels());
+            if (nch == 0)
+                return;
+
+            tctune::Params p;
+            p.retuneMs = retune->get();
+            p.humanize = human->get();
+            p.flex = flex->get();
+            p.classic = classic->get();
+            p.hq = hq->get();
+            p.refHz = detune->get();
+            p.voices = (int) std::lround (voicesP->get());
+            p.spread = spreadP->get();
+            std::uint16_t m = 0;
+            for (int i = 0; i < 12; ++i)
+                if (note[i]->get())
+                    m |= (std::uint16_t) (1u << i);
+            p.mask = m;
+            static const float lows[4] = { 140.0f, 80.0f, 60.0f, 45.0f }, highs[4] = { 1100.0f, 700.0f, 450.0f, 1500.0f };
+            p.rangeLowHz = lows[range->getIndex()];
+            p.rangeHighHz = highs[range->getIndex()];
+            core.setParams (p);
+            if (p.hq != lastHq)
+            {
+                lastHq = p.hq;
+                setLatencySamples (core.getTypicalLatency (p.hq));
+            }
+
+            auto* l = buf.getWritePointer (0);
+            auto* r = nch > 1 ? buf.getWritePointer (1) : nullptr;
+            if (dry.size() < (size_t) n * 2)
+                dry.resize ((size_t) n * 2);
+            std::copy (l, l + n, dry.begin());
+            if (r != nullptr)
+                std::copy (r, r + n, dry.begin() + n);
+
+            core.process (l, r, n);
+
+            // bypass: short cross-fade to the untouched input, the correction keeps running
+            const float target = on->get() ? 1.0f : 0.0f;
+            const float step = (float) (1.0 / (0.012 * sr));
+            float w = ramp;
+            for (int i = 0; i < n; ++i)
+            {
+                w += juce::jlimit (-step, step, target - w);
+                l[i] = l[i] * w + dry[(size_t) i] * (1.0f - w);
+                if (r != nullptr)
+                    r[i] = r[i] * w + dry[(size_t) (n + i)] * (1.0f - w);
+            }
+            ramp = w;
+        }
+
+        juce::AudioParameterFloat *retune, *human, *flex, *voicesP, *spreadP, *detune;
+        juce::AudioParameterBool *classic, *hq, *on, *note[12];
+        juce::AudioParameterChoice* range;
+        juce::AudioParameterInt* key;
+        tctune::Core core;
+        juce::AudioProcessorEditor* createEditor() override;
+
+    protected:
+        void prepare() override
+        {
+            core.prepare (sr);
+            lastHq = hq->get();
+            setLatencySamples (core.getTypicalLatency (lastHq));
+            ramp = on->get() ? 1.0f : 0.0f;
+        }
+
+    private:
+        std::vector<float> dry;
+        bool lastHq = false;
+        float ramp = 1.0f;
+    };
+
+    class TuneLook : public juce::LookAndFeel_V4
+    {
+    public:
+        void drawRotarySlider (juce::Graphics& g, int x, int y, int w, int h, float pos, float a0, float a1, juce::Slider& s) override
+        {
+            auto r = juce::Rectangle<float> ((float) x, (float) y, (float) w, (float) h).reduced (6.0f);
+            const float d = juce::jmin (r.getWidth(), r.getHeight());
+            r = juce::Rectangle<float> (d, d).withCentre (r.getCentre());
+            const auto accent = s.findColour (juce::Slider::rotarySliderFillColourId);
+            const float ang = a0 + pos * (a1 - a0);
+
+            juce::Path track, val;
+            track.addCentredArc (r.getCentreX(), r.getCentreY(), d * 0.5f, d * 0.5f, 0.0f, a0, a1, true);
+            val.addCentredArc (r.getCentreX(), r.getCentreY(), d * 0.5f, d * 0.5f, 0.0f, a0, ang, true);
+            g.setColour (juce::Colour (0xff1d2428));
+            g.strokePath (track, juce::PathStrokeType (3.0f));
+            g.setColour (accent);
+            g.strokePath (val, juce::PathStrokeType (3.0f));
+
+            auto body = r.reduced (d * 0.1f);
+            juce::ColourGradient grad (juce::Colour (0xff3b4248), body.getX(), body.getY(), juce::Colour (0xff22282c), body.getX(), body.getBottom(), false);
+            g.setGradientFill (grad);
+            g.fillEllipse (body);
+            g.setColour (juce::Colour (0xff12161a));
+            g.drawEllipse (body, 1.5f);
+            const auto c = body.getCentre();
+            const float rad = body.getWidth() * 0.5f;
+            g.setColour (juce::Colour (0xffd9dde0));
+            g.drawLine (c.x + std::sin (ang) * rad * 0.45f, c.y - std::cos (ang) * rad * 0.45f,
+                        c.x + std::sin (ang) * rad * 0.82f, c.y - std::cos (ang) * rad * 0.82f, 2.5f);
+        }
+    };
+
+    class TuneEditor : public juce::AudioProcessorEditor, private juce::Timer
+    {
+    public:
+        explicit TuneEditor (TunePlugin& p) : juce::AudioProcessorEditor (p), plug (p)
+        {
+            setLookAndFeel (&look);
+            setSize (860, 520);
+
+            knob (rtS, "Retune Speed", *p.retune, rtA, teal, 0);
+            knob (huS, "Humanize", *p.human, huA, juce::Colour (0xff8a63d2), 0);
+            knob (fxS, "Flex Tune", *p.flex, fxA, juce::Colour (0xffe6d94a), 0);
+            knob (voS, "Voices", *p.voicesP, voA, juce::Colour (0xff4fb3ff), 0);
+            knob (spS, "Spread", *p.spreadP, spA, juce::Colour (0xffff9a4d), 0);
+            voS.setNumDecimalPlacesToDisplay (0);
+            voS.setRange (0.0, 6.0, 1.0);
+
+            detuneS.setSliderStyle (juce::Slider::LinearBar);
+            detuneS.setTextBoxIsEditable (true);
+            detuneS.setColour (juce::Slider::trackColourId, juce::Colours::transparentBlack);
+            detuneS.setColour (juce::Slider::textBoxTextColourId, juce::Colours::white);
+            detuneS.setTextValueSuffix (" Hz");
+            detuneS.setNumDecimalPlacesToDisplay (1);
+            detuneS.setTooltip ("Reference pitch (A4). Drag, or double-click to type; double-click resets to 440");
+            addAndMakeVisible (detuneS);
+            detuneA = std::make_unique<juce::SliderParameterAttachment> (*p.detune, detuneS);
+            detuneS.setDoubleClickReturnValue (true, 440.0);
+
+            for (auto* b : { &rangeBtn, &keyBtn })
+            {
+                b->setColour (juce::TextButton::buttonColourId, juce::Colour (0xff1a2125));
+                b->setColour (juce::TextButton::textColourOffId, juce::Colours::white);
+                addAndMakeVisible (b);
+            }
+            rangeBtn.onClick = [this]
+            {
+                juce::PopupMenu m;
+                for (int i = 0; i < plug.range->choices.size(); ++i)
+                    m.addItem (i + 1, plug.range->choices[i], true, plug.range->getIndex() == i);
+                m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&rangeBtn), [this] (int r)
+                {
+                    if (r > 0)
+                    {
+                        plug.range->beginChangeGesture();
+                        *plug.range = r - 1;
+                        plug.range->endChangeGesture();
+                        refreshTexts();
+                    }
+                });
+            };
+            keyBtn.onClick = [this]
+            {
+                juce::PopupMenu m;
+                m.addItem (1, "Chromatic", true, plug.key->get() == 0);
+                for (int root = 0; root < 12; ++root)
+                {
+                    juce::PopupMenu sub;
+                    for (int sc = 0; sc < 4; ++sc)
+                    {
+                        const int k = 1 + root * 4 + sc;
+                        sub.addItem (k + 1, tunekeys::scaleNames[sc], true, plug.key->get() == k);
+                    }
+                    m.addSubMenu (tunekeys::noteNames[root], sub);
+                }
+                m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&keyBtn), [this] (int r)
+                {
+                    if (r > 0)
+                        setKey (r - 1);
+                });
+            };
+
+            for (auto* b : { &modeLL, &modeHQ, &styleModern, &styleClassic })
+            {
+                b->setClickingTogglesState (false);
+                addAndMakeVisible (b);
+            }
+            modeLL.onClick = [this] { setBool (*plug.hq, false); };
+            modeHQ.onClick = [this] { setBool (*plug.hq, true); };
+            styleModern.onClick = [this] { setBool (*plug.classic, false); };
+            styleClassic.onClick = [this] { setBool (*plug.classic, true); };
+            modeLL.setTooltip ("Shorter crossfades");
+            modeHQ.setTooltip ("Longer crossfades, smoother sound");
+            styleModern.setTooltip ("Humanize and Flex Tune work");
+            styleClassic.setTooltip ("Plain retune speed, Humanize and Flex Tune are ignored");
+
+            refreshTexts();
+            startTimerHz (30);
+        }
+
+        ~TuneEditor() override { setLookAndFeel (nullptr); }
+
+        void paint (juce::Graphics& g) override
+        {
+            g.fillAll (juce::Colour (0xff0e1214));
+            auto left = leftPanel().toFloat(), right = rightPanel().toFloat();
+            for (auto* r : { &left, &right })
+            {
+                juce::ColourGradient grad (juce::Colour (0xff1b2226), r->getX(), r->getY(), juce::Colour (0xff12171a), r->getX(), r->getBottom(), false);
+                g.setGradientFill (grad);
+                g.fillRoundedRectangle (*r, 12.0f);
+                g.setColour (juce::Colour (0xff0a0d0f));
+                g.drawRoundedRectangle (*r, 12.0f, 1.5f);
+            }
+
+            g.setColour (juce::Colours::white);
+            g.setFont (juce::FontOptions (24.0f, juce::Font::bold));
+            g.drawText ("Autotune", 40, 26, 160, 34, juce::Justification::centredLeft);
+            g.setColour (muted);
+            g.setFont (juce::FontOptions (11.0f));
+            g.drawText ("Vocal Range", rangeBtn.getX() + 8, rangeBtn.getY() - 12, 100, 12, juce::Justification::centredLeft);
+            g.drawText ("Key & Scale", keyBtn.getX() + 8, keyBtn.getY() - 12, 100, 12, juce::Justification::centredLeft);
+
+            // big note
+            const int target = plug.core.outTarget.load();
+            const bool voiced = plug.core.outVoiced.load();
+            juce::String letter = target >= 0 && voiced ? juce::String (tunekeys::noteNames[target]).substring (0, 1) : "-";
+            const bool sharp = target >= 0 && voiced && juce::String (tunekeys::noteNames[target]).contains ("#");
+            g.setColour (voiced ? juce::Colours::white : juce::Colour (0xff4a555c));
+            g.setFont (juce::FontOptions (104.0f, juce::Font::plain));
+            g.drawText (letter, 190, 74, 180, 120, juce::Justification::centred);
+            if (sharp)
+            {
+                g.setFont (juce::FontOptions (40.0f));
+                g.drawText (juce::String::fromUTF8 ("\xE2\x99\xAF"), 330, 78, 50, 50, juce::Justification::centred);
+            }
+
+            // cents bar
+            auto bar = meterRect().toFloat();
+            g.setColour (juce::Colour (0xff0b0f11));
+            g.fillRoundedRectangle (bar, 4.0f);
+            const float cents = juce::jlimit (-100.0f, 100.0f, voiced ? plug.core.outInCents.load() : 0.0f);
+            const float cx = bar.getCentreX();
+            const float x = cx + cents / 100.0f * bar.getWidth() * 0.5f;
+            if (voiced)
+            {
+                g.setColour (teal);
+                g.fillRect (juce::Rectangle<float> (juce::jmin (cx, x) - 4.0f, bar.getY() + 2.0f, std::abs (x - cx) + 8.0f, bar.getHeight() - 4.0f));
+            }
+            g.setColour (juce::Colour (0xffd4e06b));
+            g.fillRect (bar.getX() + 3.0f, bar.getY() - 2.0f, 2.5f, bar.getHeight() + 4.0f);
+            g.fillRect (bar.getRight() - 5.5f, bar.getY() - 2.0f, 2.5f, bar.getHeight() + 4.0f);
+            g.setColour (muted);
+            g.setFont (juce::FontOptions (11.0f));
+            for (int c = -100; c <= 100; c += 10)
+            {
+                const float tx = cx + (float) c / 100.0f * bar.getWidth() * 0.5f;
+                g.drawLine (tx, bar.getBottom() + 6.0f, tx, bar.getBottom() + (c % 50 == 0 ? 14.0f : 10.0f), 1.0f);
+            }
+            for (int c = -100; c <= 100; c += 50)
+                g.drawText ((c > 0 ? "+" : "") + juce::String (c), (int) (cx + (float) c / 100.0f * bar.getWidth() * 0.5f) - 20, (int) bar.getBottom() + 16, 40, 14,
+                            juce::Justification::centred);
+
+            // keys
+            g.setColour (muted);
+            g.setFont (juce::FontOptions (13.0f));
+            g.drawText ("Edit Notes", 40, 286, 100, 18, juce::Justification::centredLeft);
+            g.drawText (juce::String::fromUTF8 ("\xE2\x86\xBA"), resetRect().toNearestInt(), juce::Justification::centred);
+            for (int i = 0; i < 12; ++i)
+            {
+                auto k = keyRect (i).toFloat();
+                const bool allowed = plug.note[i]->get();
+                const bool hot = voiced && target == i;
+                g.setColour (hot ? teal.withAlpha (0.9f) : allowed ? teal.withAlpha (0.18f) : juce::Colour (0xff161c1f));
+                g.fillRoundedRectangle (k, k.getWidth() * 0.4f);
+                g.setColour (allowed ? teal : juce::Colour (0xff2a3338));
+                g.drawRoundedRectangle (k.reduced (0.5f), k.getWidth() * 0.4f, 1.5f);
+                g.setColour (hot ? juce::Colours::black : allowed ? juce::Colours::white : juce::Colour (0xff5b676d));
+                g.setFont (juce::FontOptions (14.0f, juce::Font::bold));
+                g.drawText (tunekeys::noteNames[i], k.toNearestInt(), juce::Justification::centred);
+            }
+
+            // bottom of the left panel
+            g.setColour (muted);
+            g.setFont (juce::FontOptions (11.0f));
+            g.drawText ("Detune", detuneS.getX(), detuneS.getY() - 14, 80, 12, juce::Justification::centredLeft);
+            g.drawText ("Mode", modeLL.getX(), modeLL.getY() - 14, 80, 12, juce::Justification::centredLeft);
+            g.setColour (juce::Colour (0xff2a3338));
+            g.drawLine (30.0f, 408.0f, left.getRight() - 20.0f, 408.0f);
+
+            // right panel
+            for (auto* s : { &rtS, &huS, &fxS, &voS, &spS })
+            {
+                g.setColour (muted.brighter (0.4f));
+                g.setFont (juce::FontOptions (s == &rtS ? 16.0f : 13.0f));
+                g.drawText (s->getName(), s->getX() - 20, s->getY() - (s == &rtS ? 22 : 18), s->getWidth() + 40, 18, juce::Justification::centred);
+            }
+            // power
+            auto pw = powerRect().toFloat();
+            const bool o = plug.on->get();
+            g.setColour (o ? teal : juce::Colour (0xff2a3338));
+            g.fillEllipse (pw);
+            g.setColour (o ? juce::Colours::black : muted);
+            juce::Path arc;
+            arc.addCentredArc (pw.getCentreX(), pw.getCentreY(), 8.0f, 8.0f, 0.0f, 0.6f, 6.28f - 0.6f, true);
+            g.strokePath (arc, juce::PathStrokeType (2.0f));
+            g.drawLine (pw.getCentreX(), pw.getCentreY() - 11.0f, pw.getCentreX(), pw.getCentreY() - 2.0f, 2.0f);
+        }
+
+        void resized() override
+        {
+            rangeBtn.setBounds (260, 36, 130, 28);
+            keyBtn.setBounds (404, 36, 150, 28);
+            detuneS.setBounds (40, 436, 110, 28);
+            modeLL.setBounds (240, 436, 110, 26);
+            modeHQ.setBounds (354, 436, 60, 26);
+
+            auto r = rightPanel();
+            rtS.setBounds (r.getX() + 60, 70, 170, 170);
+            huS.setBounds (r.getX() + 28, 296, 84, 84);
+            fxS.setBounds (r.getX() + 130, 296, 84, 84);
+            voS.setBounds (r.getX() + 28, 410, 84, 84);
+            spS.setBounds (r.getX() + 130, 410, 84, 84);
+            styleModern.setBounds (r.getX() + 20, 250, 98, 26);
+            styleClassic.setBounds (r.getX() + 126, 250, 98, 26);
+        }
+
+        void mouseDown (const juce::MouseEvent& e) override
+        {
+            for (int i = 0; i < 12; ++i)
+                if (keyRect (i).contains (e.position))
+                {
+                    plug.note[i]->beginChangeGesture();
+                    *plug.note[i] = ! plug.note[i]->get();
+                    plug.note[i]->endChangeGesture();
+                    return;
+                }
+            if (resetRect().contains (e.position))
+                setKey (plug.key->get());
+            if (powerRect().toFloat().contains (e.position))
+                setBool (*plug.on, ! plug.on->get());
+        }
+
+    private:
+        juce::Rectangle<int> leftPanel() const { return { 14, 14, 590, getHeight() - 28 }; }
+        juce::Rectangle<int> rightPanel() const { return { 616, 14, 230, getHeight() - 28 }; }
+        juce::Rectangle<int> meterRect() const { return { 44, 214, 520, 30 }; }
+        juce::Rectangle<float> keyRect (int i) const
+        {
+            // white keys C D E F G A B on the lower row, black keys between them on the upper row
+            static const int white[7] = { 0, 2, 4, 5, 7, 9, 11 };
+            const float w = 62.0f, h = 62.0f, gap = 8.0f, x0 = 62.0f;
+            for (int k = 0; k < 7; ++k)
+                if (white[k] == i)
+                    return { x0 + (float) k * (w + gap), 372.0f - 0.0f, w, h - 0.0f };
+            static const int black[5] = { 1, 3, 6, 8, 10 };
+            static const float pos[5] = { 0.5f, 1.5f, 3.5f, 4.5f, 5.5f };
+            for (int k = 0; k < 5; ++k)
+                if (black[k] == i)
+                    return { x0 + pos[k] * (w + gap) + 2.0f, 304.0f, 54.0f, 54.0f };
+            return {};
+        }
+        juce::Rectangle<float> resetRect() const { return { 540.0f, 284.0f, 24.0f, 22.0f }; }
+        juce::Rectangle<int> powerRect() const { return { rightPanel().getRight() - 62, getHeight() - 70, 36, 36 }; }
+
+        void knob (juce::Slider& s, const juce::String& name, juce::RangedAudioParameter& prm, std::unique_ptr<juce::SliderParameterAttachment>& att, juce::Colour c, int)
+        {
+            s.setName (name);
+            s.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
+            s.setRotaryParameters (juce::MathConstants<float>::pi * 1.2f, juce::MathConstants<float>::pi * 2.8f, true);
+            s.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 56, 20);
+            s.setColour (juce::Slider::rotarySliderFillColourId, c);
+            s.setColour (juce::Slider::textBoxTextColourId, juce::Colours::white);
+            s.setColour (juce::Slider::textBoxBackgroundColourId, juce::Colour (0xff0b0f11));
+            s.setColour (juce::Slider::textBoxOutlineColourId, juce::Colour (0xff2a3338));
+            s.setNumDecimalPlacesToDisplay (0);
+            addAndMakeVisible (s);
+            att = std::make_unique<juce::SliderParameterAttachment> (prm, s);
+        }
+
+        static void setBool (juce::AudioParameterBool& p, bool v)
+        {
+            p.beginChangeGesture();
+            p = v;
+            p.endChangeGesture();
+        }
+
+        void setKey (int k)
+        {
+            plug.key->beginChangeGesture();
+            *plug.key = k;
+            plug.key->endChangeGesture();
+            const auto m = tunekeys::maskFor (k);
+            for (int i = 0; i < 12; ++i)
+                setBool (*plug.note[i], (m & (1u << i)) != 0);
+            refreshTexts();
+        }
+
+        void refreshTexts()
+        {
+            rangeBtn.setButtonText (plug.range->getCurrentChoiceName());
+            juce::String name = tunekeys::keyName (plug.key->get());
+            std::uint16_t cur = 0;
+            for (int i = 0; i < 12; ++i)
+                if (plug.note[i]->get())
+                    cur |= (std::uint16_t) (1u << i);
+            if (cur != tunekeys::maskFor (plug.key->get()))
+                name = "Custom";
+            keyBtn.setButtonText (name);
+
+            auto style = [] (juce::TextButton& b, bool on, juce::Colour c)
+            {
+                b.setColour (juce::TextButton::buttonColourId, on ? c.withAlpha (0.28f) : juce::Colour (0xff161c1f));
+                b.setColour (juce::TextButton::textColourOffId, on ? juce::Colours::white : juce::Colour (0xff7c8990));
+            };
+            modeLL.setButtonText ("Low Latency");
+            modeHQ.setButtonText ("HQ");
+            styleModern.setButtonText ("Modern");
+            styleClassic.setButtonText ("Classic");
+            style (modeLL, ! plug.hq->get(), teal);
+            style (modeHQ, plug.hq->get(), teal);
+            style (styleModern, ! plug.classic->get(), teal);
+            style (styleClassic, plug.classic->get(), teal);
+        }
+
+        void timerCallback() override
+        {
+            refreshTexts();
+            repaint();
+        }
+
+        TunePlugin& plug;
+        TuneLook look;
+        juce::Slider rtS, huS, fxS, voS, spS, detuneS;
+        std::unique_ptr<juce::SliderParameterAttachment> rtA, huA, fxA, voA, spA, detuneA;
+        juce::TextButton rangeBtn, keyBtn, modeLL, modeHQ, styleModern, styleClassic;
+        const juce::Colour teal { 0xff19d3b0 }, muted { 0xff8b97a0 };
+    };
+
+    juce::AudioProcessorEditor* TunePlugin::createEditor() { return new TuneEditor (*this); }
+
     std::unique_ptr<juce::AudioPluginInstance> makeBuiltin (const juce::String& id)
     {
         if (id == "TC:eq")
@@ -2378,10 +2875,12 @@ namespace
             return std::make_unique<OverdrivePlugin>();
         if (id == "TC:amp")
             return std::make_unique<AmpPlugin>();
+        if (id == "TC:tune")
+            return std::make_unique<TunePlugin>();
         return nullptr;
     }
 
-    const char* const allIds[] = { "TC:eq", "TC:comp", "TC:gate", "TC:reverb", "TC:od808", "TC:amp" };
+    const char* const allIds[] = { "TC:eq", "TC:comp", "TC:gate", "TC:reverb", "TC:od808", "TC:amp", "TC:tune" };
 }
 
 std::vector<juce::PluginDescription> BuiltinFormat::allDescriptions()
