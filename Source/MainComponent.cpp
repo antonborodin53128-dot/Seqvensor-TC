@@ -332,9 +332,7 @@ MainComponent::MainComponent()
     };
     playerBar.cb.remove = [this] (PlayerBar::Tab tab)
     {
-        if (tab == PlayerBar::Tab::Seq) deleteProject();
-        else if (tab == PlayerBar::Tab::Playlist) deletePlaylistConfirm();
-        else showDeleteMenu();
+        deleteSelectedRows (tab);
     };
 
     initialiseLibrary();
@@ -1786,6 +1784,120 @@ void MainComponent::renameProject()
              });
 }
 
+// The delete button: removes the selected rows of the current tab from the program, no questions asked.
+// Audio files on the disk are never touched.
+void MainComponent::deleteSelectedRows (PlayerBar::Tab tab)
+{
+    auto ids = playerBar.getSelectedIds();
+
+    if (tab == PlayerBar::Tab::Seq)
+    {
+        const auto all = library.projectNames();
+        juce::StringArray doomed;
+        for (int id : ids)
+            if (id >= 0 && id < projectRows.size())
+                doomed.addIfNotAlreadyThere (projectRows[id]);
+        if (doomed.isEmpty())
+            doomed.add (library.getProject());
+
+        auto remaining = all;
+        for (auto& d : doomed)
+            remaining.removeString (d);
+        if (remaining.isEmpty())
+        {
+            say ("Последнюю секвенцию удалить нельзя"_ru);
+            return;
+        }
+
+        if (doomed.contains (library.getProject()))
+            switchProject (remaining[0]);
+        for (auto& d : doomed)
+        {
+            engine.discardSequences (library.projectDir (d));
+            library.deleteProject (d);
+            engine.getDataDirectory().getChildFile ("Media").getChildFile ("seq_" + d).deleteRecursively();
+        }
+        engine.pruneAnalysisCacheSoon();
+        refreshPlayerBar();
+        say ("Удалено секвенций: "_ru + juce::String (doomed.size()));
+    }
+    else if (tab == PlayerBar::Tab::Playlist)
+    {
+        juce::StringArray doomed;
+        for (int id : ids)
+            if (id >= 0 && id < playlistRows.size())
+                doomed.addIfNotAlreadyThere (playlistRows[id]);
+        if (doomed.isEmpty() && playlist.name.isNotEmpty())
+            doomed.add (playlist.name);
+        if (doomed.isEmpty())
+            return;
+
+        for (auto& d : doomed)
+            library.deletePlaylist (d);
+        if (doomed.contains (playlist.name))
+        {
+            playlist = Playlist();
+            playlistIndex = -1;
+            const auto left = library.playlistNames();
+            if (! left.isEmpty())
+                library.loadPlaylist (left[0], playlist);
+            auto seq = engine.getActiveSequence();
+            playlistIndex = seq != nullptr ? playlist.items.indexOf (seq->name) : -1;
+        }
+        refreshPlayerBar();
+        if (auto s = engine.getActiveSequence())
+            library.saveSession (s->name, playlist.name);
+        say ("Удалено плейлистов: "_ru + juce::String (doomed.size()));
+    }
+    else
+    {
+        juce::StringArray doomed;
+        for (int id : ids)
+            if (id >= 0 && id < playlist.items.size())
+                doomed.addIfNotAlreadyThere (playlist.items[id]);
+        if (doomed.isEmpty() && playlistIndex >= 0)
+            doomed.add (playlist.items[playlistIndex]);
+        if (doomed.isEmpty())
+            return;
+
+        auto seq = engine.getActiveSequence();
+        const juce::String cur = seq != nullptr ? seq->name : juce::String();
+
+        for (auto& d : doomed)
+        {
+            library.removeFromPlaylists (d);
+            playlist.items.removeString (d);
+        }
+
+        auto others = library.sequenceNames();
+        for (auto& d : doomed)
+            others.removeString (d);
+
+        if (doomed.contains (cur))
+        {
+            // the open song goes away: open a neighbour (or an empty one if nothing is left)
+            juce::String next = ! playlist.items.isEmpty() && others.contains (playlist.items[0]) ? playlist.items[0]
+                                : others.isEmpty() ? juce::String ("Трек 1"_ru) : others[0];
+            switchToSequence (next, playlist.items.indexOf (next));
+        }
+        for (auto& d : doomed)
+        {
+            const auto file = library.sequenceFile (d);
+            engine.forgetSequence (file);
+            file.deleteFile();
+        }
+        if (others.isEmpty())
+            engine.saveActiveSequence();   // creates the empty replacement
+        savePlaylistNow();
+        engine.pruneAnalysisCacheSoon();
+        auto active = engine.getActiveSequence();
+        playlistIndex = active != nullptr ? playlist.items.indexOf (active->name) : -1;
+        preloadNeighbours();
+        refreshPlayerBar();
+        say ("Удалено треков: "_ru + juce::String (doomed.size()));
+    }
+}
+
 void MainComponent::deleteProject()
 {
     const auto cur = library.getProject();
@@ -2386,7 +2498,12 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
     }
     if (key == juce::KeyPress::spaceKey)
     {
-        if (engine.isPlaying()) engine.pauseAll(); else engine.playAll();
+        if (engine.isPlaying()) engine.stopAll(); else engine.playAll();   // play / stop (back to the start)
+        return true;
+    }
+    if (key == juce::KeyPress::leftKey || key == juce::KeyPress::rightKey)
+    {
+        stepSong (key == juce::KeyPress::leftKey ? -1 : 1);   // previous / next song
         return true;
     }
     return false;
@@ -2687,5 +2804,41 @@ void MainComponent::importSequence()
                                   safe->switchProject (name);
                               safe->say ((existed ? "Секвенция заменена: "_ru : "Секвенция загружена: "_ru) + name
                                          + " (композиций: "_ru + juce::String (songs) + ")");
+                          });
+}
+
+
+// ---------------------------------------------------------------- recording
+
+void MainComponent::toggleRecording()
+{
+    if (engine.isRecording())
+    {
+        engine.stopRecording();
+        recordButton.setActive (false);
+        say ("Запись остановлена. Файлы: "_ru + engine.getRecordFolder().getFullPathName());
+        return;
+    }
+
+    juce::String message;
+    const bool ok = engine.startRecording (message);
+    recordButton.setActive (ok);
+    if (ok)
+        say (message);
+    else
+        juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, "Запись"_ru, message);
+}
+
+void MainComponent::chooseRecordFolder()
+{
+    chooser = std::make_unique<juce::FileChooser> ("Папка для записи"_ru, engine.getRecordFolder());
+    juce::Component::SafePointer<MainComponent> safe (this);
+    chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectDirectories,
+                          [safe] (const juce::FileChooser& fc)
+                          {
+                              if (safe == nullptr || fc.getResult() == juce::File())
+                                  return;
+                              safe->engine.setRecordFolder (fc.getResult());
+                              safe->say ("Папка записи: "_ru + fc.getResult().getFullPathName());
                           });
 }

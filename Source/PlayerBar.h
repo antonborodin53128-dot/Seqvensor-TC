@@ -37,6 +37,7 @@ public:
     void showTab (Tab t, bool openList);
 
     void setRows (Tab t, std::vector<Row> rows);
+    std::vector<int> getSelectedIds() const;   // ids of the selected rows of the current tab
     void setNow (const juce::String& current, const juce::String& next, const juce::String& counter);
     void setCanStep (bool canPrev, bool canNext);
 
@@ -59,10 +60,12 @@ private:
     struct RowWatcher : public juce::MouseListener
     {
         explicit RowWatcher (PlayerBar& o) : owner (o) {}
+        void mouseDown (const juce::MouseEvent& e) override { owner.rowDown (e); }
         void mouseDrag (const juce::MouseEvent& e) override { owner.rowDrag (e); }
         void mouseUp (const juce::MouseEvent& e) override { owner.rowUp (e); }
         PlayerBar& owner;
     };
+    void rowDown (const juce::MouseEvent&);
     void rowDrag (const juce::MouseEvent&);
     void rowUp (const juce::MouseEvent&);
     int rowAt (const juce::MouseEvent&);

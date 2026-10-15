@@ -10,6 +10,8 @@ PlayerBar::PlayerBar() : list ("songs", nullptr)
 {
     list.setModel (this);
     list.setRowHeight (28);
+    list.setMultipleSelection (true);
+    list.setWantsKeyboardFocus (false);   // Space and the arrows belong to the main window
     list.setOutlineThickness (0);
     list.setColour (juce::ListBox::backgroundColourId, juce::Colours::transparentBlack);
     addAndMakeVisible (list);
@@ -35,6 +37,7 @@ void PlayerBar::showTab (Tab t, bool openList)
     const bool heightChanges = openList != open;
     tab = t;
     open = openList;
+    list.deselectAllRows();
     updateTabUi();
     resized();
     repaint();
@@ -236,10 +239,26 @@ void PlayerBar::paintListBoxItem (int row, juce::Graphics& g, int w, int h, bool
     g.drawText (item.text, r.reduced (12.0f, 0.0f).toNearestInt(), juce::Justification::centredLeft, true);
 }
 
-void PlayerBar::listBoxItemClicked (int row, const juce::MouseEvent&)
+void PlayerBar::listBoxItemClicked (int, const juce::MouseEvent&) {}
+
+void PlayerBar::rowDown (const juce::MouseEvent& e)
 {
-    pendingRow = row;
+    pendingRow = rowAt (e);
     dragFrom = dragTo = -1;
+}
+
+std::vector<int> PlayerBar::getSelectedIds() const
+{
+    std::vector<int> ids;
+    const auto& list_ = rows[(int) tab];
+    auto sel = list.getSelectedRows();
+    for (int i = 0; i < sel.size(); ++i)
+    {
+        const int r = sel[i];
+        if (r >= 0 && r < (int) list_.size() && ! list_[(size_t) r].header)
+            ids.push_back (list_[(size_t) r].id);
+    }
+    return ids;
 }
 
 int PlayerBar::rowAt (const juce::MouseEvent& e)
@@ -265,8 +284,9 @@ void PlayerBar::rowDrag (const juce::MouseEvent& e)
     repaint();
 }
 
-void PlayerBar::rowUp (const juce::MouseEvent&)
+void PlayerBar::rowUp (const juce::MouseEvent& e)
 {
+    const bool extend = e.mods.isCtrlDown() || e.mods.isShiftDown() || e.mods.isCommandDown();
     const auto t = tab;
     const int from = dragFrom, to = dragTo, click = pendingRow;
     const bool dragged = dragFrom >= 0;
@@ -281,7 +301,7 @@ void PlayerBar::rowUp (const juce::MouseEvent&)
     }
 
     const auto& list_ = rows[(int) t];
-    if (click >= 0 && click < (int) list_.size() && ! list_[(size_t) click].header && cb.rowClick)
+    if (! extend && click >= 0 && click < (int) list_.size() && ! list_[(size_t) click].header && cb.rowClick)
         cb.rowClick (t, list_[(size_t) click].id);
 }
 

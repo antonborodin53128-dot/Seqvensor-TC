@@ -81,6 +81,7 @@ private:
     void switchProject (juce::String name);
     void createProject (const juce::String& wantedName);
     void renameProject();
+    void deleteSelectedRows (PlayerBar::Tab tab);
     void deleteProject();
     void switchToSequence (juce::String name, int indexInPlaylist);
     void stepSong (int delta);
