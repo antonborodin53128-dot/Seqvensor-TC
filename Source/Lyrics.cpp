@@ -231,32 +231,34 @@ static const char* phonePage = R"HTML(<!doctype html>
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>TC</title>
 <style>
-:root{--bg:#000;--panel:#161618;--raise:#2a2a2d;--text:#e9e9ee;--dim:#8e8e93;--acc:#ffa81f}
-*{box-sizing:border-box}
+:root{--bg:#000;--panel:#161618;--raise:#2a2a2d;--text:#f2f2f7;--dim:#8e8e93;--acc:#ffa81f}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 html,body{margin:0;height:100%;background:var(--bg);color:var(--text);font-family:-apple-system,"Segoe UI",Roboto,sans-serif;-webkit-text-size-adjust:100%;overflow:hidden}
-#app{display:flex;flex-direction:column;height:100vh;height:100dvh}
-#top{flex:none;padding:calc(10px + env(safe-area-inset-top)) 16px 10px;background:var(--panel);border-bottom:2px solid var(--acc);display:flex;align-items:center;gap:12px}
+#app{position:fixed;top:0;right:0;bottom:0;left:0;display:flex;flex-direction:column}
+#top{flex:none;padding:calc(10px + env(safe-area-inset-top)) 12px 10px 16px;background:var(--panel);border-bottom:2px solid var(--acc);display:flex;align-items:center;gap:12px}
 #cur{flex:1;min-width:0}
 #cur b{display:block;font-size:20px;color:var(--acc);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #cur small{display:block;font-size:13px;color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px}
 #cur small i{font-style:normal;color:var(--text)}
-#st{flex:none;font-size:18px;color:var(--acc)}
-#w{flex:1;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;padding:30vh 14px 55vh;scrollbar-width:none}
-#w::-webkit-scrollbar{display:none}
-.l{white-space:nowrap;line-height:1.3;color:#cfcfd4;padding:.12em 0;min-height:.7em;transition:color .25s}
-.l.p{color:#555559}
-.l.c{color:var(--acc);font-weight:700}
-.e{white-space:normal;color:var(--dim);text-align:center;font-size:18px}
-#b{flex:none;display:flex;gap:10px;padding:10px 12px calc(10px + env(safe-area-inset-bottom));background:var(--panel);border-top:1px solid #2c2c2e}
-#b button{flex:1;height:58px;font-size:26px;border:0;border-radius:14px;background:var(--raise);color:var(--text)}
-#b button.main{flex:1.6;background:var(--acc);color:#000}
-#b button:active{filter:brightness(1.25)}
-#pl{position:fixed;inset:0;background:var(--bg);z-index:5;display:none;flex-direction:column}
+#ib{flex:none;width:46px;height:46px;border:0;border-radius:12px;background:var(--raise);color:var(--text);padding:0}
+#ib svg{width:24px;height:24px;fill:currentColor}
+#w{flex:1;min-height:0;position:relative;overflow:hidden}
+#t{position:absolute;top:0;right:0;bottom:0;left:0;padding:12px 14px;display:flex;flex-direction:column;justify-content:center;text-align:center;overflow:hidden;transition:opacity .18s}
+#t.all{justify-content:flex-start;text-align:left;overflow-y:auto;scrollbar-width:none}
+#t.out{opacity:0}
+.l{line-height:1.22;color:var(--text);font-weight:700;padding:.1em 0;min-height:.6em;overflow-wrap:anywhere}
+.l.n{color:#5d5d62;font-weight:600}
+.e{color:var(--dim);font-size:18px;font-weight:400}
+#b{flex:none;display:flex;gap:10px;padding:12px 12px calc(12px + env(safe-area-inset-bottom));background:var(--panel);border-top:1px solid #2c2c2e}
+#b button{flex:1;height:60px;border:0;border-radius:14px;background:var(--raise);color:var(--text);padding:0;display:flex;align-items:center;justify-content:center}
+#b button svg{width:28px;height:28px;fill:currentColor}
+#b button.on{background:var(--acc);color:#000}
+#b button:active{filter:brightness(1.3)}
+#pl{position:fixed;top:0;right:0;bottom:0;left:0;background:var(--bg);z-index:5;display:none;flex-direction:column}
 #pl.on{display:flex}
 #ph{flex:none;display:flex;gap:10px;align-items:center;padding:calc(10px + env(safe-area-inset-top)) 12px 10px;background:var(--panel);border-bottom:2px solid var(--acc)}
-#ph select{flex:1;min-width:0;height:44px;font-size:17px;border:0;border-radius:12px;background:var(--raise);color:var(--text);padding:0 10px}
-#ph button,#ib{flex:none;width:44px;height:44px;font-size:22px;border:0;border-radius:12px;background:var(--raise);color:var(--text)}
-#ib{margin-left:4px}
+#ph select{flex:1;min-width:0;height:46px;font-size:17px;border:0;border-radius:12px;background:var(--raise);color:var(--text);padding:0 10px}
+#ph button{flex:none;width:46px;height:46px;font-size:22px;border:0;border-radius:12px;background:var(--raise);color:var(--text)}
 #pi{flex:1;overflow-y:auto;padding:8px 10px calc(10px + env(safe-area-inset-bottom))}
 .r{display:flex;align-items:center;gap:6px;margin:6px 0;padding:0 0 0 14px;min-height:54px;border-radius:12px;background:var(--panel)}
 .r.now{background:#2a1c05;outline:2px solid var(--acc)}
@@ -267,50 +269,51 @@ html,body{margin:0;height:100%;background:var(--bg);color:var(--text);font-famil
 </style></head><body>
 <div id="pl"><div id="ph"><select id="ls" onchange="cmd('list:'+this.value)"></select><button onclick="closePl()">&#10005;</button></div><div id="pi"></div></div>
 <div id="app">
-<div id="top"><div id="cur"><b id="n">TC</b><small id="nx"></small></div><span id="st"></span><button id="ib" onclick="openPl()">&#9776;</button></div>
-<div id="w"></div>
+<div id="top"><div id="cur"><b id="n">TC</b><small id="nx"></small></div>
+<button id="ib" onclick="openPl()"><svg viewBox="0 0 24 24"><path d="M3 5h18v2.4H3zM3 10.8h18v2.4H3zM3 16.6h18V19H3z"/></svg></button></div>
+<div id="w"><div id="t"></div></div>
 <div id="b">
-<button onclick="cmd('prev')">&#9198;</button>
-<button class="main" id="pp" onclick="cmd('play')">&#9654;</button>
-<button onclick="cmd('next')">&#9197;</button>
+<button onclick="cmd('prev')"><svg viewBox="0 0 24 24"><path d="M5 5h2.4v14H5zM20 5v14L9 12z"/></svg></button>
+<button id="bp" onclick="cmd('start')"><svg viewBox="0 0 24 24"><path d="M7 4.5v15L19.5 12z"/></svg></button>
+<button id="bz" onclick="cmd('pause')"><svg viewBox="0 0 24 24"><path d="M6 5h4.2v14H6zM13.8 5H18v14h-4.2z"/></svg></button>
+<button onclick="cmd('stop')"><svg viewBox="0 0 24 24"><path d="M6 6h12v12H6z"/></svg></button>
+<button onclick="cmd('next')"><svg viewBox="0 0 24 24"><path d="M16.6 5H19v14h-2.4zM4 5v14l11-7z"/></svg></button>
 </div>
 </div>
 <script>
-var rev=-1,els=[],secs=[],cur="",manual=0,lastSize=0,K=new URLSearchParams(location.search).get("k")||"";
-var W=document.getElementById("w");
+var rev=-1,plRev=-1,lines=[],secs=[],cur="",K=new URLSearchParams(location.search).get("k")||"",shown="",lastS=null;
+var T=document.getElementById("t"),Wd=document.getElementById("w");
 function cmd(c){fetch("/cmd?do="+encodeURIComponent(c)+"&k="+encodeURIComponent(K),{cache:"no-store"}).catch(function(){})}
 function get(u){return fetch(u,{cache:"no-store"}).then(function(r){return r.json()})}
-function fit(){
-  if(!els.length)return;
-  var cv=fit.c||(fit.c=document.createElement("canvas").getContext("2d"));
-  cv.font="700 100px "+getComputedStyle(document.body).fontFamily;
-  var mx=1;els.forEach(function(e){var w=cv.measureText(e.textContent).width;if(w>mx)mx=w});
-  var avail=W.clientWidth-28;
-  var px=Math.max(11,Math.min(44,Math.floor(avail*100/mx)));
-  if(px!==lastSize){lastSize=px;W.style.fontSize=px+"px"}
-}
-function build(d){
-  W.innerHTML="";els=[];cur=-2;secs=d.secs||[];
-  document.getElementById("n").textContent=d.title||"TC";
-  if(!d.lines.length){var e=document.createElement("div");e.className="l e";e.textContent=d.empty;W.appendChild(e);return}
-  d.lines.forEach(function(x){var e=document.createElement("div");e.className="l";e.textContent=x;W.appendChild(e);els.push(e)});
-  fit();
-}
-function show(c,done){
-  var key=c+"/"+done;if(key===cur)return;cur=key;
-  var cls=els.map(function(){return"l"});
-  secs.forEach(function(s,i){for(var k=s[0];k<s[1]&&k<cls.length;k++){if(i===c)cls[k]="l c";else if(i<done&&cls[k]!=="l c")cls[k]="l p"}});
-  els.forEach(function(e,i){e.className=cls[i]});
-  if(c>=0&&secs[c]&&els[secs[c][0]]&&Date.now()>manual)W.scrollTo({top:els[secs[c][0]].offsetTop-W.clientHeight*0.28,behavior:"smooth"});
-}
-function names(s){
-  document.getElementById("n").textContent=s.cur||"TC";
-  document.getElementById("nx").innerHTML=s.nxt?"Далее: <i></i>":"";
-  if(s.nxt)document.querySelector("#nx i").textContent=s.nxt;
-}
-var plRev=-1;
 function openPl(){document.getElementById("pl").classList.add("on")}
 function closePl(){document.getElementById("pl").classList.remove("on")}
+function trim(a,b){while(a<b&&!lines[a].trim())a++;while(b>a&&!lines[b-1].trim())b--;return[a,b]}
+function addLine(t,cls){var e=document.createElement("div");e.className="l"+(cls?" "+cls:"");e.textContent=t;T.appendChild(e)}
+// the biggest text that still fits the whole area: the current block and the first line of the next one
+function fitText(){
+  var lo=12,hi=110,best=lo;
+  while(lo<=hi){var m=(lo+hi)>>1;T.style.fontSize=m+"px";if(T.scrollHeight<=T.clientHeight+1){best=m;lo=m+1}else hi=m-1}
+  T.style.fontSize=best+"px";
+}
+function render(c,done){
+  var key=c+"/"+done;if(key===cur)return;cur=key;
+  var apply=function(){
+    T.innerHTML="";T.classList.remove("all");T.classList.remove("out");
+    if(!lines.length){addLine("","");T.firstChild.className="e";T.firstChild.textContent="Текст не загружен";return}
+    if(!secs.length){T.classList.add("all");lines.forEach(function(x){addLine(x)});T.style.fontSize=Math.max(18,Math.min(30,Wd.clientWidth/14))+"px";return}
+    var i=c>=0?c:Math.min(done,secs.length-1);   // in a gap: the block that comes next
+    var r=trim(secs[i][0],Math.min(secs[i][1],lines.length));
+    for(var k=r[0];k<r[1];k++)addLine(lines[k],c>=0?"":"n");
+    var nx=i+1<secs.length?trim(secs[i+1][0],Math.min(secs[i+1][1],lines.length)):null;
+    if(nx&&nx[0]<nx[1])addLine(lines[nx[0]],"n");
+    fitText();
+  };
+  if(T.firstChild&&secs.length){T.classList.add("out");setTimeout(apply,120)}else apply();
+}
+function build(d){
+  lines=d.lines||[];secs=d.secs||[];cur="";
+  document.getElementById("n").textContent=d.title||"TC";
+}
 function drawPl(d){
   var ls=document.getElementById("ls");ls.innerHTML="";
   (d.lists||[]).forEach(function(n){var o=document.createElement("option");o.value=n;o.textContent=n;if(n===d.name)o.selected=true;ls.appendChild(o)});
@@ -322,18 +325,23 @@ function drawPl(d){
     var dn=document.createElement("button");dn.innerHTML="&#9660;";dn.onclick=function(){cmd("down:"+i)};
     r.appendChild(t);r.appendChild(u);r.appendChild(dn);box.appendChild(r)});
 }
+function names(s){
+  document.getElementById("n").textContent=s.cur||"TC";
+  var nx=document.getElementById("nx");nx.innerHTML=s.nxt?"Далее: <i></i>":"";
+  if(s.nxt)nx.querySelector("i").textContent=s.nxt;
+}
 function poll(){
   get("/state").then(function(s){
-    document.getElementById("st").textContent=s.playing?"▶":"❚❚";
-    document.getElementById("pp").innerHTML=s.playing?"&#9632;":"&#9654;";
+    lastS=s;
+    document.getElementById("bp").className=s.playing?"on":"";
+    document.getElementById("bz").className=s.paused?"on":"";
     names(s);
     if(s.pl!==plRev){plRev=s.pl;get("/playlist").then(drawPl)}
-    if(s.rev!==rev){rev=s.rev;return get("/lyrics").then(build).then(function(){names(s);show(s.sec,s.done)})}
-    show(s.sec,s.done);
-  }).catch(function(){document.getElementById("st").textContent="✕"});
+    if(s.rev!==rev){rev=s.rev;return get("/lyrics").then(build).then(function(){names(s);render(s.sec,s.done)})}
+    render(s.sec,s.done);
+  }).catch(function(){});
 }
-["touchstart","wheel","mousedown"].forEach(function(n){W.addEventListener(n,function(){manual=Date.now()+4000},{passive:true})});
-window.addEventListener("resize",function(){lastSize=0;fit()});
+window.addEventListener("resize",function(){var k=cur;cur="";if(lastS)render(lastS.sec,lastS.done)});
 document.addEventListener("click",function(){try{navigator.wakeLock.request("screen")}catch(e){}},{once:true});
 setInterval(poll,250);poll();
 </script></body></html>)HTML";
@@ -410,11 +418,12 @@ void LyricsServer::publishPlaylist (const juce::String& current, const juce::Str
     }
 }
 
-void LyricsServer::publishLive (double seconds, bool playing, int section, int finished, double bpm, int semitones)
+void LyricsServer::publishLive (double seconds, bool playing, bool paused, int section, int finished, double bpm, int semitones)
 {
     const juce::ScopedLock sl (lock);
     livePos = seconds;
     livePlaying = playing;
+    livePaused = paused;
     liveSection = section;
     liveFinished = finished;
     liveBpm = bpm;
@@ -486,7 +495,7 @@ void LyricsServer::serve (juce::StreamingSocket& client)
         {
             const juce::ScopedLock sl (lock);
             json = "{\"rev\":" + juce::String (revision) + ",\"pl\":" + juce::String (plRevision) + ",\"pos\":" + juce::String (livePos, 2)
-                 + ",\"playing\":" + (livePlaying ? "true" : "false") + ",\"sec\":" + juce::String (liveSection) + ",\"done\":" + juce::String (liveFinished)
+                 + ",\"playing\":" + (livePlaying ? "true" : "false") + ",\"paused\":" + (livePaused ? "true" : "false") + ",\"sec\":" + juce::String (liveSection) + ",\"done\":" + juce::String (liveFinished)
                  + ",\"bpm\":" + juce::String (liveBpm, 2) + ",\"semis\":" + juce::String (liveSemis)
                  + ",\"cur\":" + juce::JSON::toString (juce::var (curName)) + ",\"nxt\":" + juce::JSON::toString (juce::var (nextName)) + "}";
         }
@@ -1535,7 +1544,7 @@ void LyricsPanel::timerCallback()
     const int section = clock >= 0.0 ? data.sections.sectionAt (beat) : -1;
     const int finished = clock >= 0.0 ? data.sections.numFinished (beat) : 0;
     if (serverOk)
-        server.publishLive (clock, engine.isPlaying(), section, finished, engine.getBpm(), engine.getTranspose());
+        server.publishLive (clock, engine.isPlaying() && ! engine.isPaused(), engine.isPlaying() && engine.isPaused(), section, finished, engine.getBpm(), engine.getTranspose());
 
     bool overlayDirty = false;
     if (section != playingSection)

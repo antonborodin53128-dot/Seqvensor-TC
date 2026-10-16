@@ -44,7 +44,7 @@ public:
     // message thread
     void publishText (const juce::String& title, const juce::StringArray& lines, const std::vector<LyricsSection>& sections);
     void publishPlaylist (const juce::String& current, const juce::String& next, const juce::String& listJson);   // listJson: {name,index,items[],lists[]}
-    void publishLive (double seconds, bool playing, int section, int finished, double bpm, int semitones);
+    void publishLive (double seconds, bool playing, bool paused, int section, int finished, double bpm, int semitones);
 
 private:
     void run() override;
@@ -58,7 +58,7 @@ private:
     juce::String lyricsJson;
     int revision = 0;
     double livePos = 0.0;
-    bool livePlaying = false;
+    bool livePlaying = false, livePaused = false;
     int liveSection = -1, liveFinished = 0;
     double liveBpm = 0.0;
     int liveSemis = 0;

@@ -2055,6 +2055,8 @@ void MainComponent::createLyricsWindow()
     panel.onRemote = [this] (const juce::String& command)
     {
         if (command == "play")       { if (engine.isPlaying()) engine.stopAll(); else engine.playAll(); }
+        else if (command == "start") engine.playAll();
+        else if (command == "pause") engine.pauseAll();
         else if (command == "stop")  engine.stopAll();
         else if (command == "next")  stepSong (1);
         else if (command == "prev")  stepSong (-1);
