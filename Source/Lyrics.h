@@ -1,27 +1,18 @@
 #pragma once
 
 #include "Engine.h"
+#include "LyricsModel.h"
 #include "Style.h"
 #include "Text.h"
+#include "TrackComponent.h"
 
-// Lyrics of one song: the lines and, per line, the moment it starts (in beats from the start of the song,
-// so the marks stay in the right place when the tempo changes). Stored next to the song file:
-//   <song>.lyrics.txt  the text,   <song>.lyrics.cue  one mark per line (empty = none)
+// Lyrics of one song: the text and the sections (block of lines + the time it is sung).
+// Stored next to the song file:
+//   <song>.lyrics.txt  the text        <song>.lyrics.cue  one section per line: "first last start end" (lines, beats)
 struct LyricsData
 {
-    static constexpr double none = -1.0e9;
-
-    juce::StringArray lines;
-    std::vector<double> beats;
-
-    bool isEmpty() const { return lines.isEmpty(); }
-    void clear() { lines.clear(); beats.clear(); }
-
-    // plain text, or text with [mm:ss.xx] marks in front of the lines (LRC): those become marks
-    void setText (const juce::String& text, double beatSeconds);
-    void clearMarks() { beats.assign (lines.size(), none); }
-    bool hasMarks() const;
-    int lineAt (double beat) const;                 // the line that is sung at this beat, -1 = none yet
+    juce::String text;
+    LyricsSections sections;
 
     static juce::File textFile (const juce::File& songFile);
     static juce::File markFile (const juce::File& songFile);
@@ -30,10 +21,14 @@ struct LyricsData
     void save (const juce::File& songFile) const;
     static void rename (const juce::File& from, const juce::File& to);
     static void remove (const juce::File& songFile);
+
+    // text with [mm:ss.xx] in front of the lines (LRC): the plain text and one section per timed line
+    static bool parseLrc (const juce::String& text, double beatSeconds, juce::String& plain, LyricsSections& sections);
 };
 
-// Small web server for the phone: the page scrolls by itself with the song.
-//   /          the page          /lyrics  the lines and marks (JSON)          /state  position, playing, line
+// Small web server for the phone: the page scrolls by itself with the song and has the remote buttons.
+//   /          the page          /lyrics  text and sections (JSON)          /state  position, section ...
+//   /cmd?do=..&k=..  a button of the page (needs the key)
 class LyricsServer : private juce::Thread
 {
 public:
@@ -47,8 +42,8 @@ public:
     static juce::String findLocalAddress();      // the address of this PC in the local network
 
     // message thread
-    void publishText (const juce::String& title, const juce::StringArray& lines);
-    void publishLive (double seconds, bool playing, int line, double bpm, int semitones);
+    void publishText (const juce::String& title, const juce::StringArray& lines, const std::vector<LyricsSection>& sections);
+    void publishLive (double seconds, bool playing, int section, int finished, double bpm, int semitones);
 
 private:
     void run() override;
@@ -63,66 +58,95 @@ private:
     int revision = 0;
     double livePos = 0.0;
     bool livePlaying = false;
-    int liveLine = -1;
+    int liveSection = -1, liveFinished = 0;
     double liveBpm = 0.0;
     int liveSemis = 0;
     juce::String key;
 };
 
-// The window with the lyrics: big lines, the current one is lit; tap mode puts the marks while the song plays.
-class LyricsPanel : public juce::Component, public juce::FileDragAndDropTarget, private juce::Timer
+// The lyrics window: the text (editable, all the usual keys), a dividing line that you drag over the lines,
+// "+" puts the lines above the dividing line on the timeline at the current moment.
+class LyricsPanel : public juce::Component, public juce::FileDragAndDropTarget,
+                    private juce::TextEditor::Listener, private juce::Timer
 {
 public:
     explicit LyricsPanel (Engine& e);
     ~LyricsPanel() override;
 
-    std::function<void()> onTogglePlay;
     std::function<void (double seconds)> onSeek;
     std::function<void (const juce::String& command)> onRemote;   // a button of the phone page (message thread)
 
     void setSong (const juce::String& name, const juce::File& songFile);   // the open song changed
-    void loadTextFile (const juce::File& f);
 
     void paint (juce::Graphics&) override;
     void resized() override;
     bool keyPressed (const juce::KeyPress&) override;
-    void mouseDown (const juce::MouseEvent&) override;
-    void mouseDoubleClick (const juce::MouseEvent&) override;
-    void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails&) override;
     bool isInterestedInFileDrag (const juce::StringArray& files) override;
     void filesDropped (const juce::StringArray& files, int x, int y) override;
 
+    class Overlay;
+    class TimelineView;
+
 private:
-    static constexpr int lineH = 44, headerH = 128;
+    friend class Overlay;
+    friend class TimelineView;
+
+    static constexpr int gutterW = 58;
 
     void timerCallback() override;
-    void tap();
-    void stepBack();
-    void setTapMode (bool on);
-    void changed();                       // text or marks changed: save and tell the phone
+    void textEditorTextChanged (juce::TextEditor&) override;
+
+    // text and geometry
+    void refreshLines();
+    void updateGeometry();
+    float lineY (int boundary) const { return geo.top0 + (float) boundary * geo.pitch; }
+    int boundaryAtY (float y) const { return (int) std::round ((y - geo.top0) / geo.pitch); }
+    int pendingFirst() const;                  // first line of the block that "+" would take
+    void setDivider (int boundary);            // the dividing line (dragged or from the counter)
+    void resetDivider();
+
+    // sections
+    void addMarker();
+    void deleteSelected();
+    void sectionsChanged();                    // save, tell the phone, repaint
+    void select (int index);
+    void seekSeconds (double seconds);
+    double beatSeconds() const { return engine.getBeatSeconds(); }
+    double maxBeats() const;
+    void showDeleteMenu (int index);
+    void say (const juce::String& text);
+
+    // files
     void chooseFile();
-    void pasteText();
+    void loadText (const juce::String& text);
+    void saveNow();
     void publish();
-    int nextTextLine (int from) const;
-    int lineAtY (int y) const;
-    double nowBeats() const { return engine.getClockSeconds() / engine.getBeatSeconds(); }
-    juce::Rectangle<int> viewArea() const;
 
     Engine& engine;
     LyricsData data;
     juce::File songFile;
     juce::String title;
+    juce::StringArray lines;
+    std::vector<int> lineStarts;
     LyricsServer server;
     bool serverOk = false;
-
-    bool tapMode = false;
-    int tapIndex = 0;
-    int current = -1;
-    float scrollY = 0.0f;
-    juce::int64 manualUntil = 0;
     juce::String url;
 
-    juce::TextButton loadButton, pasteButton, markButton, clearButton, copyButton;
+    struct Geo { float top0 = 4.0f, pitch = 24.0f; } geo;
+    int divider = 0, count = 8, selected = -1, playingSection = -1;
+    bool dirty = false;
+    juce::uint32 dirtyAt = 0, statusUntil = 0;
+    double shownClock = -1.0;
+    juce::String statusText;
+
+    juce::TextButton loadButton, phoneButton, plusButton, deleteButton;
+    juce::Label countLabel, infoLabel, timeLabel, hintLabel;
+    juce::Slider countSlider;
+    IconButton playButton { IconButton::Icon::Play }, pauseButton { IconButton::Icon::Pause }, stopButton { IconButton::Icon::Stop };
+    juce::Component editorArea;
+    juce::TextEditor editor;
+    std::unique_ptr<Overlay> overlay;
+    std::unique_ptr<TimelineView> timeline;
     std::unique_ptr<juce::FileChooser> chooser;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (LyricsPanel)

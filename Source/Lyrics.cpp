@@ -87,19 +87,19 @@ juce::String LyricsData::decode (const juce::MemoryBlock& bytes)
     return s;
 }
 
-void LyricsData::setText (const juce::String& text, double beatSeconds)
+bool LyricsData::parseLrc (const juce::String& text, double beatSeconds, juce::String& plain, LyricsSections& out)
 {
-    lines.clear();
-    beats.clear();
+    juce::StringArray plainLines;
+    std::vector<double> marks;
+    bool any = false;
 
-    auto all = juce::StringArray::fromLines (text);
-    for (auto& raw : all)
+    for (auto& raw : juce::StringArray::fromLines (text))
     {
         auto line = raw.trimEnd();
         if (isLrcInfoTag (line.trim()))
             continue;
 
-        double mark = none;
+        double mark = -1.0;
         while (line.trimStart().startsWithChar ('['))
         {
             const auto t = line.trimStart();
@@ -107,45 +107,37 @@ void LyricsData::setText (const juce::String& text, double beatSeconds)
             double seconds = 0.0;
             if (close < 0 || ! parseTimeTag (t.substring (1, close), seconds))
                 break;
-            if (mark == none)
+            if (mark < 0.0)
                 mark = seconds / juce::jmax (0.001, beatSeconds);
             line = t.substring (close + 1).trimStart();
         }
-        lines.add (line);
-        beats.push_back (mark);
+        any = any || mark >= 0.0;
+        plainLines.add (line);
+        marks.push_back (mark);
     }
+    if (! any)
+        return false;
 
-    while (! lines.isEmpty() && lines[lines.size() - 1].trim().isEmpty())
+    plain = plainLines.joinIntoString ("\n");
+    out.clear();
+    for (size_t i = 0; i < marks.size(); ++i)
     {
-        lines.remove (lines.size() - 1);
-        beats.pop_back();
+        if (marks[i] < 0.0)
+            continue;
+        double end = marks[i] + 16.0;
+        for (size_t j = i + 1; j < marks.size(); ++j)
+            if (marks[j] >= 0.0)
+            {
+                end = marks[j];
+                break;
+            }
+        if (end - marks[i] >= LyricsSections::minLength)
+            out.items.push_back ({ (int) i, (int) i + 1, marks[i], end });
     }
-    while (! lines.isEmpty() && lines[0].trim().isEmpty())
-    {
-        lines.remove (0);
-        beats.erase (beats.begin());
-    }
-}
-
-bool LyricsData::hasMarks() const
-{
-    for (auto b : beats)
-        if (b > none / 2)
-            return true;
-    return false;
-}
-
-int LyricsData::lineAt (double beat) const
-{
-    int best = -1;
-    double bestMark = none;
-    for (size_t i = 0; i < beats.size(); ++i)
-        if (beats[i] > none / 2 && beats[i] <= beat && beats[i] >= bestMark)
-        {
-            best = (int) i;
-            bestMark = beats[i];
-        }
-    return best;
+    std::sort (out.items.begin(), out.items.end(), [] (const LyricsSection& a, const LyricsSection& b) { return a.t0 < b.t0; });
+    for (size_t i = 0; i + 1 < out.items.size(); ++i)
+        out.items[i].t1 = std::min (out.items[i].t1, out.items[i + 1].t0);
+    return true;
 }
 
 juce::File LyricsData::textFile (const juce::File& songFile)
@@ -160,7 +152,8 @@ juce::File LyricsData::markFile (const juce::File& songFile)
 
 void LyricsData::load (const juce::File& songFile)
 {
-    clear();
+    text.clear();
+    sections.clear();
     if (songFile == juce::File())
         return;
 
@@ -170,17 +163,25 @@ void LyricsData::load (const juce::File& songFile)
 
     juce::MemoryBlock block;
     tf.loadFileAsData (block);
-    lines = juce::StringArray::fromLines (decode (block));
-    beats.assign ((size_t) lines.size(), none);
+    text = decode (block).replace ("\r\n", "\n").replace ("\r", "\n");
 
     const auto mf = markFile (songFile);
-    if (mf.existsAsFile())
+    if (! mf.existsAsFile())
+        return;
+
+    const int numLines = juce::StringArray::fromLines (text).size();
+    for (auto& row : juce::StringArray::fromLines (mf.loadFileAsString()))
     {
-        const auto marks = juce::StringArray::fromLines (mf.loadFileAsString());
-        for (int i = 0; i < marks.size() && i < lines.size(); ++i)
-            if (marks[i].trim().isNotEmpty())
-                beats[(size_t) i] = marks[i].getDoubleValue();
+        const auto parts = juce::StringArray::fromTokens (row, " \t", {});
+        if (parts.size() != 4)
+            continue;   // older format or garbage
+        LyricsSection s { parts[0].getIntValue(), parts[1].getIntValue(), parts[2].getDoubleValue(), parts[3].getDoubleValue() };
+        if (s.first >= 0 && s.last > s.first && s.last <= numLines && s.t0 >= 0.0 && s.t1 - s.t0 >= LyricsSections::minLength)
+            sections.items.push_back (s);
     }
+    std::sort (sections.items.begin(), sections.items.end(), [] (const LyricsSection& a, const LyricsSection& b) { return a.t0 < b.t0; });
+    for (size_t i = 0; i + 1 < sections.items.size(); ++i)
+        sections.items[i].t1 = std::min (sections.items[i].t1, sections.items[i + 1].t0);
 }
 
 void LyricsData::save (const juce::File& songFile) const
@@ -189,24 +190,24 @@ void LyricsData::save (const juce::File& songFile) const
         return;
 
     const auto tf = textFile (songFile), mf = markFile (songFile);
-    if (lines.isEmpty())
+    if (text.trim().isEmpty())
     {
         tf.deleteFile();
         mf.deleteFile();
         return;
     }
 
-    tf.replaceWithText (lines.joinIntoString ("\n"), false, false, "\n");
-    if (! hasMarks())
+    tf.replaceWithText (text, false, false, "\n");
+    if (sections.empty())
     {
         mf.deleteFile();
         return;
     }
 
-    juce::StringArray marks;
-    for (size_t i = 0; i < beats.size(); ++i)
-        marks.add (beats[i] > none / 2 ? juce::String (beats[i], 4) : juce::String());
-    mf.replaceWithText (marks.joinIntoString ("\n"), false, false, "\n");
+    juce::StringArray rows;
+    for (auto& s : sections.items)
+        rows.add (juce::String (s.first) + " " + juce::String (s.last) + " " + juce::String (s.t0, 4) + " " + juce::String (s.t1, 4));
+    mf.replaceWithText (rows.joinIntoString ("\n"), false, false, "\n");
 }
 
 void LyricsData::rename (const juce::File& from, const juce::File& to)
@@ -252,7 +253,7 @@ html,body{margin:0;background:#000;color:#f2f2f7;font-family:-apple-system,"Sego
 <div class="r"><button onclick="cmd('key-')">KEY &minus;</button><span id="kp"></span><button onclick="cmd('key+')">KEY +</button></div>
 </div>
 <script>
-var rev=-1,els=[],cur=-2,manual=0,K=new URLSearchParams(location.search).get("k")||"";
+var rev=-1,els=[],secs=[],cur="",manual=0,K=new URLSearchParams(location.search).get("k")||"";
 function cmd(c){fetch("/cmd?do="+encodeURIComponent(c)+"&k="+encodeURIComponent(K),{cache:"no-store"}).catch(function(){})}
 function get(u){return fetch(u,{cache:"no-store"}).then(function(r){return r.json()})}
 function build(d){
@@ -261,16 +262,18 @@ function build(d){
   if(!d.lines.length){var e=document.createElement("div");e.className="l p";e.textContent=d.empty;w.appendChild(e);return}
   d.lines.forEach(function(x){var e=document.createElement("div");e.className="l";e.textContent=x;w.appendChild(e);els.push(e)});
 }
-function show(c){
-  if(c===cur)return;cur=c;
-  els.forEach(function(e,i){e.className="l"+(c>=0&&i<c?" p":"")+(i===c?" c":"")});
-  if(c>=0&&els[c]&&Date.now()>manual)els[c].scrollIntoView({block:"center",behavior:"smooth"});
+function show(c,done){
+  var key=c+"/"+done;if(key===cur)return;cur=key;
+  var cls=els.map(function(){return"l"});
+  secs.forEach(function(s,i){for(var k=s[0];k<s[1]&&k<cls.length;k++){if(i===c)cls[k]="l c";else if(i<done&&cls[k]!=="l c")cls[k]="l p"}});
+  els.forEach(function(e,i){e.className=cls[i]});
+  if(c>=0&&secs[c]&&els[secs[c][0]]&&Date.now()>manual)window.scrollTo({top:els[secs[c][0]].offsetTop-window.innerHeight*0.25,behavior:"smooth"});
 }
 function poll(){
   get("/state").then(function(s){
     document.getElementById("s").textContent=s.playing?"▶":"❚❚";
-    if(s.rev!==rev){rev=s.rev;return get("/lyrics").then(build).then(function(){show(s.cur)})}
-    show(s.cur);
+    if(s.rev!==rev){rev=s.rev;return get("/lyrics").then(build).then(function(){show(s.sec,s.done)})}
+    show(s.sec,s.done);
   }).catch(function(){document.getElementById("s").textContent="✕"});
 }
 ["touchstart","wheel","mousedown"].forEach(function(n){window.addEventListener(n,function(){manual=Date.now()+4000},{passive:true})});
@@ -317,14 +320,17 @@ juce::String LyricsServer::findLocalAddress()
     return fallback.isEmpty() ? juce::String ("127.0.0.1") : fallback;
 }
 
-void LyricsServer::publishText (const juce::String& title, const juce::StringArray& lines)
+void LyricsServer::publishText (const juce::String& title, const juce::StringArray& lines, const std::vector<LyricsSection>& sections)
 {
     auto* obj = new juce::DynamicObject();
-    juce::Array<juce::var> arr;
+    juce::Array<juce::var> arr, secs;
     for (auto& l : lines)
         arr.add (l);
+    for (auto& s : sections)
+        secs.add (juce::Array<juce::var> { s.first, s.last });
     obj->setProperty ("title", title);
     obj->setProperty ("lines", arr);
+    obj->setProperty ("secs", secs);
     obj->setProperty ("empty", "Текст не загружен"_ru);
 
     const juce::ScopedLock sl (lock);
@@ -332,12 +338,13 @@ void LyricsServer::publishText (const juce::String& title, const juce::StringArr
     ++revision;
 }
 
-void LyricsServer::publishLive (double seconds, bool playing, int line, double bpm, int semitones)
+void LyricsServer::publishLive (double seconds, bool playing, int section, int finished, double bpm, int semitones)
 {
     const juce::ScopedLock sl (lock);
     livePos = seconds;
     livePlaying = playing;
-    liveLine = line;
+    liveSection = section;
+    liveFinished = finished;
     liveBpm = bpm;
     liveSemis = semitones;
 }
@@ -407,7 +414,7 @@ void LyricsServer::serve (juce::StreamingSocket& client)
         {
             const juce::ScopedLock sl (lock);
             json = "{\"rev\":" + juce::String (revision) + ",\"pos\":" + juce::String (livePos, 2)
-                 + ",\"playing\":" + (livePlaying ? "true" : "false") + ",\"cur\":" + juce::String (liveLine)
+                 + ",\"playing\":" + (livePlaying ? "true" : "false") + ",\"sec\":" + juce::String (liveSection) + ",\"done\":" + juce::String (liveFinished)
                  + ",\"bpm\":" + juce::String (liveBpm, 2) + ",\"semis\":" + juce::String (liveSemis) + "}";
         }
         reply (client, "application/json", json);
@@ -446,44 +453,505 @@ void LyricsServer::serve (juce::StreamingSocket& client)
     }
 }
 
+
+// ---------------------------------------------------------------- helpers
+
+namespace
+{
+    juce::String formatTime (double seconds)
+    {
+        const bool negative = seconds < 0.0;
+        seconds = std::abs (seconds);
+        const int whole = (int) seconds;
+        const int tenth = (int) ((seconds - whole) * 10.0);
+        return (negative ? "-" : "") + juce::String (whole / 60) + ":" + juce::String (whole % 60).paddedLeft ('0', 2) + "." + juce::String (tenth);
+    }
+
+    juce::Colour sectionColour (int index)
+    {
+        return index % 2 == 0 ? Pal::clip : Pal::cyan;
+    }
+
+    // vertical curly brace "{": the tip looks to the left
+    void addVerticalBrace (juce::Path& p, float xRight, float yTop, float yBottom, float width)
+    {
+        const float ym = (yTop + yBottom) * 0.5f;
+        const float r = juce::jmin (width * 0.5f, (yBottom - yTop) * 0.25f);
+        const float xl = xRight - width, xm = xRight - width * 0.5f;
+        p.startNewSubPath (xRight, yTop);
+        p.quadraticTo (xm, yTop, xm, yTop + r);
+        p.lineTo (xm, ym - r);
+        p.quadraticTo (xm, ym, xl, ym);
+        p.quadraticTo (xm, ym, xm, ym + r);
+        p.lineTo (xm, yBottom - r);
+        p.quadraticTo (xm, yBottom, xRight, yBottom);
+    }
+
+    // horizontal curly brace: the tip looks up
+    void addHorizontalBrace (juce::Path& p, float xLeft, float xRight, float yTop, float yBottom)
+    {
+        const float xm = (xLeft + xRight) * 0.5f;
+        const float h = yBottom - yTop;
+        const float r = juce::jmin (h * 0.5f, (xRight - xLeft) * 0.25f);
+        const float ym = yTop + h * 0.5f;
+        p.startNewSubPath (xLeft, yBottom);
+        p.quadraticTo (xLeft, ym, xLeft + r, ym);
+        p.lineTo (xm - r, ym);
+        p.quadraticTo (xm, ym, xm, yTop);
+        p.quadraticTo (xm, ym, xm + r, ym);
+        p.lineTo (xRight - r, ym);
+        p.quadraticTo (xRight, ym, xRight, yBottom);
+    }
+}
+
+// ---------------------------------------------------------------- overlay over the text: dividing line + braces
+
+class LyricsPanel::Overlay : public juce::Component
+{
+public:
+    explicit Overlay (LyricsPanel& o) : owner (o) {}
+
+    bool hitTest (int x, int y) override
+    {
+        return x < gutterW || hitAt ({ x, y }).zone != Zone::None;
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        owner.updateGeometry();
+        const int n = owner.lines.size();
+        if (n == 0)
+            return;
+
+        const float right = (float) getWidth();
+        const auto& items = owner.data.sections.items;
+
+        // blocks that are already on the timeline
+        for (int i = 0; i < (int) items.size(); ++i)
+        {
+            const auto& s = items[(size_t) i];
+            const float y0 = owner.lineY (s.first), y1 = owner.lineY (s.last);
+            const bool playing = i == owner.playingSection;
+            const bool selected = i == owner.selected;
+            g.setColour (playing ? Pal::accent.withAlpha (0.20f) : sectionColour (i).withAlpha (selected ? 0.20f : 0.10f));
+            g.fillRect (juce::Rectangle<float> ((float) gutterW, y0, right - gutterW, y1 - y0));
+        }
+
+        // the block that "+" would take now
+        const int pf = owner.pendingFirst();
+        if (owner.divider > pf)
+        {
+            g.setColour (Pal::accent.withAlpha (0.16f));
+            g.fillRect (juce::Rectangle<float> ((float) gutterW, owner.lineY (pf), right - gutterW, owner.lineY (owner.divider) - owner.lineY (pf)));
+        }
+
+        // braces and numbers
+        for (int i = 0; i < (int) items.size(); ++i)
+        {
+            const auto& s = items[(size_t) i];
+            const float y0 = owner.lineY (s.first) + 2.0f, y1 = owner.lineY (s.last) - 2.0f;
+            if (y1 <= y0)
+                continue;
+            const bool playing = i == owner.playingSection;
+            const bool selected = i == owner.selected;
+
+            juce::Path brace;
+            addVerticalBrace (brace, (float) braceX1, y0, y1, (float) (braceX1 - braceX0));
+            g.setColour (playing || selected ? Pal::accent : sectionColour (i).brighter (0.2f));
+            g.strokePath (brace, juce::PathStrokeType (selected ? 3.0f : 2.0f));
+
+            g.setColour (selected ? Pal::accent : Pal::textDim);
+            g.setFont (juce::FontOptions (12.0f, juce::Font::bold));
+            g.drawText (juce::String (i + 1), 2, (int) ((y0 + y1) * 0.5f) - 8, braceX0 - 4, 16, juce::Justification::centredRight);
+
+            // text joint with the next block: both braces meet
+            if (owner.data.sections.textTouchesNext (i))
+            {
+                g.setColour (Pal::accent.withAlpha (0.8f));
+                g.fillRect (juce::Rectangle<float> ((float) braceX0 + 3.0f, owner.lineY (s.last) - 1.0f, (float) (braceX1 - braceX0) - 2.0f, 2.0f));
+            }
+        }
+
+        // the dividing line
+        const float dy = owner.lineY (owner.divider);
+        g.setColour (Pal::accent);
+        const float dashes[] = { 7.0f, 4.0f };
+        g.drawDashedLine (juce::Line<float> ((float) gutterW - 8.0f, dy, right, dy), dashes, 2, 2.0f);
+        auto grip = juce::Rectangle<float> (4.0f, dy - 9.0f, (float) gutterW - 14.0f, 18.0f);
+        g.fillRoundedRectangle (grip, 5.0f);
+        g.setColour (Pal::onAccent);
+        g.setFont (juce::FontOptions (12.0f, juce::Font::bold));
+        g.drawText (juce::String (juce::jmax (0, owner.divider - pf)), grip.toNearestInt(), juce::Justification::centred);
+    }
+
+    void mouseMove (const juce::MouseEvent& e) override
+    {
+        const auto hit = hitAt (e.getPosition());
+        setMouseCursor (hit.zone == Zone::Divider || hit.zone == Zone::BraceTop || hit.zone == Zone::BraceBottom
+                            ? juce::MouseCursor::UpDownResizeCursor
+                            : hit.zone == Zone::BraceBody ? juce::MouseCursor::DraggingHandCursor : juce::MouseCursor::NormalCursor);
+    }
+
+    void mouseDown (const juce::MouseEvent& e) override
+    {
+        press = hitAt (e.getPosition());
+        startY = e.y;
+        applied = 0;
+        if (press.zone == Zone::Divider)
+            return;
+        if (press.zone == Zone::None)
+        {
+            owner.select (-1);
+            return;
+        }
+        owner.select (press.index);
+        if (e.mods.isPopupMenu())
+        {
+            press.zone = Zone::None;
+            owner.showDeleteMenu (press.index);
+        }
+    }
+
+    void mouseDrag (const juce::MouseEvent& e) override
+    {
+        auto& sections = owner.data.sections;
+        const int n = owner.lines.size();
+        switch (press.zone)
+        {
+            case Zone::Divider:
+                owner.setDivider (owner.boundaryAtY ((float) e.y));
+                return;
+            case Zone::BraceTop:
+                sections.moveFirst (press.index, owner.boundaryAtY ((float) e.y));
+                break;
+            case Zone::BraceBottom:
+                sections.moveLast (press.index, owner.boundaryAtY ((float) e.y), n);
+                break;
+            case Zone::BraceBody:
+            {
+                const int wanted = (int) std::round ((e.y - startY) / owner.geo.pitch);
+                const int before = sections.items[(size_t) press.index].first;
+                sections.shiftLines (press.index, wanted - applied, n);
+                applied += sections.items[(size_t) press.index].first - before;
+                break;
+            }
+            case Zone::None:
+                return;
+        }
+        owner.sectionsChanged();
+    }
+
+    void mouseUp (const juce::MouseEvent&) override { press = {}; }
+
+    void mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& w) override
+    {
+        owner.editor.mouseWheelMove (e.getEventRelativeTo (&owner.editor), w);
+    }
+
+private:
+    enum class Zone { None, Divider, BraceTop, BraceBottom, BraceBody };
+    struct Hit { Zone zone = Zone::None; int index = -1; };
+
+    static constexpr int braceX0 = gutterW - 36, braceX1 = gutterW - 6;
+
+    Hit hitAt (juce::Point<int> p) const
+    {
+        owner.updateGeometry();
+        if (owner.lines.isEmpty())
+            return {};
+
+        const float dy = owner.lineY (owner.divider);
+        if (std::abs ((float) p.y - dy) <= (p.x < gutterW ? 10.0f : 3.0f))
+            return { Zone::Divider, -1 };
+
+        if (p.x >= braceX0 - 4 && p.x <= braceX1 + 2)
+        {
+            const auto& items = owner.data.sections.items;
+            for (int i = (int) items.size() - 1; i >= 0; --i)
+            {
+                const float y0 = owner.lineY (items[(size_t) i].first), y1 = owner.lineY (items[(size_t) i].last);
+                if ((float) p.y < y0 || (float) p.y > y1)
+                    continue;
+                if ((float) p.y < y0 + 8.0f)
+                    return { Zone::BraceTop, i };
+                if ((float) p.y > y1 - 8.0f)
+                    return { Zone::BraceBottom, i };
+                return { Zone::BraceBody, i };
+            }
+        }
+        return {};
+    }
+
+    LyricsPanel& owner;
+    Hit press;
+    int startY = 0, applied = 0;
+};
+
+// ---------------------------------------------------------------- the timeline
+
+class LyricsPanel::TimelineView : public juce::Component
+{
+public:
+    explicit TimelineView (LyricsPanel& o) : owner (o) { setWantsKeyboardFocus (true); }
+
+    static constexpr int rulerH = 26;
+    double pxPerSec = 30.0, viewStart = 0.0;
+    juce::uint32 manualUntil = 0;
+
+    void followPlayhead (double seconds)
+    {
+        if (juce::Time::getMillisecondCounter() < manualUntil)
+            return;
+        const float x = xOf (seconds);
+        if (x < 0.0f || x > (float) getWidth() * 0.9f)
+            viewStart = juce::jmax (0.0, seconds - 0.1 * getWidth() / pxPerSec);
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        const int w = getWidth(), h = getHeight();
+        const double bs = owner.beatSeconds();
+        g.fillAll (Pal::sunken);
+
+        // ruler
+        g.setColour (Pal::surfaceLo);
+        g.fillRect (0, 0, w, rulerH);
+        double step = 1.0;
+        for (double s : { 0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0 })
+        {
+            step = s;
+            if (s * pxPerSec >= 70.0)
+                break;
+        }
+        g.setFont (juce::FontOptions (11.0f));
+        for (double t = std::floor (viewStart / step) * step; xOf (t) < (float) w; t += step)
+        {
+            const float x = xOf (t);
+            if (x < 0.0f)
+                continue;
+            g.setColour (Pal::hairline);
+            g.drawVerticalLine ((int) x, (float) rulerH - 8.0f, (float) h);
+            g.setColour (Pal::textDim);
+            g.drawText (formatTime (t), (int) x + 3, 4, 60, 14, juce::Justification::centredLeft);
+        }
+        g.setColour (Pal::hairline);
+        g.fillRect (0, rulerH - 1, w, 1);
+
+        // sections: a brace over a tinted bar with the first words
+        const auto& items = owner.data.sections.items;
+        const float bandTop = (float) rulerH + 6.0f, bandBottom = (float) h - 6.0f;
+        for (int i = 0; i < (int) items.size(); ++i)
+        {
+            const auto& s = items[(size_t) i];
+            const float x0 = xOf (s.t0 * bs), x1 = xOf (s.t1 * bs);
+            if (x1 < 0.0f || x0 > (float) w)
+                continue;
+            const bool selected = i == owner.selected, playing = i == owner.playingSection;
+            const auto colour = playing || selected ? Pal::accent : sectionColour (i).brighter (0.2f);
+
+            auto bar = juce::Rectangle<float> (x0 + 1.0f, bandTop + 20.0f, juce::jmax (2.0f, x1 - x0 - 2.0f), bandBottom - bandTop - 20.0f);
+            g.setColour (colour.withAlpha (selected ? 0.30f : 0.16f));
+            g.fillRoundedRectangle (bar, 5.0f);
+
+            juce::Path brace;
+            addHorizontalBrace (brace, x0 + 1.0f, x1 - 1.0f, bandTop, bandTop + 16.0f);
+            g.setColour (colour);
+            g.strokePath (brace, juce::PathStrokeType (selected ? 3.0f : 2.0f));
+
+            juce::String label = juce::String (i + 1) + "  ";
+            for (int k = s.first; k < s.last && k < owner.lines.size(); ++k)
+                if (owner.lines[k].trim().isNotEmpty())
+                {
+                    label += owner.lines[k].trim();
+                    break;
+                }
+            label += "  (" + juce::String (s.last - s.first) + ")";
+            {
+                juce::Graphics::ScopedSaveState state (g);
+                g.reduceClipRegion (bar.toNearestInt().reduced (4, 0));
+                g.setColour (Pal::text);
+                g.setFont (juce::FontOptions (13.0f));
+                g.drawText (label, bar.toNearestInt().reduced (6, 2), juce::Justification::topLeft, false);
+            }
+
+            // two sections that touch move together: shown by a bright joint
+            if (owner.data.sections.touchesNext (i))
+            {
+                g.setColour (Pal::accent);
+                g.fillRect (juce::Rectangle<float> (x1 - 1.5f, bandTop, 3.0f, bandBottom - bandTop));
+            }
+        }
+
+        // playhead
+        const float px = xOf (owner.engine.getClockSeconds());
+        if (px >= 0.0f && px <= (float) w)
+        {
+            g.setColour (Pal::red);
+            g.fillRect (px - 1.0f, 0.0f, 2.0f, (float) h);
+            juce::Path tri;
+            tri.addTriangle (px - 6.0f, 0.0f, px + 6.0f, 0.0f, px, 9.0f);
+            g.fillPath (tri);
+        }
+    }
+
+    void mouseMove (const juce::MouseEvent& e) override
+    {
+        setMouseCursor (e.y > rulerH && edgeAt (e.x).index >= 0 ? juce::MouseCursor::LeftRightResizeCursor : juce::MouseCursor::NormalCursor);
+    }
+
+    void mouseDown (const juce::MouseEvent& e) override
+    {
+        grabKeyboardFocus();
+        auto& sections = owner.data.sections;
+        mode = Mode::None;
+
+        if (e.mods.isPopupMenu())
+        {
+            const int i = sectionAtX (e.x);
+            if (i >= 0)
+            {
+                owner.select (i);
+                owner.showDeleteMenu (i);
+            }
+            return;
+        }
+        if (e.y < rulerH)
+        {
+            mode = Mode::Scrub;
+            owner.seekSeconds (juce::jmax (0.0, secAt ((float) e.x)));
+            return;
+        }
+
+        const auto edge = edgeAt (e.x);
+        if (edge.index >= 0)
+        {
+            owner.select (edge.index);
+            index = edge.index;
+            mode = edge.isEnd ? Mode::EndEdge : Mode::StartEdge;
+            return;
+        }
+
+        const int i = sectionAtX (e.x);
+        owner.select (i);
+        if (i >= 0)
+        {
+            index = i;
+            mode = Mode::Body;
+            grabSec = secAt ((float) e.x);
+            grabStart = sections.items[(size_t) i].t0;
+        }
+    }
+
+    void mouseDrag (const juce::MouseEvent& e) override
+    {
+        auto& sections = owner.data.sections;
+        const double bs = owner.beatSeconds();
+        switch (mode)
+        {
+            case Mode::Scrub:
+                owner.seekSeconds (juce::jmax (0.0, secAt ((float) e.x)));
+                return;
+            case Mode::StartEdge:
+                sections.moveStart (index, secAt ((float) e.x) / bs);
+                break;
+            case Mode::EndEdge:
+                sections.moveEnd (index, secAt ((float) e.x) / bs, owner.maxBeats());
+                break;
+            case Mode::Body:
+                sections.moveBody (index, grabStart + (secAt ((float) e.x) - grabSec) / bs - sections.items[(size_t) index].t0, owner.maxBeats());
+                break;
+            case Mode::None:
+                return;
+        }
+        owner.sectionsChanged();
+    }
+
+    void mouseUp (const juce::MouseEvent&) override { mode = Mode::None; }
+
+    void mouseDoubleClick (const juce::MouseEvent& e) override
+    {
+        const int i = e.y > rulerH ? sectionAtX (e.x) : -1;
+        if (i >= 0)
+            owner.seekSeconds (owner.data.sections.items[(size_t) i].t0 * owner.beatSeconds());
+    }
+
+    void mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& w) override
+    {
+        manualUntil = juce::Time::getMillisecondCounter() + 3000;
+        if (e.mods.isCtrlDown() || e.mods.isCommandDown())
+        {
+            const double anchor = secAt ((float) e.x);
+            pxPerSec = juce::jlimit (4.0, 400.0, pxPerSec * std::pow (1.6, (double) w.deltaY * 2.0));
+            viewStart = juce::jmax (0.0, anchor - e.x / pxPerSec);
+        }
+        else
+        {
+            viewStart = juce::jmax (0.0, viewStart - (double) (w.deltaY + w.deltaX) * 300.0 / pxPerSec);
+        }
+        repaint();
+    }
+
+    bool keyPressed (const juce::KeyPress& key) override
+    {
+        if (key == juce::KeyPress::deleteKey || key == juce::KeyPress::backspaceKey)
+        {
+            owner.deleteSelected();
+            return true;
+        }
+        return false;
+    }
+
+private:
+    enum class Mode { None, Scrub, StartEdge, EndEdge, Body };
+    struct Edge { int index = -1; bool isEnd = false; };
+
+    float xOf (double sec) const { return (float) ((sec - viewStart) * pxPerSec); }
+    double secAt (float x) const { return viewStart + (double) x / pxPerSec; }
+
+    int sectionAtX (int x) const
+    {
+        const double bs = owner.beatSeconds();
+        const auto& items = owner.data.sections.items;
+        for (int i = (int) items.size() - 1; i >= 0; --i)
+            if (x >= xOf (items[(size_t) i].t0 * bs) && x <= xOf (items[(size_t) i].t1 * bs))
+                return i;
+        return -1;
+    }
+
+    Edge edgeAt (int x) const
+    {
+        const double bs = owner.beatSeconds();
+        const auto& items = owner.data.sections.items;
+        Edge best;
+        float bestDistance = 7.0f;
+        for (int i = 0; i < (int) items.size(); ++i)
+        {
+            const float d0 = std::abs ((float) x - xOf (items[(size_t) i].t0 * bs));
+            const float d1 = std::abs ((float) x - xOf (items[(size_t) i].t1 * bs));
+            if (d0 < bestDistance)
+            {
+                bestDistance = d0;
+                best = { i, false };
+            }
+            if (d1 < bestDistance)
+            {
+                bestDistance = d1;
+                best = { i, true };
+            }
+        }
+        return best;
+    }
+
+    LyricsPanel& owner;
+    Mode mode = Mode::None;
+    int index = -1;
+    double grabSec = 0.0, grabStart = 0.0;
+};
+
 // ---------------------------------------------------------------- panel
 
 LyricsPanel::LyricsPanel (Engine& e) : engine (e)
 {
-    loadButton.setButtonText ("Загрузить..."_ru);
-    pasteButton.setButtonText ("Вставить"_ru);
-    markButton.setButtonText ("Разметка"_ru);
-    clearButton.setButtonText ("Сбросить метки"_ru);
-    copyButton.setButtonText ("Адрес для телефона"_ru);
-
-    loadButton.setTooltip ("Загрузить текст из файла (.txt, .lrc)"_ru);
-    pasteButton.setTooltip ("Вставить текст из буфера обмена"_ru);
-    markButton.setTooltip ("Режим разметки: пока играет песня, жмите Enter в начале каждой строки"_ru);
-    clearButton.setTooltip ("Убрать все метки времени, текст останется"_ru);
-    copyButton.setTooltip ("Скопировать адрес страницы для телефона (телефон и ПК в одной сети)"_ru);
-
-    markButton.setClickingTogglesState (true);
-    loadButton.onClick = [this] { chooseFile(); };
-    pasteButton.onClick = [this] { pasteText(); };
-    markButton.onClick = [this] { setTapMode (markButton.getToggleState()); };
-    clearButton.onClick = [this] { data.clearMarks(); tapIndex = juce::jmax (0, nextTextLine (0)); changed(); };
-    copyButton.onClick = [this]
-    {
-        if (url.isEmpty())
-            return;
-        juce::SystemClipboard::copyTextToClipboard (url);
-        copyButton.setButtonText ("Скопировано"_ru);
-        juce::Component::SafePointer<LyricsPanel> safe (this);
-        juce::Timer::callAfterDelay (1500, [safe] { if (safe != nullptr) safe->copyButton.setButtonText ("Адрес для телефона"_ru); });
-    };
-
-    for (auto* b : { &loadButton, &pasteButton, &markButton, &clearButton, &copyButton })
-    {
-        b->setWantsKeyboardFocus (false);
-        b->setMouseClickGrabsKeyboardFocus (false);
-        addAndMakeVisible (b);
-    }
-
     // the phone must know this key to press the buttons (kept between runs, so a bookmark keeps working)
     auto keyFile = engine.getDataDirectory().getChildFile ("phone-key.txt");
     auto key = keyFile.loadFileAsString().trim();
@@ -498,222 +966,172 @@ LyricsPanel::LyricsPanel (Engine& e) : engine (e)
     {
         juce::MessageManager::callAsync ([safeThis, command] { if (safeThis != nullptr && safeThis->onRemote) safeThis->onRemote (command); });
     };
-
     serverOk = server.start();
     if (serverOk)
         url = "http://" + LyricsServer::findLocalAddress() + ":" + juce::String (server.getPort()) + "/?k=" + key;
 
-    setWantsKeyboardFocus (true);
+    loadButton.setButtonText ("Загрузить текст..."_ru);
+    loadButton.setTooltip ("Загрузить текст из файла (.txt, .lrc). Текст можно и просто вставить в поле (ПКМ - Вставить)."_ru);
+    loadButton.onClick = [this] { chooseFile(); };
+    phoneButton.setButtonText ("Адрес для телефона"_ru);
+    phoneButton.setTooltip ("Скопировать адрес страницы для телефона (телефон и ПК в одной сети)"_ru);
+    phoneButton.onClick = [this]
+    {
+        if (url.isEmpty())
+            return;
+        juce::SystemClipboard::copyTextToClipboard (url);
+        say ("Адрес скопирован: "_ru + url);
+    };
+    plusButton.setButtonText ("+");
+    plusButton.setTooltip ("Поставить маркер: выделенные строки ложатся на таймлайн в текущий момент (F9)"_ru);
+    plusButton.setColour (juce::TextButton::buttonColourId, Pal::accent);
+    plusButton.setColour (juce::TextButton::textColourOffId, Pal::onAccent);
+    plusButton.onClick = [this] { addMarker(); };
+    deleteButton.setButtonText ("Удалить маркер"_ru);
+    deleteButton.setTooltip ("Удалить выбранный маркер (текст остаётся)"_ru);
+    deleteButton.onClick = [this] { deleteSelected(); };
+
+    countLabel.setText ("Строк в блоке:"_ru, juce::dontSendNotification);
+    countLabel.setColour (juce::Label::textColourId, Pal::textDim);
+    countSlider.setSliderStyle (juce::Slider::IncDecButtons);
+    countSlider.setRange (1.0, 64.0, 1.0);
+    countSlider.setValue (count, juce::dontSendNotification);
+    countSlider.setTextBoxStyle (juce::Slider::TextBoxLeft, false, 44, 28);
+    countSlider.setIncDecButtonsMode (juce::Slider::incDecButtonsNotDraggable);
+    countSlider.setTooltip ("Сколько строк берёт один маркер. Разделительную строку можно и перетащить мышью."_ru);
+    countSlider.onValueChange = [this]
+    {
+        count = (int) countSlider.getValue();
+        resetDivider();
+        overlay->repaint();
+    };
+
+    infoLabel.setColour (juce::Label::textColourId, Pal::textDim);
+    infoLabel.setFont (juce::FontOptions (13.0f));
+    timeLabel.setColour (juce::Label::textColourId, Pal::text);
+    timeLabel.setFont (juce::FontOptions (18.0f, juce::Font::bold));
+    timeLabel.setJustificationType (juce::Justification::centred);
+    hintLabel.setColour (juce::Label::textColourId, Pal::textDim);
+    hintLabel.setFont (juce::FontOptions (12.0f));
+
+    playButton.setTooltip ("Играть (F8 - играть / пауза)"_ru);
+    playButton.onClick = [this] { engine.playAll(); };
+    pauseButton.setTooltip ("Пауза"_ru);
+    pauseButton.onClick = [this] { engine.pauseAll(); };
+    stopButton.setTooltip ("Стоп, в начало"_ru);
+    stopButton.onClick = [this] { engine.stopAll(); };
+
+    editor.setMultiLine (true, false);
+    editor.setReturnKeyStartsNewLine (true);
+    editor.setTabKeyUsedAsCharacter (false);
+    editor.setPopupMenuEnabled (true);
+    editor.setScrollbarsShown (true);
+    editor.setFont (juce::Font (juce::FontOptions (21.0f)));
+    editor.setColour (juce::TextEditor::backgroundColourId, Pal::sunken);
+    editor.setColour (juce::TextEditor::textColourId, Pal::text);
+    editor.setColour (juce::TextEditor::outlineColourId, Pal::hairline);
+    editor.setColour (juce::TextEditor::focusedOutlineColourId, Pal::accent.withAlpha (0.6f));
+    editor.setColour (juce::TextEditor::highlightColourId, Pal::accent.withAlpha (0.35f));
+    editor.setColour (juce::TextEditor::highlightedTextColourId, Pal::text);
+    editor.setColour (juce::CaretComponent::caretColourId, Pal::accent);
+    editor.addListener (this);
+
+    overlay = std::make_unique<Overlay> (*this);
+    timeline = std::make_unique<TimelineView> (*this);
+
+    editorArea.addAndMakeVisible (editor);
+    editorArea.addAndMakeVisible (*overlay);
+    for (auto* c : std::initializer_list<juce::Component*> { &loadButton, &phoneButton, &plusButton, &deleteButton, &countLabel, &countSlider,
+                                                              &infoLabel, &timeLabel, &hintLabel, &playButton, &pauseButton, &stopButton,
+                                                              &editorArea, timeline.get() })
+        addAndMakeVisible (c);
+
+    for (auto* b : std::initializer_list<juce::Component*> { &loadButton, &phoneButton, &plusButton, &deleteButton, &countSlider,
+                                                              &playButton, &pauseButton, &stopButton })
+    {
+        b->setWantsKeyboardFocus (false);
+        b->setMouseClickGrabsKeyboardFocus (false);
+    }
+
+    setWantsKeyboardFocus (false);
     startTimerHz (30);
 }
 
 LyricsPanel::~LyricsPanel()
 {
     stopTimer();
+    editor.removeListener (this);
+    saveNow();
 }
 
-juce::Rectangle<int> LyricsPanel::viewArea() const
+void LyricsPanel::paint (juce::Graphics& g)
 {
-    return getLocalBounds().withTrimmedTop (headerH).withTrimmedBottom (28);
+    g.fillAll (Pal::window);
+    g.setColour (Pal::textDim);
+    g.setFont (juce::FontOptions (12.0f));
+    g.drawText (serverOk ? "Телефон: "_ru + url : "Страница для телефона не запущена (нет свободного порта)"_ru,
+                getLocalBounds().reduced (12, 0).removeFromTop (44).withTrimmedLeft (380), juce::Justification::centredRight, true);
 }
 
 void LyricsPanel::resized()
 {
-    auto r = getLocalBounds().reduced (12, 0);
-    auto row1 = r.withTrimmedTop (36).removeFromTop (30);
-    auto row2 = r.withTrimmedTop (72).removeFromTop (30);
-    const int gap = 8;
-    const int w1 = (row1.getWidth() - 2 * gap) / 3;
-    loadButton.setBounds (row1.removeFromLeft (w1));
-    row1.removeFromLeft (gap);
-    pasteButton.setBounds (row1.removeFromLeft (w1));
-    row1.removeFromLeft (gap);
-    markButton.setBounds (row1);
+    auto r = getLocalBounds().reduced (12, 8);
 
-    const int w2 = (row2.getWidth() - gap) / 2;
-    clearButton.setBounds (row2.removeFromLeft (w2));
-    row2.removeFromLeft (gap);
-    copyButton.setBounds (row2);
-}
+    auto top = r.removeFromTop (32);
+    loadButton.setBounds (top.removeFromLeft (170));
+    top.removeFromLeft (8);
+    phoneButton.setBounds (top.removeFromLeft (170));
+    r.removeFromTop (8);
 
-int LyricsPanel::nextTextLine (int from) const
-{
-    for (int i = juce::jmax (0, from); i < data.lines.size(); ++i)
-        if (data.lines[i].trim().isNotEmpty())
-            return i;
-    return -1;
-}
+    hintLabel.setBounds (r.removeFromBottom (20));
+    auto timelineArea = r.removeFromBottom (150);
+    r.removeFromBottom (8);
+    auto strip = r.removeFromBottom (44);
+    r.removeFromBottom (8);
 
-void LyricsPanel::setSong (const juce::String& name, const juce::File& file)
-{
-    if (file == songFile && name == title)
-        return;
+    editorArea.setBounds (r);
+    editor.setBounds (gutterW, 0, editorArea.getWidth() - gutterW, editorArea.getHeight());
+    overlay->setBounds (editorArea.getLocalBounds());
 
-    songFile = file;
-    title = name;
-    data.load (file);
-    tapIndex = juce::jmax (0, nextTextLine (0));
-    current = -1;
-    scrollY = 0.0f;
-    markButton.setToggleState (false, juce::dontSendNotification);
-    tapMode = false;
-    publish();
-    repaint();
-}
+    countLabel.setBounds (strip.removeFromLeft (112));
+    countSlider.setBounds (strip.removeFromLeft (112));
+    strip.removeFromLeft (12);
+    plusButton.setBounds (strip.removeFromLeft (150));
+    strip.removeFromLeft (8);
+    deleteButton.setBounds (strip.removeFromLeft (150));
+    strip.removeFromLeft (12);
+    infoLabel.setBounds (strip);
 
-void LyricsPanel::publish()
-{
-    if (serverOk)
-        server.publishText (title, data.lines);
-}
-
-void LyricsPanel::changed()
-{
-    data.save (songFile);
-    publish();
-    repaint();
-}
-
-void LyricsPanel::loadTextFile (const juce::File& f)
-{
-    juce::MemoryBlock block;
-    if (! f.existsAsFile() || ! f.loadFileAsData (block))
-        return;
-    data.setText (LyricsData::decode (block), engine.getBeatSeconds());
-    tapIndex = juce::jmax (0, nextTextLine (0));
-    scrollY = 0.0f;
-    changed();
-}
-
-void LyricsPanel::chooseFile()
-{
-    chooser = std::make_unique<juce::FileChooser> ("Текст песни"_ru, juce::File::getSpecialLocation (juce::File::userDocumentsDirectory),
-                                                   "*.txt;*.lrc");
-    juce::Component::SafePointer<LyricsPanel> safe (this);
-    chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
-                          [safe] (const juce::FileChooser& fc)
-                          {
-                              if (safe != nullptr && fc.getResult().existsAsFile())
-                                  safe->loadTextFile (fc.getResult());
-                          });
-}
-
-void LyricsPanel::pasteText()
-{
-    const auto text = juce::SystemClipboard::getTextFromClipboard();
-    if (text.trim().isEmpty())
-        return;
-    data.setText (text, engine.getBeatSeconds());
-    tapIndex = juce::jmax (0, nextTextLine (0));
-    scrollY = 0.0f;
-    changed();
-}
-
-void LyricsPanel::setTapMode (bool on)
-{
-    tapMode = on;
-    markButton.setToggleState (on, juce::dontSendNotification);
-    if (on)
-    {
-        const int cur = data.lineAt (nowBeats());
-        tapIndex = juce::jmax (0, cur >= 0 ? nextTextLine (cur + 1) : nextTextLine (0));
-        if (tapIndex < 0 || tapIndex >= data.lines.size())
-            tapIndex = juce::jmax (0, nextTextLine (0));
-        grabKeyboardFocus();
-    }
-    repaint();
-}
-
-void LyricsPanel::tap()
-{
-    if (! tapMode || data.lines.isEmpty() || tapIndex >= data.lines.size())
-        return;
-    const double clock = engine.getClockSeconds();
-    if (clock < 0.0)
-        return;   // still counting in
-
-    data.beats[(size_t) tapIndex] = clock / engine.getBeatSeconds();
-    const int next = nextTextLine (tapIndex + 1);
-    tapIndex = next < 0 ? data.lines.size() : next;
-    changed();
-}
-
-void LyricsPanel::stepBack()
-{
-    if (! tapMode || data.lines.isEmpty())
-        return;
-    int i = juce::jmin (tapIndex, data.lines.size()) - 1;
-    while (i >= 0 && data.lines[i].trim().isEmpty())
-        --i;
-    if (i < 0)
-        return;
-    data.beats[(size_t) i] = LyricsData::none;
-    tapIndex = i;
-    changed();
+    auto transport = timelineArea.removeFromLeft (118);
+    timelineArea.removeFromLeft (8);
+    auto buttons = transport.removeFromTop (34);
+    const int bw = (buttons.getWidth() - 8) / 3;
+    playButton.setBounds (buttons.removeFromLeft (bw));
+    buttons.removeFromLeft (4);
+    pauseButton.setBounds (buttons.removeFromLeft (bw));
+    buttons.removeFromLeft (4);
+    stopButton.setBounds (buttons);
+    transport.removeFromTop (6);
+    timeLabel.setBounds (transport.removeFromTop (30));
+    timeline->setBounds (timelineArea);
 }
 
 bool LyricsPanel::keyPressed (const juce::KeyPress& key)
 {
-    if (key == juce::KeyPress::returnKey)
+    if (key == juce::KeyPress::F9Key)
     {
-        tap();
+        addMarker();
         return true;
     }
-    if (key == juce::KeyPress::backspaceKey)
+    if (key == juce::KeyPress::F8Key)
     {
-        stepBack();
-        return true;
-    }
-    if (key == juce::KeyPress::spaceKey)
-    {
-        if (onTogglePlay)
-            onTogglePlay();
-        return true;
-    }
-    if (key == juce::KeyPress::escapeKey && tapMode)
-    {
-        setTapMode (false);
+        if (engine.isPlaying() && ! engine.isPaused())
+            engine.pauseAll();
+        else
+            engine.playAll();
         return true;
     }
     return false;
-}
-
-int LyricsPanel::lineAtY (int y) const
-{
-    const auto v = viewArea();
-    const int i = (int) std::floor ((y - v.getY() - 20 + scrollY) / (float) lineH);
-    return i >= 0 && i < data.lines.size() ? i : -1;
-}
-
-void LyricsPanel::mouseDown (const juce::MouseEvent& e)
-{
-    grabKeyboardFocus();
-    if (tapMode && viewArea().contains (e.getPosition()))
-    {
-        const int i = lineAtY (e.y);
-        if (i >= 0)
-        {
-            tapIndex = i;
-            repaint();
-        }
-    }
-}
-
-void LyricsPanel::mouseDoubleClick (const juce::MouseEvent& e)
-{
-    if (! viewArea().contains (e.getPosition()))
-        return;
-    const int i = lineAtY (e.y);
-    if (i >= 0 && data.beats[(size_t) i] > LyricsData::none / 2 && onSeek)
-        onSeek (data.beats[(size_t) i] * engine.getBeatSeconds());
-}
-
-void LyricsPanel::mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails& w)
-{
-    const float maxY = juce::jmax (0.0f, (float) (data.lines.size() * lineH - viewArea().getHeight() / 2));
-    scrollY = juce::jlimit (0.0f, maxY, scrollY - w.deltaY * 260.0f);
-    manualUntil = juce::Time::currentTimeMillis() + 4000;
-    repaint();
 }
 
 bool LyricsPanel::isInterestedInFileDrag (const juce::StringArray& files)
@@ -729,130 +1147,362 @@ void LyricsPanel::filesDropped (const juce::StringArray& files, int, int)
     for (auto& f : files)
         if (f.endsWithIgnoreCase (".txt") || f.endsWithIgnoreCase (".lrc"))
         {
-            loadTextFile (juce::File (f));
+            juce::MemoryBlock block;
+            if (juce::File (f).loadFileAsData (block))
+                loadText (LyricsData::decode (block));
             return;
         }
 }
 
-void LyricsPanel::timerCallback()
+// ---- text and geometry
+
+void LyricsPanel::refreshLines()
 {
-    const double clock = engine.getClockSeconds();
-    const int line = clock >= 0.0 ? data.lineAt (clock / engine.getBeatSeconds()) : -1;
-    bool dirty = false;
-    if (line != current)
+    lines = juce::StringArray::fromLines (editor.getText());
+    lineStarts.clear();
+    int start = 0;
+    for (auto& l : lines)
     {
-        current = line;
-        dirty = true;
+        lineStarts.push_back (start);
+        start += l.length() + 1;
     }
-
-    if (serverOk)
-        server.publishLive (clock, engine.isPlaying(), line, engine.getBpm(), engine.getTranspose());
-
-    if (juce::Time::currentTimeMillis() >= manualUntil)
-    {
-        const int follow = tapMode ? juce::jmax (0, tapIndex - 1) : current;
-        float target = 0.0f;
-        if (follow >= 0)
-            target = juce::jmax (0.0f, (float) (follow * lineH + lineH / 2) - (float) viewArea().getHeight() * 0.35f);
-        const float d = target - scrollY;
-        if (std::abs (d) > 0.4f)
-        {
-            scrollY += d * 0.2f;
-            dirty = true;
-        }
-        else if (d != 0.0f)
-        {
-            scrollY = target;
-            dirty = true;
-        }
-    }
-
-    if (dirty)
-        repaint();
 }
 
-void LyricsPanel::paint (juce::Graphics& g)
+void LyricsPanel::updateGeometry()
 {
-    g.fillAll (Pal::window);
+    int a = -1, b = -1;
+    for (int i = 0; i < lines.size(); ++i)
+        if (lines[i].trim().isNotEmpty())
+        {
+            if (a < 0)
+                a = i;
+            b = i;
+        }
+    if (a < 0)
+        return;
 
-    // header
-    g.setColour (Pal::surfaceLo);
-    g.fillRect (getLocalBounds().withHeight (headerH));
-    g.setColour (Pal::hairline);
-    g.fillRect (0, headerH - 1, getWidth(), 1);
-
-    g.setColour (Pal::text);
-    g.setFont (juce::FontOptions (16.0f, juce::Font::bold));
-    g.drawText (title.isEmpty() ? juce::String ("-") : title, 14, 8, getWidth() - 28, 24, juce::Justification::centredLeft, true);
-    g.setColour (Pal::textDim);
-    g.setFont (juce::FontOptions (12.0f));
-    g.drawText (serverOk ? "Телефон: "_ru + url : "Страница для телефона не запущена (нет свободного порта)"_ru,
-                14, 106, getWidth() - 28, 18, juce::Justification::centredLeft, true);
-
-    const auto v = viewArea();
+    auto yOf = [this] (int line, float& y, float& h)
     {
-        juce::Graphics::ScopedSaveState state (g);
-        g.reduceClipRegion (v);
+        const auto rects = editor.getTextBounds ({ lineStarts[(size_t) line], lineStarts[(size_t) line] + 1 });
+        if (rects.isEmpty())
+            return false;
+        const auto box = rects.getBounds();
+        y = (float) box.getY();
+        h = (float) box.getHeight();
+        return true;
+    };
 
-        if (data.lines.isEmpty())
-        {
-            g.setColour (Pal::textDim);
-            g.setFont (juce::FontOptions (16.0f));
-            g.drawFittedText ("Текста нет. Нажмите «Загрузить...», вставьте из буфера или перетащите сюда файл .txt."_ru,
-                              v.reduced (30, 40), juce::Justification::centredTop, 4);
-        }
+    float ya = 0.0f, ha = 0.0f, yb = 0.0f, hb = 0.0f;
+    if (! yOf (a, ya, ha))
+        return;
+    float pitch = ha;
+    if (b != a && yOf (b, yb, hb))
+        pitch = (yb - ya) / (float) (b - a);
+    geo.pitch = juce::jmax (8.0f, pitch);
+    geo.top0 = ya - (float) a * geo.pitch + (float) editor.getY();
+}
 
-        const double bs = engine.getBeatSeconds();
-        for (int i = 0; i < data.lines.size(); ++i)
-        {
-            const int y = v.getY() + 20 + i * lineH - (int) scrollY;
-            if (y + lineH < v.getY() || y > v.getBottom())
-                continue;
+int LyricsPanel::pendingFirst() const
+{
+    int f = data.sections.linesEnd();
+    while (f < lines.size() && lines[f].trim().isEmpty())
+        ++f;
+    return juce::jmin (f, lines.size());
+}
 
-            const bool isCurrent = i == current;
-            const bool past = current >= 0 && i < current;
-            auto row = juce::Rectangle<int> (v.getX() + 34, y, v.getWidth() - 34 - 64, lineH);
+void LyricsPanel::resetDivider()
+{
+    divider = juce::jmin (lines.size(), pendingFirst() + count);
+}
 
-            if (isCurrent)
-            {
-                g.setColour (Pal::accent);
-                g.setFont (juce::FontOptions (28.0f, juce::Font::bold));
-            }
-            else
-            {
-                g.setColour (Pal::text.withAlpha (past ? 0.4f : 0.9f));
-                g.setFont (juce::FontOptions (22.0f));
-            }
-            g.drawText (data.lines[i], row, juce::Justification::centredLeft, true);
+void LyricsPanel::setDivider (int boundary)
+{
+    const int pf = pendingFirst();
+    divider = juce::jlimit (pf, lines.size(), boundary);
+    count = juce::jmax (1, divider - pf);
+    countSlider.setValue (count, juce::dontSendNotification);
+    overlay->repaint();
+}
 
-            if (data.beats[(size_t) i] > LyricsData::none / 2)
-            {
-                const int secs = (int) std::round (juce::jmax (0.0, data.beats[(size_t) i] * bs));
-                g.setColour (Pal::textDim);
-                g.setFont (juce::FontOptions (12.0f));
-                g.drawText (juce::String (secs / 60) + ":" + juce::String (secs % 60).paddedLeft ('0', 2),
-                            v.getRight() - 62, y, 52, lineH, juce::Justification::centredRight);
-            }
+void LyricsPanel::textEditorTextChanged (juce::TextEditor&)
+{
+    const auto old = lines;
+    refreshLines();
 
-            if (tapMode && i == tapIndex)
-            {
-                juce::Path tri;
-                const float cy = (float) y + lineH * 0.5f;
-                tri.addTriangle (14.0f, cy - 8.0f, 14.0f, cy + 8.0f, 28.0f, cy);
-                g.setColour (Pal::accent);
-                g.fillPath (tri);
-            }
-        }
+    int kept = 0;
+    while (kept < old.size() && kept < lines.size() && old[kept] == lines[kept])
+        ++kept;
+    const int delta = lines.size() - old.size();
+    if (delta != 0)
+        data.sections.textEdited (kept, delta, lines.size());
+    if (selected >= data.sections.size())
+        selected = -1;
+
+    data.text = editor.getText();
+    if (old.size() <= 1 && lines.size() > 1)
+        resetDivider();                       // the text just appeared: the dividing line goes to its place
+    else
+        divider = juce::jlimit (pendingFirst(), lines.size(), divider);
+    dirty = true;
+    dirtyAt = juce::Time::getMillisecondCounter();
+    overlay->repaint();
+    timeline->repaint();
+}
+
+// ---- sections
+
+double LyricsPanel::maxBeats() const
+{
+    double end = engine.getSongEnd();
+    for (auto& s : data.sections.items)
+        end = juce::jmax (end, s.t1 * beatSeconds());
+    return (end + 30.0) / beatSeconds();
+}
+
+void LyricsPanel::seekSeconds (double seconds)
+{
+    if (onSeek)
+        onSeek (seconds);
+    else
+        engine.seek (seconds);
+}
+
+void LyricsPanel::say (const juce::String& text)
+{
+    statusText = text;
+    statusUntil = juce::Time::getMillisecondCounter() + 4000;
+}
+
+void LyricsPanel::select (int index)
+{
+    selected = index >= 0 && index < data.sections.size() ? index : -1;
+    overlay->repaint();
+    timeline->repaint();
+}
+
+void LyricsPanel::addMarker()
+{
+    const double clock = engine.getClockSeconds();
+    if (clock < 0.0)
+    {
+        say ("Идёт отсчёт: маркер ставится после первой доли"_ru);
+        return;
+    }
+    const int first = pendingFirst();
+    const int last = juce::jmin (divider, lines.size());
+    if (last <= first)
+    {
+        say ("Нет строк для маркера: передвиньте разделительную строку вниз"_ru);
+        return;
     }
 
-    // hint line
-    g.setColour (Pal::hairline);
-    g.fillRect (0, getHeight() - 28, getWidth(), 1);
-    g.setColour (tapMode ? Pal::accent : Pal::textDim);
-    g.setFont (juce::FontOptions (12.0f));
-    g.drawText (tapMode ? "РАЗМЕТКА: Enter - метка на отмеченной строке, Backspace - шаг назад, Esc - выйти"_ru
-                        : "Двойной клик по строке с меткой - перейти к ней. Колесо - прокрутка."_ru,
-                10, getHeight() - 26, getWidth() - 20, 24, juce::Justification::centredLeft, true);
+    const double bs = beatSeconds();
+    const double beat = clock / bs;
+    const double defaultEnd = juce::jmax (engine.getSongEnd() / bs, beat + 16.0);
+    const int index = data.sections.add (first, last, beat, defaultEnd);
+    if (index < 0)
+    {
+        say ("Здесь уже стоит маркер: выберите другое место на таймлайне"_ru);
+        return;
+    }
+    selected = index;
+    resetDivider();
+    say ("Маркер "_ru + juce::String (index + 1) + ": строки "_ru + juce::String (first + 1) + "-" + juce::String (last));
+    sectionsChanged();
+}
+
+void LyricsPanel::deleteSelected()
+{
+    if (selected < 0 || selected >= data.sections.size())
+        return;
+    data.sections.remove (selected);
+    selected = -1;
+    resetDivider();
+    sectionsChanged();
+}
+
+void LyricsPanel::showDeleteMenu (int index)
+{
+    juce::PopupMenu menu;
+    menu.addItem (1, "Удалить маркер "_ru + juce::String (index + 1));
+    juce::Component::SafePointer<LyricsPanel> safe (this);
+    menu.showMenuAsync (juce::PopupMenu::Options(), [safe, index] (int result)
+    {
+        if (safe != nullptr && result == 1)
+        {
+            safe->select (index);
+            safe->deleteSelected();
+        }
+    });
+}
+
+void LyricsPanel::sectionsChanged()
+{
+    dirty = true;
+    dirtyAt = juce::Time::getMillisecondCounter();
+    publish();
+    overlay->repaint();
+    timeline->repaint();
+}
+
+// ---- files
+
+void LyricsPanel::chooseFile()
+{
+    chooser = std::make_unique<juce::FileChooser> ("Текст песни"_ru, juce::File::getSpecialLocation (juce::File::userDocumentsDirectory),
+                                                   "*.txt;*.lrc");
+    juce::Component::SafePointer<LyricsPanel> safe (this);
+    chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
+                          [safe] (const juce::FileChooser& fc)
+                          {
+                              if (safe == nullptr || ! fc.getResult().existsAsFile())
+                                  return;
+                              juce::MemoryBlock block;
+                              if (fc.getResult().loadFileAsData (block))
+                                  safe->loadText (LyricsData::decode (block));
+                          });
+}
+
+void LyricsPanel::loadText (const juce::String& rawText)
+{
+    auto text = rawText.replace ("\r\n", "\n").replace ("\r", "\n");
+    juce::String plain;
+    LyricsSections timed;
+    const bool lrc = LyricsData::parseLrc (text, beatSeconds(), plain, timed);
+
+    auto apply = [this, text, plain, timed, lrc]
+    {
+        data.sections = lrc ? timed : LyricsSections();
+        editor.setText (lrc ? plain : text, false);
+        refreshLines();
+        data.text = editor.getText();
+        selected = -1;
+        count = juce::jmin (count, juce::jmax (1, lines.size()));
+        resetDivider();
+        sectionsChanged();
+        say (lrc ? "Загружен текст с метками времени: маркеров "_ru + juce::String (data.sections.size())
+                 : "Текст загружен: "_ru + juce::String (lines.size()) + " строк"_ru);
+    };
+
+    if (data.sections.empty())
+    {
+        apply();
+        return;
+    }
+    juce::Component::SafePointer<LyricsPanel> safe (this);
+    juce::AlertWindow::showOkCancelBox (juce::MessageBoxIconType::QuestionIcon, "TC",
+                                        "Заменить текст? Маркеры этой песни будут удалены."_ru, {}, {}, this,
+                                        juce::ModalCallbackFunction::create ([safe, apply] (int result)
+                                        {
+                                            if (safe != nullptr && result == 1)
+                                                apply();
+                                        }));
+}
+
+void LyricsPanel::setSong (const juce::String& name, const juce::File& file)
+{
+    if (file == songFile && name == title)
+        return;
+
+    saveNow();
+    songFile = file;
+    title = name;
+    data.load (file);
+    editor.setText (data.text, false);
+    refreshLines();
+    selected = -1;
+    count = juce::jmax (1, (int) countSlider.getValue());
+    resetDivider();
+    timeline->viewStart = 0.0;
+    publish();
+    overlay->repaint();
+    timeline->repaint();
+}
+
+void LyricsPanel::saveNow()
+{
+    if (dirty)
+        data.save (songFile);
+    dirty = false;
+}
+
+void LyricsPanel::publish()
+{
+    if (serverOk)
+        server.publishText (title, lines, data.sections.items);
+}
+
+void LyricsPanel::timerCallback()
+{
+    const juce::uint32 now = juce::Time::getMillisecondCounter();
+    if (dirty && now - dirtyAt > 500)
+    {
+        saveNow();
+        publish();   // the text itself changed while typing
+    }
+
+    const double clock = engine.getClockSeconds();
+    const double bs = beatSeconds();
+    const double beat = clock / bs;
+    const int section = clock >= 0.0 ? data.sections.sectionAt (beat) : -1;
+    const int finished = clock >= 0.0 ? data.sections.numFinished (beat) : 0;
+    if (serverOk)
+        server.publishLive (clock, engine.isPlaying(), section, finished, engine.getBpm(), engine.getTranspose());
+
+    bool overlayDirty = false;
+    if (section != playingSection)
+    {
+        playingSection = section;
+        overlayDirty = true;
+    }
+
+    const auto before = geo;
+    updateGeometry();
+    if (geo.top0 != before.top0 || geo.pitch != before.pitch)
+        overlayDirty = true;
+    if (overlayDirty)
+        overlay->repaint();
+
+    if (clock != shownClock)
+    {
+        shownClock = clock;
+        timeLabel.setText (formatTime (clock), juce::dontSendNotification);
+        if (engine.isPlaying())
+            timeline->followPlayhead (clock);
+        timeline->repaint();
+    }
+    playButton.setActive (engine.isPlaying() && ! engine.isPaused());
+
+    // status line
+    if (now < statusUntil)
+    {
+        hintLabel.setText (statusText, juce::dontSendNotification);
+        hintLabel.setColour (juce::Label::textColourId, Pal::accent);
+    }
+    else
+    {
+        hintLabel.setText ("Тяните разделительную строку по тексту, нажмите + на нужном моменте песни (F9). "
+                           "Скобки у текста и на таймлайне можно двигать, стыки двигаются вместе. Ctrl + колесо - масштаб таймлайна."_ru,
+                           juce::dontSendNotification);
+        hintLabel.setColour (juce::Label::textColourId, Pal::textDim);
+    }
+
+    // info about the block
+    juce::String info;
+    if (selected >= 0 && selected < data.sections.size())
+    {
+        const auto& s = data.sections.items[(size_t) selected];
+        info = "Маркер "_ru + juce::String (selected + 1) + ": строки "_ru + juce::String (s.first + 1) + "-" + juce::String (s.last)
+             + ", "_ru + formatTime (s.t0 * bs) + " - " + formatTime (s.t1 * bs);
+    }
+    else
+    {
+        const int pf = pendingFirst();
+        info = divider > pf ? "Следующий блок: строки "_ru + juce::String (pf + 1) + "-" + juce::String (divider)
+                            : "Все строки разложены или разделительная строка стоит наверху"_ru;
+    }
+    if (infoLabel.getText() != info)
+        infoLabel.setText (info, juce::dontSendNotification);
 }
 
 // ---------------------------------------------------------------- window
@@ -862,9 +1512,9 @@ LyricsWindow::LyricsWindow (Engine& e)
 {
     setUsingNativeTitleBar (true);
     panel = new LyricsPanel (e);
-    panel->setSize (520, 760);
+    panel->setSize (980, 780);
     setContentOwned (panel, true);
     setResizable (true, true);
-    setResizeLimits (340, 420, 1400, 1800);
-    centreWithSize (520, 760);
+    setResizeLimits (640, 520, 2200, 1800);
+    centreWithSize (980, 780);
 }

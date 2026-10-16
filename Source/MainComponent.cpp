@@ -2051,7 +2051,6 @@ void MainComponent::createLyricsWindow()
 {
     lyricsWindow = std::make_unique<LyricsWindow> (engine);   // hidden until the T button is pressed; the phone page already works
     auto& panel = lyricsWindow->getPanel();
-    panel.onTogglePlay = [this] { if (engine.isPlaying()) engine.stopAll(); else engine.playAll(); };
     panel.onSeek = [this] (double seconds) { seekTimeline (seconds); };
     panel.onRemote = [this] (const juce::String& command)
     {
