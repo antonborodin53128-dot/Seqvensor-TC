@@ -310,12 +310,25 @@ function rowsOf(text){
   return rowCache[text]=r;
 }
 function addRows(rows,cls){var e=document.createElement("div");var tag=/^\s*\[.*\]\s*$/.test(rows[0]||"");e.className="ln"+(cls?" "+cls:"")+(tag?" tg":"");e.textContent=rows.join("\n");T.appendChild(e);return e}
-function render(c,done){
-  var key=c+"/"+done;if(key===cur)return;cur=key;
+function render(c,done,playing){
+  var follow=playing&&secs.length>0;
+  var key=follow?"f/"+c+"/"+done:"b";
+  if(key===cur)return;cur=key;
   var apply=function(){
     T.innerHTML="";T.classList.remove("all");T.classList.remove("out");
     if(!lines.length){var e=document.createElement("div");e.className="ln e";e.textContent="Текст не загружен";T.appendChild(e);return}
-    if(!secs.length){T.classList.add("all");lines.forEach(function(x,i){if(shown(i))addRows(rowsOf(x),"")});return}
+    if(!follow){
+      // stopped / paused / no markers: the whole song, scrolled by the finger
+      T.classList.add("all");
+      var byLine={};
+      lines.forEach(function(x,i){if(shown(i))byLine[i]=addRows(rowsOf(x),"")});
+      if(secs.length){
+        var j=c>=0?c:Math.min(done,secs.length-1),el=byLine[secs[j][0]];
+        for(var k=secs[j][0];!el&&k<lines.length;k++)el=byLine[k];
+        if(el)T.scrollTop=Math.max(0,el.offsetTop-14);
+      }
+      return;
+    }
     var i=c>=0?c:Math.min(done,secs.length-1);
     var last=Math.min(secs[i][1],lines.length);
     for(var k=secs[i][0];k<last;k++)if(shown(k))addRows(rowsOf(lines[k]),c>=0?"":"n");
@@ -330,7 +343,7 @@ function render(c,done){
       break;
     }
   };
-  if(T.firstChild&&secs.length){T.classList.add("out");setTimeout(apply,120)}else apply();
+  if(T.firstChild){T.classList.add("out");setTimeout(apply,120)}else apply();
 }
 function build(d){lines=d.lines||[];secs=d.secs||[];cur="";document.getElementById("n").textContent=d.title||"TC"}
 function drawPl(d){
@@ -356,8 +369,8 @@ function poll(){
     document.getElementById("bz").className=s.paused?"on":"";
     names(s);
     if(s.pl!==plRev){plRev=s.pl;get("/playlist").then(drawPl)}
-    if(s.rev!==rev){rev=s.rev;return get("/lyrics").then(build).then(function(){names(s);render(s.sec,s.done)})}
-    render(s.sec,s.done);
+    if(s.rev!==rev){rev=s.rev;return get("/lyrics").then(build).then(function(){names(s);render(s.sec,s.done,s.playing)})}
+    render(s.sec,s.done,s.playing);
   }).catch(function(){});
 }
 addEventListener("resize",layout);layout();
@@ -754,7 +767,7 @@ public:
 
             g.setColour (selected ? Pal::accent : Pal::textDim);
             g.setFont (juce::FontOptions (12.0f, juce::Font::bold));
-            g.drawText (juce::String (i + 1), 2, (int) ((y0 + y1) * 0.5f) - 8, braceX0 - 4, 16, juce::Justification::centredRight);
+            g.drawText (juce::String (i + 1), 2, (int) ((y0 + y1) * 0.5f) - 8, braceX0 - 10, 16, juce::Justification::centredRight);
 
             // text joint with the next block: both braces meet
             if (owner.data.sections.textTouchesNext (i))

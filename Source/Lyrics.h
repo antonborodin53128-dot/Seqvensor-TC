@@ -95,7 +95,7 @@ private:
     friend class Overlay;
     friend class TimelineView;
 
-    static constexpr int gutterW = 58;
+    static constexpr int gutterW = 66;
 
     void timerCallback() override;
     void textEditorTextChanged (juce::TextEditor&) override;
