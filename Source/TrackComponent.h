@@ -431,6 +431,7 @@ private:
     juce::Slider panSlider;
     StateButton recButton { "REC", StateButton::Style::Dot };
     juce::ToggleButton compButton { "Комп."_ru };
+    StateButton monoButton { "ST", StateButton::Style::Text };   // MONO / ST (stereo)
 
     PeakReadout readout;
     juce::Slider fader;

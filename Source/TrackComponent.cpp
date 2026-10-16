@@ -105,6 +105,17 @@ TrackComponent::TrackComponent (Engine& engineToUse, std::shared_ptr<Track> trac
     recButton.onClick = [this] { track->recArmed = recButton.getToggleState(); };
     addAndMakeVisible (recButton);
 
+    monoButton.setColours (Pal::accent.darker (0.5f), Pal::surface, Pal::accent, Pal::hairline, Pal::textDim);
+    monoButton.setToggleState (track->mono.load(), juce::dontSendNotification);
+    monoButton.setButtonText (track->mono.load() ? "MONO" : "ST");
+    monoButton.setTooltip ("MONO / ST: дорожка в моно (один канал, меньше нагрузки, выход на один канал) или в стерео"_ru);
+    monoButton.onClick = [this]
+    {
+        track->setMono (monoButton.getToggleState());   // a short fade while the plugins change their layout
+        refreshAll();
+    };
+    addAndMakeVisible (monoButton);
+
     compButton.setToggleState (track->compensate.load(), juce::dontSendNotification);
     compButton.setTooltip ("Задержка цепочки этой дорожки применяется ко всем остальным дорожкам. У нескольких дорожек задержки суммируются."_ru);
     compButton.onClick = [this] { track->compensate = compButton.getToggleState(); };
@@ -182,9 +193,18 @@ void TrackComponent::refreshAll()
     }
 
     // output
+    const bool isMono = track->mono.load();
     const int pair = track->outputPair.load();
-    outputButton.setButtonText (pair < 0 ? "Выход: нет"_ru
-                                         : "Выход: "_ru + juce::String (pair * 2 + 1) + "-" + juce::String (pair * 2 + 2));
+    const int channel = isMono ? track->outputChannel.load() : -1;
+    if (channel >= 0)
+        outputButton.setButtonText ("Выход: "_ru + juce::String (channel + 1));
+    else
+        outputButton.setButtonText (pair < 0 ? "Выход: нет"_ru
+                                             : "Выход: "_ru + juce::String (pair * 2 + 1) + "-" + juce::String (pair * 2 + 2));
+
+    monoButton.setToggleState (isMono, juce::dontSendNotification);
+    monoButton.setButtonText (isMono ? "MONO" : "ST");
+    panSlider.setVisible (channel < 0);   // one output channel needs no pan
 
     resized();
     repaint();
@@ -246,6 +266,8 @@ void TrackComponent::resized()
     recButton.setBounds (colC.removeFromTop (26));
     colC.removeFromTop (4);
     compButton.setBounds (colC.removeFromTop (22));
+    colC.removeFromTop (4);
+    monoButton.setBounds (colC.removeFromTop (22));
 
     // column D: numeric peak, fader and meter
     readout.setBounds (h.removeFromTop (20));

@@ -36,6 +36,7 @@ public:
         std::unique_ptr<juce::AudioPluginInstance> plugin;
         juce::PluginDescription description;
         std::atomic<bool> bypass { false };
+        int requestedChannels = 2;   // channel layout asked from the plugin (1 = mono, 2 = stereo); message thread only
     };
 
     explicit Track (juce::String trackName);
@@ -49,6 +50,8 @@ public:
     std::atomic<int> inputR { -1 };      // -1 = mono (L is used for both sides)
     std::atomic<int> busId { -1 };       // >= 0: take the audio of the track with this id instead of an input
     std::atomic<int> outputPair { 0 };   // 0 = outputs 1-2, 1 = outputs 3-4 ..., -1 = no output
+    std::atomic<int> outputChannel { -1 };   // mono track: one output channel (0 = output 1); -1 = use outputPair (or none)
+    std::atomic<bool> mono { false };        // one channel through the chain; set it with setMono()
     std::atomic<float> gainLinear { 1.0f };
     std::atomic<bool> muted { false };
     std::atomic<bool> soloed { false };
@@ -72,6 +75,11 @@ public:
     int computeLatencySamples() const;
     int getCachedLatencySamples() const { return cachedLatency.load(); }
     void refreshLatency() { cachedLatency.store (computeLatencySamples()); }
+
+    // Mono / stereo (message thread). The audio fades out for a moment, the plugins get the new channel layout,
+    // the audio fades back in: no clicks. A plugin that cannot do mono keeps stereo and gets the mono signal on both channels.
+    void setMono (bool on);
+    void conformLayouts();     // plugin layouts follow the mono flag (after a plugin was added or moved here)
 
     // Timeline clips: message thread only (the audio thread reads them under clipLock).
     std::shared_ptr<Clip> addClip (std::shared_ptr<ClipData> data, double startSeconds, int clipId,
@@ -112,7 +120,8 @@ private:
     void renderClips (int n, const ChunkClock& clock);
     void renderClicks (int n, const ChunkClock& clock);
     void renderClick (float* l, float* r, int n);
-    void runChain (int n);
+    void runChain (int n, bool isMono);
+    void relayout (bool toMono);
     void applyExtraDelay (int n);
 
     std::array<std::unique_ptr<Slot>, numSlots> slots;
@@ -141,6 +150,10 @@ private:
     float lastPanL = 1.0f, lastPanR = 1.0f;
     std::atomic<int> extraDelay { 0 };
     std::atomic<int> cachedLatency { 0 };
+    std::atomic<bool> switching { false };            // mono <-> stereo change in progress: the audio is faded out
+    std::atomic<juce::int64> lastChunkMs { 0 };       // when the audio thread last processed this track
+    float fadeGain = 1.0f;
+    int recChannels = 2;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Track)
 };

@@ -1042,11 +1042,30 @@ void MainComponent::showInputMenu (const std::shared_ptr<Track>& track, juce::Co
 void MainComponent::showOutputMenu (const std::shared_ptr<Track>& track, juce::Component* anchor)
 {
     juce::PopupMenu menu;
+    const bool isMono = track->mono.load();
+    const int channel = isMono ? track->outputChannel.load() : -1;
     const int current = track->outputPair.load();
-    menu.addItem (1, "Нет"_ru, true, current < 0);
+    menu.addItem (1, "Нет"_ru, true, current < 0 && channel < 0);
     menu.addSeparator();
 
     const auto outs = activeChannelNames (engine.deviceManager.getCurrentAudioDevice(), false);
+
+    if (isMono)
+    {
+        // a mono track goes to one output channel (or, if you prefer, to a pair with the pan)
+        menu.addSectionHeader ("Один канал"_ru);
+        const int channels = juce::jmax (2, outs.size());
+        for (int c = 0; c < channels; ++c)
+        {
+            juce::String label = "Выход "_ru + juce::String (c + 1);
+            if (c < outs.size())
+                label += ": " + outs[c];
+            menu.addItem (100 + c, label, true, channel == c);
+        }
+        menu.addSeparator();
+        menu.addSectionHeader ("Пара (с панорамой)"_ru);
+    }
+
     const int pairs = juce::jmax (1, (outs.size() + 1) / 2);
     for (int p = 0; p < pairs; ++p)
     {
@@ -1055,7 +1074,7 @@ void MainComponent::showOutputMenu (const std::shared_ptr<Track>& track, juce::C
             label += ": " + outs[p * 2];
         if (p * 2 + 1 < outs.size())
             label += " / " + outs[p * 2 + 1];
-        menu.addItem (10 + p, label, true, current == p);
+        menu.addItem (10 + p, label, true, channel < 0 && current == p);
     }
 
     juce::Component::SafePointer<MainComponent> safe (this);
@@ -1064,7 +1083,21 @@ void MainComponent::showOutputMenu (const std::shared_ptr<Track>& track, juce::C
                         {
                             if (safe == nullptr || result <= 0)
                                 return;
-                            track->outputPair = result == 1 ? -1 : result - 10;
+                            if (result == 1)
+                            {
+                                track->outputPair = -1;
+                                track->outputChannel = -1;
+                            }
+                            else if (result >= 100)
+                            {
+                                track->outputChannel = result - 100;
+                                track->outputPair = -1;
+                            }
+                            else
+                            {
+                                track->outputPair = result - 10;
+                                track->outputChannel = -1;
+                            }
                             safe->refreshStrips();
                         });
 }

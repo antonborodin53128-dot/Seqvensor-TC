@@ -250,6 +250,7 @@ void Engine::addPluginToTrack (const std::shared_ptr<Track>& track, int slotInde
             trackPtr->setPlugin (slotIndex, std::move (instance), description);
             if (auto* slot = trackPtr->getSlot (slotIndex))
                 slot->bypass.store (bypassed);
+            trackPtr->conformLayouts();   // a mono track gives its plugins a mono layout
             trackPtr->refreshLatency();
 
             if (done)
@@ -1095,6 +1096,8 @@ namespace
             te->setAttribute ("inR", t->inputR.load());
             te->setAttribute ("bus", t->busId.load());
             te->setAttribute ("out", t->outputPair.load());
+            te->setAttribute ("outch", t->outputChannel.load());
+            te->setAttribute ("mono", t->mono.load());
             te->setAttribute ("gain", (double) t->gainLinear.load());
             te->setAttribute ("mute", t->muted.load());
             te->setAttribute ("solo", t->soloed.load());
@@ -1211,6 +1214,8 @@ void Engine::fillSequence (const std::shared_ptr<Sequence>& seq)
         track->inputR = te->getIntAttribute ("inR", -1);
         track->busId = te->getIntAttribute ("bus", -1);
         track->outputPair = te->getIntAttribute ("out", 0);
+        track->outputChannel = te->getIntAttribute ("outch", -1);
+        track->mono = te->getBoolAttribute ("mono", false);   // before the plugins: they are laid out for it when they load
         track->gainLinear = (float) te->getDoubleAttribute ("gain", 1.0);
         track->muted = te->getBoolAttribute ("mute", false);
         track->soloed = te->getBoolAttribute ("solo", false);

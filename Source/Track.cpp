@@ -72,6 +72,68 @@ void Track::swapSlotWith (int index, Track& other, int otherIndex)
     }
     refreshLatency();
     other.refreshLatency();
+    conformLayouts();
+    other.conformLayouts();
+}
+
+void Track::setMono (bool on)
+{
+    if (! on && outputChannel.load() >= 0)
+    {
+        // a single output channel becomes the pair it belongs to
+        if (outputPair.load() < 0)
+            outputPair = outputChannel.load() / 2;
+        outputChannel = -1;
+    }
+    relayout (on);
+}
+
+void Track::conformLayouts()
+{
+    relayout (mono.load());
+}
+
+void Track::relayout (bool toMono)
+{
+    const int wanted = toMono ? 1 : 2;
+    bool needed = toMono != mono.load();
+    for (auto& s : slots)
+        if (s != nullptr && s->plugin != nullptr && s->requestedChannels != wanted)
+            needed = true;
+    if (! needed)
+        return;
+
+    // fade the audio out (a few blocks), change the layouts while nothing is audible, fade back in
+    switching.store (true);
+    if (juce::Time::getMillisecondCounter() - (juce::uint32) lastChunkMs.load() < 200)
+        juce::Thread::sleep (45);
+
+    {
+        const juce::ScopedLock sl (chainLock);
+        for (auto& s : slots)
+        {
+            if (s == nullptr || s->plugin == nullptr)
+                continue;
+
+            auto& p = *s->plugin;
+            auto layout = p.getBusesLayout();
+            const auto channelSet = toMono ? juce::AudioChannelSet::mono() : juce::AudioChannelSet::stereo();
+            if (p.getBusCount (true) > 0 && p.getBus (true, 0)->isNumberOfChannelsSupported (wanted))
+                layout.inputBuses.getReference (0) = channelSet;
+            if (p.getBusCount (false) > 0 && p.getBus (false, 0)->isNumberOfChannelsSupported (wanted))
+                layout.outputBuses.getReference (0) = channelSet;
+
+            p.releaseResources();
+            p.setBusesLayout (layout);     // refused = the plugin stays as it was (the fallback path in runChain)
+            p.setRateAndBufferSizeDetails (sampleRate, maxBlock);
+            p.prepareToPlay (sampleRate, maxBlock);
+            s->requestedChannels = wanted;
+        }
+        mono.store (toMono);
+    }
+
+    refreshLatency();
+    switching.store (false);
 }
 
 void Track::clearSlot (int index)
@@ -433,6 +495,9 @@ void Track::processChunk (const float* const* inputs, int numInputs,
                           float* const* outputs, int numOutputs, int offset, int n,
                           const Track* busSource, const ChunkClock& clock)
 {
+    lastChunkMs.store ((juce::int64) juce::Time::getMillisecondCounter());
+    const bool isMono = mono.load();
+
     auto* l = stereoBuf.getWritePointer (0);
     auto* r = stereoBuf.getWritePointer (1);
 
@@ -462,9 +527,37 @@ void Track::processChunk (const float* const* inputs, int numInputs,
     }
 
     renderClips (n, clock);      // audio clips from the timeline are added to the source
+
+    if (isMono)
+    {
+        // one channel: (L + R) / 2; with a single input (or a mono source) both sides are equal, so nothing changes
+        juce::FloatVectorOperations::add (l, r, n);
+        juce::FloatVectorOperations::multiply (l, 0.5f, n);
+        juce::FloatVectorOperations::copy (r, l, n);
+    }
+
     renderClicks (n, clock);
-    runChain (n);
+    runChain (n, isMono);
+    if (isMono)
+        juce::FloatVectorOperations::copy (r, l, n);
     applyExtraDelay (n);
+
+    // mono <-> stereo change: fade out before the plugins are re-configured, fade in afterwards
+    {
+        const float target = switching.load() ? 0.0f : 1.0f;
+        if (fadeGain != 1.0f || target != 1.0f)
+        {
+            const float step = (target - fadeGain) / (float) juce::jmax (1, n);
+            float f = fadeGain;
+            for (int i = 0; i < n; ++i)
+            {
+                f += step;
+                l[i] *= f;
+                r[i] *= f;
+            }
+            fadeGain = target;
+        }
+    }
 
     // recording: everything on the track (input + clips, after the plugins), but not the metronome, which is added below
     if (recActive.load())
@@ -473,7 +566,7 @@ void Track::processChunk (const float* const* inputs, int numInputs,
         if (rl.isLocked() && recWriter != nullptr)
         {
             const float* chans[2] = { l, r };
-            recWriter->write (chans, n);
+            recWriter->write (chans, n);   // a mono file takes only the first channel
         }
     }
 
@@ -493,28 +586,71 @@ void Track::processChunk (const float* const* inputs, int numInputs,
 
     // fader; the signal for other tracks (bus) is taken after the fader, before mute
     const float g = gainLinear.load();
+    const int outCh = isMono ? outputChannel.load() : -1;
+    const bool singleOut = outCh >= 0;
     const float p = juce::jlimit (-1.0f, 1.0f, pan.load());
-    const float targetL = p > 0.0f ? std::cos (p * juce::MathConstants<float>::halfPi) : 1.0f;
-    const float targetR = p < 0.0f ? std::cos (-p * juce::MathConstants<float>::halfPi) : 1.0f;
+
+    float targetL, targetR;
+    if (isMono)
+    {
+        // a single output needs no pan; on a pair the constant-power law keeps the loudness while turning
+        // (-3 dB on both sides in the middle, 0 dB at the edge)
+        const float angle = (p + 1.0f) * juce::MathConstants<float>::pi * 0.25f;
+        targetL = singleOut ? 1.0f : std::cos (angle);
+        targetR = singleOut ? 1.0f : std::sin (angle);
+    }
+    else
+    {
+        targetL = p > 0.0f ? std::cos (p * juce::MathConstants<float>::halfPi) : 1.0f;
+        targetR = p < 0.0f ? std::cos (-p * juce::MathConstants<float>::halfPi) : 1.0f;
+    }
+
     const float stepL = (targetL - lastPanL) / (float) juce::jmax (1, n);
     const float stepR = (targetR - lastPanR) / (float) juce::jmax (1, n);
     float pL = lastPanL, pR = lastPanR;
-    for (int i = 0; i < n; ++i)
+
+    if (isMono)
     {
-        pL += stepL;
-        pR += stepR;
-        l[i] *= g * pL;
-        r[i] *= g * pR;
+        // the bus gets the same signal on both sides (after the fader, before the pan)
+        for (int i = 0; i < n; ++i)
+            l[i] *= g;
+        juce::FloatVectorOperations::copy (busOut.getWritePointer (0), l, n);
+        juce::FloatVectorOperations::copy (busOut.getWritePointer (1), l, n);
+        for (int i = 0; i < n; ++i)
+        {
+            pL += stepL;
+            pR += stepR;
+            const float v = l[i];
+            l[i] = v * pL;
+            r[i] = v * pR;
+        }
+    }
+    else
+    {
+        for (int i = 0; i < n; ++i)
+        {
+            pL += stepL;
+            pR += stepR;
+            l[i] *= g * pL;
+            r[i] *= g * pR;
+        }
+        juce::FloatVectorOperations::copy (busOut.getWritePointer (0), l, n);
+        juce::FloatVectorOperations::copy (busOut.getWritePointer (1), r, n);
     }
     lastPanL = targetL;
     lastPanR = targetR;
-    juce::FloatVectorOperations::copy (busOut.getWritePointer (0), l, n);
-    juce::FloatVectorOperations::copy (busOut.getWritePointer (1), r, n);
 
     if (muted.load() || (othersSoloed.load() && ! soloed.load()))
     {
         juce::FloatVectorOperations::clear (l, n);
         juce::FloatVectorOperations::clear (r, n);
+    }
+
+    if (singleOut)
+    {
+        if (outCh < numOutputs && outputs[outCh] != nullptr)
+            juce::FloatVectorOperations::add (outputs[outCh] + offset, l, n);
+        return;
     }
 
     const int pair = outputPair.load();
@@ -529,7 +665,7 @@ void Track::processChunk (const float* const* inputs, int numInputs,
         juce::FloatVectorOperations::add (outputs[outR] + offset, r, n);
 }
 
-void Track::runChain (int n)
+void Track::runChain (int n, bool isMono)
 {
     const juce::ScopedTryLock lock (chainLock);
     if (! lock.isLocked())
@@ -541,10 +677,33 @@ void Track::runChain (int n)
             continue;
 
         auto* p = s->plugin.get();
-        const int channels = juce::jlimit (2, pluginBuf.getNumChannels(),
-                                           juce::jmax (p->getTotalNumInputChannels(),
-                                                       p->getTotalNumOutputChannels()));
+        const int pluginChannels = juce::jmax (1, juce::jmax (p->getTotalNumInputChannels(), p->getTotalNumOutputChannels()));
 
+        if (isMono || pluginChannels < 2)
+        {
+            // One channel goes through (a mono plugin works on one channel only: less load). A plugin that cannot do mono
+            // gets the signal on both channels and we keep the left one.
+            const int channels = juce::jlimit (1, pluginBuf.getNumChannels(), pluginChannels);
+            for (int c = 0; c < channels; ++c)
+            {
+                auto* dest = pluginBuf.getWritePointer (c);
+                if (c < 2)
+                    juce::FloatVectorOperations::copy (dest, stereoBuf.getReadPointer (0), n);
+                else
+                    juce::FloatVectorOperations::clear (dest, n);
+            }
+
+            juce::AudioBuffer<float> view (pluginBuf.getArrayOfWritePointers(), channels, n);
+            midi.clear();
+            p->processBlock (view, midi);
+
+            juce::FloatVectorOperations::copy (stereoBuf.getWritePointer (0), pluginBuf.getReadPointer (0), n);
+            if (! isMono)   // a mono plugin on a stereo track (only until the layouts are conformed): same signal on both sides
+                juce::FloatVectorOperations::copy (stereoBuf.getWritePointer (1), pluginBuf.getReadPointer (0), n);
+            continue;
+        }
+
+        const int channels = juce::jlimit (2, pluginBuf.getNumChannels(), pluginChannels);
         for (int c = 0; c < channels; ++c)
         {
             auto* dest = pluginBuf.getWritePointer (c);
@@ -606,8 +765,8 @@ bool Track::startRecording (const juce::File& file, double sr, juce::TimeSliceTh
         return false;
 
     juce::WavAudioFormat wav;
-    const bool mono = false;
-    std::unique_ptr<juce::AudioFormatWriter> writer (wav.createWriterFor (stream.get(), sr, mono ? 1u : 2u, 24, {}, 0));
+    recChannels = mono.load() ? 1 : 2;   // a mono track is written as a mono file
+    std::unique_ptr<juce::AudioFormatWriter> writer (wav.createWriterFor (stream.get(), sr, (unsigned) recChannels, 24, {}, 0));
     if (writer == nullptr)
         return false;
     stream.release();   // the writer owns it now
