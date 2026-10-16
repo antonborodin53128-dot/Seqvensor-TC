@@ -149,6 +149,7 @@ private:
     Library library { engine.getDataDirectory() };
     Playlist playlist;
     int playlistIndex = -1;
+    juce::String phoneListSignature, phoneListJson;
     std::vector<juce::File> recentSongs;   // last visited songs, kept loaded
     int anchorRow = -1;
     std::set<int> marqueeBase;

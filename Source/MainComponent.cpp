@@ -2054,18 +2054,36 @@ void MainComponent::createLyricsWindow()
     panel.onSeek = [this] (double seconds) { seekTimeline (seconds); };
     panel.onRemote = [this] (const juce::String& command)
     {
-        auto changeTempo = [this] (double delta)
-        {
-            bpmSlider.setValue (std::round (engine.getBpm() + delta), juce::sendNotification);   // limits and engine.setTempo are inside
-        };
         if (command == "play")       { if (engine.isPlaying()) engine.stopAll(); else engine.playAll(); }
         else if (command == "stop")  engine.stopAll();
         else if (command == "next")  stepSong (1);
         else if (command == "prev")  stepSong (-1);
-        else if (command == "bpm+")  changeTempo (1.0);
-        else if (command == "bpm-")  changeTempo (-1.0);
-        else if (command == "key+")  { engine.setTranspose (engine.getTranspose() + 1); updateKeyDisplay(); }
-        else if (command == "key-")  { engine.setTranspose (engine.getTranspose() - 1); updateKeyDisplay(); }
+        else if (command.startsWith ("song:"))
+        {
+            const int at = command.substring (5).getIntValue();
+            if (at >= 0 && at < playlist.items.size())
+                switchToSequence (playlist.items[at], at);
+        }
+        else if (command.startsWith ("up:") || command.startsWith ("down:"))
+        {
+            const bool up = command.startsWith ("up:");
+            const int at = command.fromFirstOccurrenceOf (":", false, false).getIntValue();
+            const int to = up ? at - 1 : at + 1;
+            if (at >= 0 && at < playlist.items.size() && to >= 0 && to < playlist.items.size())
+            {
+                playlist.items.move (at, to);
+                auto seq = engine.getActiveSequence();
+                playlistIndex = seq != nullptr ? playlist.items.indexOf (seq->name) : -1;
+                savePlaylistNow();
+                refreshPlayerBar();
+            }
+        }
+        else if (command.startsWith ("list:"))
+        {
+            const auto name = command.substring (5);
+            if (name.isNotEmpty() && name != playlist.name)
+                loadPlaylistByName (name);
+        }
     };
 }
 
@@ -2084,6 +2102,28 @@ void MainComponent::syncLyrics()
         return;
     auto seq = engine.getActiveSequence();
     lyricsWindow->getPanel().setSong (seq != nullptr ? seq->name : juce::String(), seq != nullptr ? seq->file : juce::File());
+
+    // current / next song and the playlist for the phone page (the list is rebuilt only when it changed)
+    const juce::String current = seq != nullptr ? seq->name : juce::String();
+    const int at = playlistIndex;
+    const juce::String next = at >= 0 && at + 1 < playlist.items.size() ? playlist.items[at + 1] : juce::String();
+    const juce::String signature = playlist.name + "|" + juce::String (at) + "|" + playlist.items.joinIntoString ("|");
+    if (signature != phoneListSignature)
+    {
+        phoneListSignature = signature;
+        auto* obj = new juce::DynamicObject();
+        juce::Array<juce::var> items, lists;
+        for (auto& n : playlist.items)
+            items.add (n);
+        for (auto& n : library.playlistNames())
+            lists.add (n);
+        obj->setProperty ("name", playlist.name);
+        obj->setProperty ("index", at);
+        obj->setProperty ("items", items);
+        obj->setProperty ("lists", lists);
+        phoneListJson = juce::JSON::toString (juce::var (obj), true);
+    }
+    lyricsWindow->getPanel().setPlaylist (current, next, phoneListJson);
 }
 
 void MainComponent::refreshPlayerBar()

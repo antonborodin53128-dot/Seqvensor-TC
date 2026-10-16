@@ -43,6 +43,7 @@ public:
 
     // message thread
     void publishText (const juce::String& title, const juce::StringArray& lines, const std::vector<LyricsSection>& sections);
+    void publishPlaylist (const juce::String& current, const juce::String& next, const juce::String& listJson);   // listJson: {name,index,items[],lists[]}
     void publishLive (double seconds, bool playing, int section, int finished, double bpm, int semitones);
 
 private:
@@ -62,6 +63,8 @@ private:
     double liveBpm = 0.0;
     int liveSemis = 0;
     juce::String key;
+    juce::String curName, nextName, playlistJson;
+    int plRevision = 0;
 };
 
 // The lyrics window: the text (editable, all the usual keys), a dividing line that you drag over the lines,
@@ -77,6 +80,7 @@ public:
     std::function<void (const juce::String& command)> onRemote;   // a button of the phone page (message thread)
 
     void setSong (const juce::String& name, const juce::File& songFile);   // the open song changed
+    void setPlaylist (const juce::String& current, const juce::String& next, const juce::String& listJson);   // for the phone page
 
     void paint (juce::Graphics&) override;
     void resized() override;
