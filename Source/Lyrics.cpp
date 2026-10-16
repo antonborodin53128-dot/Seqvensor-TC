@@ -296,19 +296,39 @@ function get(u){return fetch(u,{cache:"no-store"}).then(function(r){return r.jso
 function openPl(){document.getElementById("pl").classList.add("on")}
 function closePl(){document.getElementById("pl").classList.remove("on")}
 function shown(i){return i<lines.length&&lines[i].trim()!==""}
-function addLine(t,cls){var e=document.createElement("div");var tag=/^\s*\[.*\]\s*$/.test(t);e.className="ln"+(cls?" "+cls:"")+(tag?" tg":"");e.textContent=t;T.appendChild(e)}
+// The rows are cut here again with the real font of this phone, so that a row never sticks out and the text is the same size everywhere.
+var FONT=getComputedStyle(document.body).fontFamily,cx=document.createElement("canvas").getContext("2d"),rowCache={};
+function mw(t){cx.font="700 20px "+FONT;return cx.measureText(t).width}
+function rowsOf(text){
+  if(rowCache[text])return rowCache[text];
+  var words=text.replace(/\n/g," ").trim().split(/\s+/),LIM=322;
+  if(!words[0])return rowCache[text]=[];
+  function greedy(limit,out){var n=0,cur="";for(var i=0;i<words.length;i++){var t=cur?cur+" "+words[i]:words[i];if(cur&&mw(t)>limit){if(out)out.push(cur);cur=words[i];n++}else cur=t}if(cur){if(out)out.push(cur);n++}return n}
+  var n=greedy(LIM,null),r=[];
+  if(n<=1)r=[words.join(" ")];
+  else{var lo=0,hi=LIM;for(var i=0;i<14;i++){var m=(lo+hi)/2;if(greedy(m,null)<=n)hi=m;else lo=m}greedy(hi,r)}
+  return rowCache[text]=r;
+}
+function addRows(rows,cls){var e=document.createElement("div");var tag=/^\s*\[.*\]\s*$/.test(rows[0]||"");e.className="ln"+(cls?" "+cls:"")+(tag?" tg":"");e.textContent=rows.join("\n");T.appendChild(e);return e}
 function render(c,done){
   var key=c+"/"+done;if(key===cur)return;cur=key;
   var apply=function(){
     T.innerHTML="";T.classList.remove("all");T.classList.remove("out");
     if(!lines.length){var e=document.createElement("div");e.className="ln e";e.textContent="Текст не загружен";T.appendChild(e);return}
-    if(!secs.length){T.classList.add("all");lines.forEach(function(x,i){if(shown(i))addLine(x)});return}
+    if(!secs.length){T.classList.add("all");lines.forEach(function(x,i){if(shown(i))addRows(rowsOf(x),"")});return}
     var i=c>=0?c:Math.min(done,secs.length-1);
     var last=Math.min(secs[i][1],lines.length);
-    for(var k=secs[i][0];k<last;k++)if(shown(k))addLine(lines[k],c>=0?"":"n");
-    for(var k=last;k<lines.length;k++)if(shown(k)){addLine(lines[k].split("\n")[0],"n");break}
-    var els=T.querySelectorAll(".ln");
-    for(var j=0;j<els.length;j++){var w=els[j].scrollWidth;if(w>328)els[j].style.fontSize=(20*328/w)+"px"}
+    for(var k=secs[i][0];k<last;k++)if(shown(k))addRows(rowsOf(lines[k]),c>=0?"":"n");
+    // the free space under the block is filled with the text that comes next (dim)
+    var room=function(){return T.scrollHeight<=T.clientHeight+1};
+    for(var k=last;k<lines.length;k++){
+      if(!shown(k))continue;
+      var rows=rowsOf(lines[k]),e=addRows(rows,"n");
+      if(room())continue;
+      T.removeChild(e);
+      for(var r=rows.length-1;r>=1;r--){e=addRows(rows.slice(0,r),"n");if(room())break;T.removeChild(e)}
+      break;
+    }
   };
   if(T.firstChild&&secs.length){T.classList.add("out");setTimeout(apply,120)}else apply();
 }
