@@ -105,6 +105,9 @@ private:
     void updateGeometry();
     float lineY (int boundary) const { return geo.top0 + (float) boundary * geo.pitch; }
     int boundaryAtY (float y) const { return (int) std::round ((y - geo.top0) / geo.pitch); }
+    float blockHeight (int first, int last) const;     // height of lines [first,last) on the phone screen
+    bool fits (int first, int last) const;             // the block and the first row after it fit the phone screen
+    int maxDivider (int firstLine) const;              // how far the dividing line can go from firstLine
     int pendingFirst() const;                  // first line of the block that "+" would take
     void setDivider (int boundary);            // the dividing line (dragged or from the counter)
     void resetDivider();
@@ -132,6 +135,8 @@ private:
     juce::String title;
     juce::StringArray lines;
     std::vector<int> lineStarts;
+    juce::StringArray wrapped;        // every line cut into the rows of the phone screen (joined with \n)
+    std::vector<int> rowCount;        // rows of every line on the phone screen (0: empty line or [tag])
     LyricsServer server;
     bool serverOk = false;
     juce::String url;

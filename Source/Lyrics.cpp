@@ -1,4 +1,5 @@
 #include "Lyrics.h"
+#include <map>
 
 #include <cstring>
 
@@ -228,47 +229,48 @@ void LyricsData::remove (const juce::File& songFile)
 
 static const char* phonePage = R"HTML(<!doctype html>
 <html><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
 <title>TC</title>
 <style>
 :root{--bg:#000;--panel:#161618;--raise:#2a2a2d;--text:#f2f2f7;--dim:#8e8e93;--acc:#ffa81f}
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-html,body{margin:0;height:100%;background:var(--bg);color:var(--text);font-family:-apple-system,"Segoe UI",Roboto,sans-serif;-webkit-text-size-adjust:100%;overflow:hidden}
-#app{position:fixed;top:0;right:0;bottom:0;left:0;display:flex;flex-direction:column}
-#top{flex:none;padding:calc(10px + env(safe-area-inset-top)) 12px 10px 16px;background:var(--panel);border-bottom:2px solid var(--acc);display:flex;align-items:center;gap:12px}
+html,body{margin:0;height:100%;background:#000;color:var(--text);font-family:"Segoe UI",Roboto,-apple-system,"Helvetica Neue",Arial,sans-serif;-webkit-text-size-adjust:100%;overflow:hidden}
+#stage{position:absolute;left:50%;top:50%;width:360px;height:660px;overflow:hidden;background:#000;transform-origin:50% 50%}
+#top{position:absolute;left:0;right:0;top:0;height:58px;padding:9px 10px 9px 16px;background:var(--panel);border-bottom:2px solid var(--acc);display:flex;align-items:center;gap:10px}
 #cur{flex:1;min-width:0}
-#cur b{display:block;font-size:20px;color:var(--acc);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-#cur small{display:block;font-size:13px;color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px}
+#cur b{display:block;font-size:17px;color:var(--acc);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#cur small{display:block;font-size:12px;color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px}
 #cur small i{font-style:normal;color:var(--text)}
-#ib{flex:none;width:46px;height:46px;border:0;border-radius:12px;background:var(--raise);color:var(--text);padding:0}
-#ib svg{width:24px;height:24px;fill:currentColor}
-#w{flex:1;min-height:0;position:relative;overflow:hidden}
-#t{position:absolute;top:0;right:0;bottom:0;left:0;padding:12px 14px;display:flex;flex-direction:column;justify-content:center;text-align:center;overflow:hidden;transition:opacity .18s}
-#t.all{justify-content:flex-start;text-align:left;overflow-y:auto;scrollbar-width:none}
+#ib{flex:none;width:40px;height:40px;border:0;border-radius:11px;background:var(--raise);color:var(--text);padding:0}
+#ib svg{width:22px;height:22px;fill:currentColor}
+#w{position:absolute;left:0;right:0;top:58px;bottom:84px}
+#t{position:absolute;left:0;right:0;top:0;bottom:0;padding:14px 16px 0;overflow:hidden;transition:opacity .15s}
+#t.all{overflow-y:auto;scrollbar-width:none}
 #t.out{opacity:0}
-.l{line-height:1.22;color:var(--text);font-weight:700;padding:.1em 0;min-height:.6em;overflow-wrap:anywhere}
-.l.n{color:#5d5d62;font-weight:600}
-.e{color:var(--dim);font-size:18px;font-weight:400}
-#b{flex:none;display:flex;gap:10px;padding:12px 12px calc(12px + env(safe-area-inset-bottom));background:var(--panel);border-top:1px solid #2c2c2e}
-#b button{flex:1;height:60px;border:0;border-radius:14px;background:var(--raise);color:var(--text);padding:0;display:flex;align-items:center;justify-content:center}
-#b button svg{width:28px;height:28px;fill:currentColor}
+.ln{white-space:pre;font-size:18px;line-height:23px;font-weight:700;color:var(--text);margin-top:17px;text-align:left}
+.ln:first-child{margin-top:0}
+.ln.n{color:#5d5d62;font-weight:600}
+.e{white-space:normal;color:var(--dim);font-weight:400;font-size:16px}
+#b{position:absolute;left:0;right:0;bottom:0;height:84px;display:flex;gap:8px;padding:12px;background:var(--panel);border-top:1px solid #2c2c2e}
+#b button{flex:1;border:0;border-radius:12px;background:var(--raise);color:var(--text);padding:0;display:flex;align-items:center;justify-content:center}
+#b button svg{width:26px;height:26px;fill:currentColor}
 #b button.on{background:var(--acc);color:#000}
 #b button:active{filter:brightness(1.3)}
-#pl{position:fixed;top:0;right:0;bottom:0;left:0;background:var(--bg);z-index:5;display:none;flex-direction:column}
+#pl{position:absolute;left:0;right:0;top:0;bottom:0;background:#000;z-index:5;display:none;flex-direction:column}
 #pl.on{display:flex}
-#ph{flex:none;display:flex;gap:10px;align-items:center;padding:calc(10px + env(safe-area-inset-top)) 12px 10px;background:var(--panel);border-bottom:2px solid var(--acc)}
-#ph select{flex:1;min-width:0;height:46px;font-size:17px;border:0;border-radius:12px;background:var(--raise);color:var(--text);padding:0 10px}
-#ph button{flex:none;width:46px;height:46px;font-size:22px;border:0;border-radius:12px;background:var(--raise);color:var(--text)}
-#pi{flex:1;overflow-y:auto;padding:8px 10px calc(10px + env(safe-area-inset-bottom))}
-.r{display:flex;align-items:center;gap:6px;margin:6px 0;padding:0 0 0 14px;min-height:54px;border-radius:12px;background:var(--panel)}
+#ph{flex:none;display:flex;gap:8px;align-items:center;padding:9px 10px 9px 16px;height:58px;background:var(--panel);border-bottom:2px solid var(--acc)}
+#ph select{flex:1;min-width:0;height:40px;font-size:15px;border:0;border-radius:11px;background:var(--raise);color:var(--text);padding:0 8px}
+#ph button{flex:none;width:40px;height:40px;font-size:20px;border:0;border-radius:11px;background:var(--raise);color:var(--text);padding:0}
+#pi{flex:1;overflow-y:auto;padding:8px 10px}
+.r{display:flex;align-items:center;gap:4px;margin:5px 0;padding:0 0 0 12px;min-height:46px;border-radius:11px;background:var(--panel)}
 .r.now{background:#2a1c05;outline:2px solid var(--acc)}
-.r .t{flex:1;min-width:0;font-size:18px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.r .t{flex:1;min-width:0;font-size:16px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .r.now .t{color:var(--acc);font-weight:700}
-.r button{flex:none;width:46px;height:54px;font-size:18px;border:0;background:none;color:var(--dim)}
+.r button{flex:none;width:40px;height:46px;font-size:16px;border:0;background:none;color:var(--dim)}
 .r button:active{color:var(--acc)}
 </style></head><body>
+<div id="stage">
 <div id="pl"><div id="ph"><select id="ls" onchange="cmd('list:'+this.value)"></select><button onclick="closePl()">&#10005;</button></div><div id="pi"></div></div>
-<div id="app">
 <div id="top"><div id="cur"><b id="n">TC</b><small id="nx"></small></div>
 <button id="ib" onclick="openPl()"><svg viewBox="0 0 24 24"><path d="M3 5h18v2.4H3zM3 10.8h18v2.4H3zM3 16.6h18V19H3z"/></svg></button></div>
 <div id="w"><div id="t"></div></div>
@@ -281,39 +283,33 @@ html,body{margin:0;height:100%;background:var(--bg);color:var(--text);font-famil
 </div>
 </div>
 <script>
-var rev=-1,plRev=-1,lines=[],secs=[],cur="",K=new URLSearchParams(location.search).get("k")||"",shown="",lastS=null;
-var T=document.getElementById("t"),Wd=document.getElementById("w");
+// The page is a fixed 360 x 660 screen that is scaled to the phone, so it looks the same on every phone.
+// Text: 18 px bold, 23 px rows, 17 px between lines of the song, left aligned. The rows are already cut by TC.
+var rev=-1,plRev=-1,lines=[],secs=[],cur="",lastS=null,K=new URLSearchParams(location.search).get("k")||"";
+var T=document.getElementById("t"),stage=document.getElementById("stage");
+function layout(){var s=Math.min(innerWidth/360,innerHeight/660);stage.style.transform="translate(-50%,-50%) scale("+s+")"}
 function cmd(c){fetch("/cmd?do="+encodeURIComponent(c)+"&k="+encodeURIComponent(K),{cache:"no-store"}).catch(function(){})}
 function get(u){return fetch(u,{cache:"no-store"}).then(function(r){return r.json()})}
 function openPl(){document.getElementById("pl").classList.add("on")}
 function closePl(){document.getElementById("pl").classList.remove("on")}
-function trim(a,b){while(a<b&&!lines[a].trim())a++;while(b>a&&!lines[b-1].trim())b--;return[a,b]}
-function addLine(t,cls){var e=document.createElement("div");e.className="l"+(cls?" "+cls:"");e.textContent=t;T.appendChild(e)}
-// the biggest text that still fits the whole area: the current block and the first line of the next one
-function fitText(){
-  var lo=12,hi=110,best=lo;
-  while(lo<=hi){var m=(lo+hi)>>1;T.style.fontSize=m+"px";if(T.scrollHeight<=T.clientHeight+1){best=m;lo=m+1}else hi=m-1}
-  T.style.fontSize=best+"px";
-}
+function shown(i){return i<lines.length&&lines[i].trim()!==""}
+function addLine(t,cls){var e=document.createElement("div");e.className="ln"+(cls?" "+cls:"");e.textContent=t;T.appendChild(e)}
 function render(c,done){
   var key=c+"/"+done;if(key===cur)return;cur=key;
   var apply=function(){
     T.innerHTML="";T.classList.remove("all");T.classList.remove("out");
-    if(!lines.length){addLine("","");T.firstChild.className="e";T.firstChild.textContent="Текст не загружен";return}
-    if(!secs.length){T.classList.add("all");lines.forEach(function(x){addLine(x)});T.style.fontSize=Math.max(18,Math.min(30,Wd.clientWidth/14))+"px";return}
-    var i=c>=0?c:Math.min(done,secs.length-1);   // in a gap: the block that comes next
-    var r=trim(secs[i][0],Math.min(secs[i][1],lines.length));
-    for(var k=r[0];k<r[1];k++)addLine(lines[k],c>=0?"":"n");
-    var nx=i+1<secs.length?trim(secs[i+1][0],Math.min(secs[i+1][1],lines.length)):null;
-    if(nx&&nx[0]<nx[1])addLine(lines[nx[0]],"n");
-    fitText();
+    if(!lines.length){var e=document.createElement("div");e.className="ln e";e.textContent="Текст не загружен";T.appendChild(e);return}
+    if(!secs.length){T.classList.add("all");lines.forEach(function(x,i){if(shown(i))addLine(x)});return}
+    var i=c>=0?c:Math.min(done,secs.length-1);
+    var last=Math.min(secs[i][1],lines.length);
+    for(var k=secs[i][0];k<last;k++)if(shown(k))addLine(lines[k],c>=0?"":"n");
+    for(var k=last;k<lines.length;k++)if(shown(k)){addLine(lines[k].split("\n")[0],"n");break}
+    var els=T.querySelectorAll(".ln");
+    for(var j=0;j<els.length;j++){var w=els[j].scrollWidth;if(w>328)els[j].style.fontSize=(18*328/w)+"px"}
   };
   if(T.firstChild&&secs.length){T.classList.add("out");setTimeout(apply,120)}else apply();
 }
-function build(d){
-  lines=d.lines||[];secs=d.secs||[];cur="";
-  document.getElementById("n").textContent=d.title||"TC";
-}
+function build(d){lines=d.lines||[];secs=d.secs||[];cur="";document.getElementById("n").textContent=d.title||"TC"}
 function drawPl(d){
   var ls=document.getElementById("ls");ls.innerHTML="";
   (d.lists||[]).forEach(function(n){var o=document.createElement("option");o.value=n;o.textContent=n;if(n===d.name)o.selected=true;ls.appendChild(o)});
@@ -341,7 +337,7 @@ function poll(){
     render(s.sec,s.done);
   }).catch(function(){});
 }
-window.addEventListener("resize",function(){var k=cur;cur="";if(lastS)render(lastS.sec,lastS.done)});
+addEventListener("resize",layout);layout();
 document.addEventListener("click",function(){try{navigator.wakeLock.request("screen")}catch(e){}},{once:true});
 setInterval(poll,250);poll();
 </script></body></html>)HTML";
@@ -547,6 +543,93 @@ void LyricsServer::serve (juce::StreamingSocket& client)
 
 // ---------------------------------------------------------------- helpers
 
+// The phone screen is a fixed 360 x 660 page (see the phone page): 18 px bold text, 23 px rows,
+// 17 px between lines of the song. A block of the lyrics has to fit the text area together with the first row of what follows.
+namespace phoneScreen
+{
+    constexpr float textWidth = 308.0f;   // 328 px of the page minus a reserve for the different fonts of the phones
+    constexpr float rowHeight = 23.0f, lineGap = 17.0f, areaHeight = 494.0f;
+
+    bool isTag (const juce::String& line)   // [Verse 1] and so on: not shown on the phone
+    {
+        const auto t = line.trim();
+        return t.length() > 1 && t.startsWith ("[") && t.endsWith ("]");
+    }
+
+    float measure (const juce::String& text)
+    {
+        static const juce::Font font (juce::FontOptions ("Segoe UI", 18.0f, juce::Font::bold));
+        juce::GlyphArrangement ga;
+        ga.addLineOfText (font, text, 0.0f, 0.0f);
+        return ga.getBoundingBox (0, -1, true).getWidth();
+    }
+
+    // the rows of one line of the song: cut by words and balanced, so that no row is left with one word
+    juce::StringArray cut (const juce::String& line)
+    {
+        juce::StringArray out;
+        const auto trimmed = line.trim();
+        if (trimmed.isEmpty() || isTag (trimmed))
+            return out;
+
+        const auto words = juce::StringArray::fromTokens (trimmed, " \t", "");
+        auto greedy = [&words] (float limit, juce::StringArray* rows)
+        {
+            int count = 0;
+            juce::String current;
+            for (auto& w : words)
+            {
+                const auto test = current.isEmpty() ? w : current + " " + w;
+                if (current.isNotEmpty() && measure (test) > limit)
+                {
+                    if (rows != nullptr)
+                        rows->add (current);
+                    current = w;
+                    ++count;
+                }
+                else
+                    current = test;
+            }
+            if (current.isNotEmpty())
+            {
+                if (rows != nullptr)
+                    rows->add (current);
+                ++count;
+            }
+            return count;
+        };
+
+        const int n = greedy (textWidth, nullptr);
+        if (n <= 1)
+        {
+            out.add (words.joinIntoString (" "));
+            return out;
+        }
+        float lo = 0.0f, hi = textWidth;   // the narrowest limit that still gives the same number of rows
+        for (int i = 0; i < 14; ++i)
+        {
+            const float mid = 0.5f * (lo + hi);
+            if (greedy (mid, nullptr) <= n)
+                hi = mid;
+            else
+                lo = mid;
+        }
+        greedy (hi, &out);
+        return out;
+    }
+
+    juce::StringArray cutCached (const juce::String& line)
+    {
+        static std::map<juce::String, juce::StringArray> cache;
+        if (cache.size() > 3000)
+            cache.clear();
+        auto it = cache.find (line);
+        if (it == cache.end())
+            it = cache.emplace (line, cut (line)).first;
+        return it->second;
+    }
+}
+
 namespace
 {
     juce::String formatTime (double seconds)
@@ -648,7 +731,8 @@ public:
 
             juce::Path brace;
             addVerticalBrace (brace, (float) braceX1, y0, y1, (float) (braceX1 - braceX0));
-            g.setColour (playing || selected ? Pal::accent : sectionColour (i).brighter (0.2f));
+            const bool tooBig = ! owner.fits (s.first, s.last);   // does not fit the phone screen
+            g.setColour (tooBig ? juce::Colour (0xffff5a4f) : playing || selected ? Pal::accent : sectionColour (i).brighter (0.2f));
             g.strokePath (brace, juce::PathStrokeType (selected ? 3.0f : 2.0f));
 
             g.setColour (selected ? Pal::accent : Pal::textDim);
@@ -707,6 +791,7 @@ public:
     {
         auto& sections = owner.data.sections;
         const int n = owner.lines.size();
+        const auto before = sections.items;
         switch (press.zone)
         {
             case Zone::Divider:
@@ -728,6 +813,21 @@ public:
             }
             case Zone::None:
                 return;
+        }
+
+        // a block may not grow past the phone screen
+        for (size_t i = 0; i < sections.items.size() && i < before.size(); ++i)
+        {
+            const auto& a = sections.items[i];
+            const auto& b = before[i];
+            if ((a.first != b.first || a.last != b.last)
+                && owner.blockHeight (a.first, a.last) > owner.blockHeight (b.first, b.last) + 0.1f
+                && ! owner.fits (a.first, a.last))
+            {
+                sections.items = before;
+                owner.say ("Не помещается на экран телефона"_ru);
+                return;
+            }
         }
         owner.sectionsChanged();
     }
@@ -1258,6 +1358,53 @@ void LyricsPanel::refreshLines()
         lineStarts.push_back (start);
         start += l.length() + 1;
     }
+
+    // rows of every line on the phone screen
+    wrapped.clear();
+    rowCount.clear();
+    for (auto& l : lines)
+    {
+        const auto rows = phoneScreen::cutCached (l);
+        rowCount.push_back (rows.size());
+        wrapped.add (rows.joinIntoString ("\n"));
+    }
+}
+
+float LyricsPanel::blockHeight (int first, int last) const
+{
+    float h = 0.0f;
+    int shown = 0;
+    for (int i = juce::jmax (0, first); i < juce::jmin (last, (int) rowCount.size()); ++i)
+        if (rowCount[(size_t) i] > 0)
+        {
+            h += (float) rowCount[(size_t) i] * phoneScreen::rowHeight + (shown > 0 ? phoneScreen::lineGap : 0.0f);
+            ++shown;
+        }
+    return h;
+}
+
+bool LyricsPanel::fits (int first, int last) const
+{
+    float h = blockHeight (first, last);
+    for (int i = juce::jmax (0, last); i < (int) rowCount.size(); ++i)
+        if (rowCount[(size_t) i] > 0)
+        {
+            h += phoneScreen::lineGap + phoneScreen::rowHeight;   // the first row of what follows is shown under the block
+            break;
+        }
+    return h <= phoneScreen::areaHeight + 0.5f;
+}
+
+int LyricsPanel::maxDivider (int firstLine) const
+{
+    int d = juce::jmin (lines.size(), firstLine + 1);
+    for (int e = firstLine + 1; e <= lines.size(); ++e)
+    {
+        if (! fits (firstLine, e))
+            break;
+        d = e;
+    }
+    return d;
 }
 
 void LyricsPanel::updateGeometry()
@@ -1304,13 +1451,18 @@ int LyricsPanel::pendingFirst() const
 
 void LyricsPanel::resetDivider()
 {
-    divider = juce::jmin (lines.size(), pendingFirst() + count);
+    const int pf = pendingFirst();
+    divider = juce::jmin (juce::jmin (lines.size(), pf + count), maxDivider (pf));   // not more than the phone screen takes
+    countSlider.setValue (juce::jmax (1, divider - pf), juce::dontSendNotification);
 }
 
 void LyricsPanel::setDivider (int boundary)
 {
     const int pf = pendingFirst();
-    divider = juce::jlimit (pf, lines.size(), boundary);
+    const int limit = maxDivider (pf);
+    if (boundary > limit && limit < lines.size())
+        say ("Больше не помещается на экран телефона"_ru);
+    divider = juce::jlimit (pf, juce::jmax (pf, limit), boundary);
     count = juce::jmax (1, divider - pf);
     countSlider.setValue (count, juce::dontSendNotification);
     overlay->repaint();
@@ -1334,7 +1486,7 @@ void LyricsPanel::textEditorTextChanged (juce::TextEditor&)
     if (old.size() <= 1 && lines.size() > 1)
         resetDivider();                       // the text just appeared: the dividing line goes to its place
     else
-        divider = juce::jlimit (pendingFirst(), lines.size(), divider);
+        divider = juce::jlimit (pendingFirst(), juce::jmax (pendingFirst(), juce::jmin (lines.size(), maxDivider (pendingFirst()))), divider);
     dirty = true;
     dirtyAt = juce::Time::getMillisecondCounter();
     overlay->repaint();
@@ -1385,6 +1537,12 @@ void LyricsPanel::addMarker()
     if (last <= first)
     {
         say ("Нет строк для маркера: передвиньте разделительную строку вниз"_ru);
+        return;
+    }
+
+    if (! fits (first, last))
+    {
+        say ("Блок не помещается на экран телефона: уменьшите число строк"_ru);
         return;
     }
 
@@ -1526,7 +1684,7 @@ void LyricsPanel::saveNow()
 void LyricsPanel::publish()
 {
     if (serverOk)
-        server.publishText (title, lines, data.sections.items);
+        server.publishText (title, wrapped, data.sections.items);
 }
 
 void LyricsPanel::timerCallback()
@@ -1594,12 +1752,15 @@ void LyricsPanel::timerCallback()
     {
         const auto& s = data.sections.items[(size_t) selected];
         info = "Маркер "_ru + juce::String (selected + 1) + ": строки "_ru + juce::String (s.first + 1) + "-" + juce::String (s.last)
-             + ", "_ru + formatTime (s.t0 * bs) + " - " + formatTime (s.t1 * bs);
+             + ", "_ru + formatTime (s.t0 * bs) + " - " + formatTime (s.t1 * bs)
+             + (fits (s.first, s.last) ? juce::String() : ". Не помещается на экран телефона!"_ru);
     }
     else
     {
         const int pf = pendingFirst();
         info = divider > pf ? "Следующий блок: строки "_ru + juce::String (pf + 1) + "-" + juce::String (divider)
+                                + ", экран телефона занят на "_ru + juce::String (juce::roundToInt (100.0f * (blockHeight (pf, divider)
+                                    + (divider < lines.size() ? phoneScreen::lineGap + phoneScreen::rowHeight : 0.0f)) / phoneScreen::areaHeight)) + "%"
                             : "Все строки разложены или разделительная строка стоит наверху"_ru;
     }
     if (infoLabel.getText() != info)
