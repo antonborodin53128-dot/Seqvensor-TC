@@ -2671,6 +2671,7 @@ namespace
             addAndMakeVisible (reverbTypeBox);
             reverbTypeA = std::make_unique<juce::ComboBoxParameterAttachment> (*plug.reverbType, reverbTypeBox);
 
+            resized();
             startTimerHz (15);
             refresh();
         }
@@ -2722,6 +2723,8 @@ namespace
 
         void resized() override
         {
+            if (ampKnobs.size() < 7)   // setSize() in the constructor calls this before the knobs exist
+                return;
             guitarBtn.setBounds (112, 16, 200, 32);
             for (int i = 0; i < AmpPlugin::kScenes; ++i)
                 sceneBtn[i].setBounds (336 + i * 158, 14, 150, 36);
