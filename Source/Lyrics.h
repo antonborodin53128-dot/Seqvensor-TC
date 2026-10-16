@@ -132,7 +132,7 @@ private:
     bool serverOk = false;
     juce::String url;
 
-    struct Geo { float top0 = 4.0f, pitch = 24.0f; } geo;
+    struct Geo { float top0 = 4.0f, pitch = 24.0f; } geo, paintedGeo;
     int divider = 0, count = 8, selected = -1, playingSection = -1;
     bool dirty = false;
     juce::uint32 dirtyAt = 0, statusUntil = 0;

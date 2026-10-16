@@ -306,18 +306,21 @@ bool LyricsServer::start()
 
 juce::String LyricsServer::findLocalAddress()
 {
-    juce::String fallback;
+    // home Wi-Fi / router addresses first; 172.x is usually a virtual adapter (Hyper-V, WSL, Docker), 10.x often a VPN
+    juce::String best[4];   // 192.168, 10, 172, anything else
     for (auto& a : juce::IPAddress::getAllAddresses())
     {
         const auto s = a.toString();
         if (s == "127.0.0.1" || s.startsWith ("169.254.") || s.contains (":"))
             continue;
-        if (s.startsWith ("192.168.") || s.startsWith ("10.") || s.startsWith ("172."))
-            return s;
-        if (fallback.isEmpty())
-            fallback = s;
+        const int slot = s.startsWith ("192.168.") ? 0 : s.startsWith ("10.") ? 1 : s.startsWith ("172.") ? 2 : 3;
+        if (best[slot].isEmpty())
+            best[slot] = s;
     }
-    return fallback.isEmpty() ? juce::String ("127.0.0.1") : fallback;
+    for (auto& s : best)
+        if (s.isNotEmpty())
+            return s;
+    return "127.0.0.1";
 }
 
 void LyricsServer::publishText (const juce::String& title, const juce::StringArray& lines, const std::vector<LyricsSection>& sections)
@@ -519,6 +522,7 @@ public:
     void paint (juce::Graphics& g) override
     {
         owner.updateGeometry();
+        owner.paintedGeo = owner.geo;
         const int n = owner.lines.size();
         if (n == 0)
             return;
@@ -646,6 +650,7 @@ public:
     void mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& w) override
     {
         owner.editor.mouseWheelMove (e.getEventRelativeTo (&owner.editor), w);
+        repaint();
     }
 
 private:
@@ -1456,9 +1461,8 @@ void LyricsPanel::timerCallback()
         overlayDirty = true;
     }
 
-    const auto before = geo;
     updateGeometry();
-    if (geo.top0 != before.top0 || geo.pitch != before.pitch)
+    if (geo.top0 != paintedGeo.top0 || geo.pitch != paintedGeo.pitch)   // the text was scrolled / resized since the last paint
         overlayDirty = true;
     if (overlayDirty)
         overlay->repaint();
