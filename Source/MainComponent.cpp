@@ -881,11 +881,13 @@ void MainComponent::showClipMenu (const std::shared_ptr<Track>& track, const std
     m.addItem (2, "Заменить..."_ru, ! many);
     m.addItem (3, "Поставить на 1 такт"_ru);
     m.addItem (4, "Привязка к сетке"_ru, true, timelineView.snap);
-    m.addItem (5, "Привязка к темпу"_ru, tempoKnown, clip->followTempo.load());
+    // a clip whose tempo was not detected can still follow: it is then taken as recorded at the project tempo
+    m.addItem (5, tempoKnown ? "Привязка к темпу"_ru : "Привязка к темпу (считать в темпе проекта)"_ru, true, clip->followTempo.load());
     bool anyFollow = false;
     for (auto& c : group)
         anyFollow = anyFollow || c->followTempo.load();
     m.addItem (6, "Растянуть по темпу"_ru, tempoKnown && ! anyFollow);   // a following clip is already at the project tempo
+    m.addItem (8, "Задать темп клипа..."_ru, ! many);
     m.addSeparator();
     m.addItem (7, many ? "Удалить выбранные"_ru : "Удалить"_ru);
 
@@ -942,6 +944,9 @@ void MainComponent::showClipMenu (const std::shared_ptr<Track>& track, const std
                                  const bool newValue = ! clip->followTempo.load();
                                  for (auto& c : group)
                                  {
+                                     if (newValue && c->original != nullptr && c->original->fileBpm <= 0.0)
+                                         if (auto owner = safe->trackOf (c))
+                                             eng.setClipTempo (owner, c, eng.getBpm());   // tempo unknown: taken as the project tempo
                                      c->followTempo = newValue;
                                      if (auto owner = safe->trackOf (c))
                                      {
@@ -963,6 +968,25 @@ void MainComponent::showClipMenu (const std::shared_ptr<Track>& track, const std
                                          eng.stretchClip (owner, c, eng.getBpm(), [safe] { if (safe != nullptr) safe->repaintTimeline(); });
                                  break;
                              case 7: safe->deleteSelectedClips(); break;
+                             case 8:
+                             {
+                                 const double now = clip->original != nullptr && clip->original->fileBpm > 0.0 ? clip->original->fileBpm : eng.getBpm();
+                                 safe->askText ("Темп клипа"_ru, "Темп файла в ударах в минуту (BPM):"_ru, juce::String (now, 2),
+                                                [safe, track, clip] (juce::String text)
+                                                {
+                                                    const double bpm = text.replaceCharacter (',', '.').getDoubleValue();
+                                                    if (safe == nullptr || bpm < 20.0 || bpm > 400.0)
+                                                        return;
+                                                    if (clip->stretchedToBpm.load() > 0.0 && ! clip->followTempo.load())
+                                                    {
+                                                        safe->say ("Клип уже растянут: сначала включите привязку к темпу"_ru);
+                                                        return;
+                                                    }
+                                                    safe->engine.setClipTempo (track, clip, bpm);
+                                                    safe->repaintTimeline();
+                                                });
+                                 break;
+                             }
                              default: break;
                          }
                          safe->repaintTimeline();

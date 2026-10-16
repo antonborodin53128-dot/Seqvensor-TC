@@ -125,6 +125,8 @@ public:
     // Time-stretch the audio of a clip to a project tempo (pitch unchanged), in the background. The newest request wins.
     void stretchClip (const std::shared_ptr<Track>& track, const std::shared_ptr<Clip>& clip, double targetBpm,
                       std::function<void()> done = {});
+    // Sets the tempo of the file by hand (or "as the project": bpm = the project tempo), so the clip can follow the project.
+    void setClipTempo (const std::shared_ptr<Track>& track, const std::shared_ptr<Clip>& clip, double bpm);
     int takeClipId() { return nextClipId++; }
 
     double getSampleRate() const { return currentSampleRate; }

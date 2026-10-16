@@ -917,6 +917,21 @@ void Engine::applyAnalysisLater (std::weak_ptr<Track> weak, std::weak_ptr<Clip> 
     });
 }
 
+void Engine::setClipTempo (const std::shared_ptr<Track>& track, const std::shared_ptr<Clip>& clip, double bpm)
+{
+    if (clip == nullptr || clip->original == nullptr || bpm <= 0.0)
+        return;
+    bpm = juce::jlimit (20.0, 400.0, bpm);
+    clip->manualBpm = bpm;
+    clip->original->fileBpm = bpm;
+    if (clip->data != nullptr)
+        clip->data->fileBpm = bpm;
+    clip->updateSpeed (getBpm());
+    ensureLive (track, clip);
+    refreshClipSpeeds();
+    clipsChanged();
+}
+
 // Makes sure a clip has a live stretcher for the current device rate (built in the background).
 void Engine::ensureLive (const std::shared_ptr<Track>& track, const std::shared_ptr<Clip>& clip)
 {
@@ -1116,6 +1131,7 @@ namespace
                 ce->setAttribute ("loop", c->loop.load());
                 ce->setAttribute ("follow", c->followTempo.load());
                 ce->setAttribute ("stretchBpm", c->stretchedToBpm.load());
+                ce->setAttribute ("manualBpm", c->manualBpm.load());
             }
 
             for (int i = 0; i < Track::numSlots; ++i)
@@ -1247,9 +1263,13 @@ void Engine::fillSequence (const std::shared_ptr<Sequence>& seq)
                                  }
                                  finished();
                              },
-                             [this, track, follow = ce->getBoolAttribute ("follow", false), stretchBpm = ce->getDoubleAttribute ("stretchBpm", 0.0)]
+                             [this, track, follow = ce->getBoolAttribute ("follow", false), stretchBpm = ce->getDoubleAttribute ("stretchBpm", 0.0),
+                              manualBpm = ce->getDoubleAttribute ("manualBpm", 0.0)]
                              (std::shared_ptr<Clip> clip)
                              {
+                                 // a tempo set by hand (the detector found none): restore it
+                                 if (manualBpm > 0.0 && clip->original != nullptr && clip->original->fileBpm <= 0.0)
+                                     setClipTempo (track, clip, manualBpm);
                                  // the file's tempo is known now: restore the stretched audio of the clip
                                  if (stretchBpm > 0.0 && ! follow)
                                      stretchClip (track, clip, stretchBpm);

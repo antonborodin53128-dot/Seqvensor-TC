@@ -62,6 +62,7 @@ struct Clip
 
     // tempo handling (the pitch always stays the same)
     std::atomic<bool> followTempo { false };      // re-stretch whenever the project tempo changes
+    std::atomic<double> manualBpm { 0.0 };        // tempo of the file set by the user (0 = none): used when it could not be detected
     std::atomic<double> stretchedToBpm { 0.0 };   // tempo the played audio was stretched to (0 = untouched)
     std::atomic<double> stretchTarget { 0.0 };    // tempo of the stretch in progress (0 = none)
     std::atomic<int> stretchGen { 0 };            // newest request wins
