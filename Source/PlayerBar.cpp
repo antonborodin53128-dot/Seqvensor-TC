@@ -110,6 +110,8 @@ void PlayerBar::setCanStep (bool canPrev, bool canNext)
 
 juce::Rectangle<int> PlayerBar::tabRect (int index) const
 {
+    if (index == 3)   // the QR tab is narrower and sits after the three
+        return juce::Rectangle<int> (leftBlock.getX() + 3 * 94, leftBlock.getY(), 56, 30);
     return juce::Rectangle<int> (leftBlock.getX() + index * 94, leftBlock.getY(), 88, 30);
 }
 
@@ -141,11 +143,11 @@ void PlayerBar::resized()
 
 void PlayerBar::paint (juce::Graphics& g)
 {
-    // tabs
-    for (int i = 0; i < 3; ++i)
+    // tabs (the fourth, "QR", is a button that opens the code and never stays selected)
+    for (int i = 0; i < 4; ++i)
     {
         auto tr = tabRect (i).toFloat();
-        const bool on = i == (int) tab;
+        const bool on = i < 3 && i == (int) tab;
         g.setColour (on ? Pal::accent : Pal::surface);
         g.fillRoundedRectangle (tr, Pal::radius);
         if (! on)
@@ -155,7 +157,7 @@ void PlayerBar::paint (juce::Graphics& g)
         }
         g.setColour (on ? Pal::onAccent : Pal::text);
         g.setFont (juce::FontOptions (14.0f, juce::Font::bold));
-        g.drawText (tabNames[i], tr.toNearestInt(), juce::Justification::centred);
+        g.drawText (i < 3 ? tabNames[i] : "QR", tr.toNearestInt(), juce::Justification::centred);
     }
 
     // list background / collapsed summary
@@ -204,6 +206,12 @@ void PlayerBar::mouseDown (const juce::MouseEvent& e)
 {
     if (e.eventComponent != this)
         return;
+    if (tabRect (3).contains (e.getPosition()))
+    {
+        if (cb.qr)
+            cb.qr();
+        return;
+    }
     for (int i = 0; i < 3; ++i)
         if (tabRect (i).contains (e.getPosition()))
         {

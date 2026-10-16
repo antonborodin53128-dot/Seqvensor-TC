@@ -23,6 +23,7 @@ public:
         std::function<void (Tab)> add, remove;
         std::function<void (Tab)> save;
         std::function<void()> previous, next, heightChanged;
+        std::function<void()> qr;                               // the QR tab: show the code for the phones
         std::function<void()> lyrics;                           // the lyrics button: open the lyrics window
         std::function<void (Tab, int from, int to)> rowMoved;   // a row was dragged to a new place
     };

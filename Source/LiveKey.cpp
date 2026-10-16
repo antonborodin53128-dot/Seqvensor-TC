@@ -28,6 +28,7 @@ void LiveKeyAnalyzer::prepare (double deviceRate)
             ring.swap (fresh);
             rate.store (deviceRate);
             written.store (0);
+            lastSignal.store (-1);
             resetAt.store (0);
         }
         chanL.store (l);
@@ -38,6 +39,7 @@ void LiveKeyAnalyzer::setChannels (int left, int right)
 {
     chanR.store (left >= 0 ? right : -1);
     chanL.store (left);
+    lastSignal.store (-1);
     reset();
     {
         const juce::ScopedLock sl (stateLock);
@@ -63,9 +65,24 @@ void LiveKeyAnalyzer::push (const float* const* inputs, int numInputs, int numSa
 
     const long long cap = (long long) ring.size();
     long long w = written.load (std::memory_order_relaxed);
+    float peak = 0.0f;
     for (int i = 0; i < numSamples; ++i)
-        ring[(size_t) ((w + i) % cap)] = b != nullptr ? 0.5f * (a[i] + b[i]) : a[i];
+    {
+        const float v = b != nullptr ? 0.5f * (a[i] + b[i]) : a[i];
+        ring[(size_t) ((w + i) % cap)] = v;
+        peak = std::max (peak, std::abs (v));
+    }
     written.store (w + numSamples, std::memory_order_release);
+    if (peak > 0.002f)   // about -54 dB: above the noise floor of an open input
+        lastSignal.store (w + numSamples, std::memory_order_relaxed);
+}
+
+double LiveKeyAnalyzer::silenceSeconds() const
+{
+    const long long last = lastSignal.load (std::memory_order_relaxed);
+    if (last < 0)
+        return 1.0e9;
+    return (double) (written.load (std::memory_order_relaxed) - last) / juce::jmax (1.0, rate.load());
 }
 
 LiveKeyAnalyzer::State LiveKeyAnalyzer::getState() const

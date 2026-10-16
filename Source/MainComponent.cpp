@@ -7,6 +7,7 @@
 #include "MainComponent.h"
 #include "TempoDetect.h"
 #include "Builtin.h"
+#include "QrCode.h"
 
 // ---------------------------------------------------------------- plugin window
 
@@ -362,6 +363,7 @@ MainComponent::MainComponent()
     playerBar.cb.heightChanged = [this] { resized(); repaint(); };
     playerBar.cb.save = [this] (PlayerBar::Tab tab) { saveSelectionToFile (tab); };
     playerBar.cb.lyrics = [this] { showLyrics(); };
+    playerBar.cb.qr = [this] { showQr(); };
     playerBar.cb.previous = [this] { stepSong (-1); };
     playerBar.cb.next = [this] { stepSong (1); };
     playerBar.cb.rowMoved = [this] (PlayerBar::Tab tab, int from, int to) { onPlayerRowMoved (tab, from, to); };
@@ -1562,6 +1564,56 @@ void MainComponent::updateKeyDisplay()
     if (mode != 0 && keyEngineError().isNotEmpty())
         tip += "\nНейросеть недоступна: "_ru + keyEngineError();
 
+    // The key the effects follow (the "project key" box of the autotune):
+    //  - signal on the input and a key found: the new key;
+    //  - signal, but the key cannot be made out: the previous key stays;
+    //  - no signal at all (3 s): the key is dropped.
+    {
+        auto& pk = tcshared::project();
+        if (mode == 2)
+        {
+            const auto live = engine.liveKey.getState();
+            const double silent = engine.liveKey.silenceSeconds();
+            if (silent > 3.0)
+            {
+                if (! liveKeyReset)
+                {
+                    pk.keyTonic.store (-1);
+                    int cl = -1, cr = -1;   // forget the old music and its key: they must not come back with the next signal
+                    engine.liveKey.getChannels (cl, cr);
+                    engine.liveKey.setChannels (cl, cr);
+                    liveKeyReset = true;
+                }
+            }
+            else if (live.active && live.valid)
+            {
+                pk.keyMinor.store (live.key.minor);
+                pk.keyTonic.store (live.key.tonic);
+                liveKeyReset = false;
+            }
+            else
+                liveKeyReset = false;   // signal is back, the key is not clear yet: nothing is published
+        }
+        else if (mode == 1)
+        {
+            int used = 0;
+            const KeyGuess proj = engine.getProjectKey (&used);
+            if (proj.tonic >= 0)
+            {
+                pk.keyMinor.store (proj.minor);
+                pk.keyTonic.store (((proj.tonic + shift) % 12 + 12) % 12);
+            }
+            else
+                pk.keyTonic.store (-1);
+            liveKeyReset = false;
+        }
+        else
+        {
+            pk.keyTonic.store (-1);
+            liveKeyReset = false;
+        }
+    }
+
     if (keyLabel.getButtonText() != text)
         keyLabel.setButtonText (text);
     keyLabel.setTooltip (tip + "\nКлик: сдвиг до нужной тональности, сброс"_ru);
@@ -1787,6 +1839,7 @@ void MainComponent::timerCallback()
         slowCounter = 0;
         updateKeyDisplay();
         updateAutoTempo();
+        publishGuitars();
         {   // diagnostics: engine state to %APPDATA%\TC\log.txt while playing
             static juce::int64 lastLogged = -1;
             const auto cb = engine.getCallbackCount();
@@ -2071,6 +2124,75 @@ void MainComponent::deleteProject()
                    });
 }
 
+namespace
+{
+    // the QR code of the phone launcher + a button that copies the link (works without internet: the address is the local one)
+    class QrPopup : public juce::Component
+    {
+    public:
+        explicit QrPopup (const juce::String& u) : url (u)
+        {
+            code = tcqr::encode (url.toStdString());
+            copy.setButtonText ("Скопировать ссылку"_ru);
+            copy.setWantsKeyboardFocus (false);
+            copy.onClick = [this]
+            {
+                juce::SystemClipboard::copyTextToClipboard (url);
+                copy.setButtonText ("Скопировано"_ru);
+            };
+            addAndMakeVisible (copy);
+            setSize (320, 410);
+        }
+
+        void paint (juce::Graphics& g) override
+        {
+            g.fillAll (Pal::surface);
+            auto r = getLocalBounds().reduced (16);
+            g.setColour (Pal::text);
+            g.setFont (juce::FontOptions (14.0f, juce::Font::bold));
+            g.drawText ("Телефон: навести камеру"_ru, r.removeFromTop (22), juce::Justification::centred);
+            r.removeFromTop (6);
+            auto sq = r.removeFromTop (r.getWidth()).toFloat();
+            g.setColour (juce::Colours::white);
+            g.fillRoundedRectangle (sq, 6.0f);
+            if (code.size > 0)
+            {
+                const int quiet = 3;
+                const float m = std::floor (sq.getWidth() / (float) (code.size + quiet * 2));
+                const float off = (sq.getWidth() - m * (float) code.size) * 0.5f;
+                g.setColour (juce::Colours::black);
+                for (int y = 0; y < code.size; ++y)
+                    for (int x = 0; x < code.size; ++x)
+                        if (code.get (x, y))
+                            g.fillRect (sq.getX() + off + (float) x * m, sq.getY() + off + (float) y * m, m, m);
+            }
+            else
+            {
+                g.setColour (Pal::textDim);
+                g.drawText ("Нет адреса в сети"_ru, sq.toNearestInt(), juce::Justification::centred);
+            }
+            g.setColour (Pal::textDim);
+            g.setFont (juce::FontOptions (12.0f));
+            g.drawText (url, r.removeFromTop (22), juce::Justification::centred, true);
+        }
+
+        void resized() override { copy.setBounds (getLocalBounds().reduced (16).removeFromBottom (34)); }
+
+    private:
+        juce::String url;
+        tcqr::Code code;
+        juce::TextButton copy;
+    };
+}
+
+void MainComponent::showQr()
+{
+    if (lyricsWindow == nullptr)
+        createLyricsWindow();
+    auto content = std::make_unique<QrPopup> (lyricsWindow->getPanel().phoneUrl());
+    juce::CallOutBox::launchAsynchronously (std::move (content), playerBar.getScreenBounds().withHeight (40), nullptr);
+}
+
 void MainComponent::createLyricsWindow()
 {
     lyricsWindow = std::make_unique<LyricsWindow> (engine);   // hidden until the T button is pressed; the phone page already works
@@ -2104,6 +2226,12 @@ void MainComponent::createLyricsWindow()
                 refreshPlayerBar();
             }
         }
+        else if (command.startsWith ("scene:"))   // scene:SLOT:N from the guitar tab of the phone
+        {
+            const auto parts = juce::StringArray::fromTokens (command, ":", "");
+            if (parts.size() == 3)
+                tcshared::setGuitarScene (parts[1].getIntValue(), parts[2].getIntValue());
+        }
         else if (command.startsWith ("list:"))
         {
             const auto name = command.substring (5);
@@ -2111,6 +2239,28 @@ void MainComponent::createLyricsWindow()
                 loadPlaylistByName (name);
         }
     };
+}
+
+void MainComponent::publishGuitars()
+{
+    if (lyricsWindow == nullptr)
+        return;
+    juce::Array<juce::var> list;
+    for (auto& g : tcshared::guitarists())
+    {
+        auto* o = new juce::DynamicObject();
+        juce::Array<juce::var> names;
+        for (auto& n : g.sceneNames)
+            names.add (n);
+        o->setProperty ("slot", g.slot);
+        o->setProperty ("name", g.name);
+        o->setProperty ("scene", g.scene);
+        o->setProperty ("scenes", names);
+        list.add (juce::var (o));
+    }
+    auto* root = new juce::DynamicObject();
+    root->setProperty ("g", list);
+    lyricsWindow->getPanel().setGuitar (juce::JSON::toString (juce::var (root), true));
 }
 
 void MainComponent::showLyrics()

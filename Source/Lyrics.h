@@ -40,10 +40,12 @@ public:
     std::function<void (const juce::String& command)> onCommand;   // called on the server thread
     int getPort() const { return port; }
     static juce::String findLocalAddress();      // the address of this PC in the local network
+    juce::String connectUrl() const { return port > 0 ? "http://" + findLocalAddress() + ":" + juce::String (port) + "/?k=" + key : juce::String(); }
 
     // message thread
     void publishText (const juce::String& title, const juce::StringArray& lines, const std::vector<LyricsSection>& sections);
     void publishPlaylist (const juce::String& current, const juce::String& next, const juce::String& listJson);   // listJson: {name,index,items[],lists[]}
+    void publishGuitar (const juce::String& json);   // {"g":[{slot,name,scene,scenes[]}]}
     void publishLive (double seconds, bool playing, bool paused, int section, int finished, double bpm, int semitones);
 
 private:
@@ -65,6 +67,8 @@ private:
     juce::String key;
     juce::String curName, nextName, playlistJson;
     int plRevision = 0;
+    juce::String guitarJson;
+    int grRevision = 0;
 };
 
 // The lyrics window: the text (editable, all the usual keys), a dividing line that you drag over the lines,
@@ -81,6 +85,8 @@ public:
 
     void setSong (const juce::String& name, const juce::File& songFile);   // the open song changed
     void setPlaylist (const juce::String& current, const juce::String& next, const juce::String& listJson);   // for the phone page
+    void setGuitar (const juce::String& json) { server.publishGuitar (json); }
+    juce::String phoneUrl() const { return serverOk ? server.connectUrl() : juce::String(); }   // the address in the network right now
 
     void paint (juce::Graphics&) override;
     void resized() override;

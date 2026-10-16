@@ -36,6 +36,8 @@ public:
     State getState() const;
     void setWanted (bool key, bool tempo) { wantKey.store (key); wantTempo.store (tempo); notify(); }   // what to analyse
     void reset();                                        // forget the old music (new song)
+    // seconds since the input channel last carried a signal (a huge number if it never did)
+    double silenceSeconds() const;
 
 private:
     void run() override;
@@ -45,6 +47,7 @@ private:
     std::atomic<double> rate { 48000.0 };
     std::vector<float> ring;
     std::atomic<long long> written { 0 };
+    std::atomic<long long> lastSignal { -1 };           // position (samples written) where the input was last above the noise floor
     std::atomic<long long> resetAt { 0 };               // samples before this position are not analysed
 
     mutable juce::CriticalSection stateLock;

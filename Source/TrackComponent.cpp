@@ -23,7 +23,8 @@ TrackComponent::TrackComponent (Engine& engineToUse, std::shared_ptr<Track> trac
     nameLabel.setJustificationType (juce::Justification::centredLeft);
     nameLabel.setFont (juce::FontOptions (19.0f, juce::Font::bold));
     nameLabel.setMinimumHorizontalScale (0.6f);
-    nameLabel.onTextChange = [this] { track->name = nameLabel.getText(); };
+    nameLabel.setTooltip (track->name);   // the full name when it does not fit
+    nameLabel.onTextChange = [this] { track->name = nameLabel.getText(); nameLabel.setTooltip (track->name); };
     addAndMakeVisible (nameLabel);
 
     removeButton.setTooltip ("Удалить дорожку"_ru);
@@ -148,6 +149,7 @@ TrackComponent::TrackComponent (Engine& engineToUse, std::shared_ptr<Track> trac
 void TrackComponent::refreshAll()
 {
     nameLabel.setText (track->name, juce::dontSendNotification);
+    nameLabel.setTooltip (track->name);
 
     // input
     const int il = track->inputL.load();

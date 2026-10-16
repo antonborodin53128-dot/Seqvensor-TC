@@ -93,12 +93,47 @@ namespace tcamp
         void reset() { xp = 0.0f; }
     };
 
-    enum Model { Clean = 0, Crunch = 1, Lead = 2 };
+    // Six amplifiers: two clean, two crunch, two high gain. Each one is a "voicing": the number of gain stages, how the
+    // gain and the tone controls behave, and the fixed colour of its tone stack and power section.
+    enum Model { TwnClean = 0, RldClean = 1, MrsCrunch = 2, VxCrunch = 3, PvyDist = 4, MbDist = 5, kModels = 6 };
     enum Cab { CabOff = 0, Cab1x12 = 1, Cab2x12 = 2, Cab4x12 = 3 };
+
+    struct Voicing
+    {
+        int stages;               // gain stages (1..4)
+        float inHpHz;             // input high-pass: how tight the low end is
+        float gainBaseDb, gainSpanDb;   // total pre-amp gain from Gain = 0 .. 1
+        float bias;               // asymmetry of the clipping (even harmonics)
+        float millerHz, millerStep;     // high-frequency roll-off of the first stage, and how much lower each next stage is
+        float cp0Hz, cpHz, cpStep;      // coupling high-pass of the first stage, of the others (+ step per stage)
+        float bassHz, midHz, trebleHz, midQ;
+        float fixedMidDb, fixedTrebleDb; // colour of the tone stack that the knobs do not remove
+        float sag;                // how much the power supply sags under load
+        float powerDrive;         // how hard the power section is pushed
+    };
+
+    inline const Voicing& voicing (int model)
+    {
+        static const Voicing v[kModels] = {
+            // TWN Clean: a big, bright, scooped clean amp with a lot of headroom
+            { 2,  40.0f,  0.0f, 22.0f, 0.06f, 13000.0f,    0.0f, 25.0f,  60.0f,  0.0f, 100.0f,  400.0f, 3500.0f, 0.7f, -3.0f, 1.5f, 0.12f, 1.3f },
+            // RLD Clean: solid-state clean, glassy and stiff (no sag, symmetric)
+            { 2,  50.0f,  0.0f, 20.0f, 0.00f, 14000.0f,    0.0f, 25.0f,  60.0f,  0.0f, 120.0f,  800.0f, 4000.0f, 0.6f,  0.0f, 2.0f, 0.00f, 1.1f },
+            // MRS Crunch: mid-forward British crunch
+            { 3,  90.0f, 10.0f, 36.0f, 0.18f,  9000.0f,    0.0f, 25.0f,  60.0f,  0.0f, 120.0f,  650.0f, 3200.0f, 0.7f,  0.0f, 0.0f, 0.45f, 1.6f },
+            // VX Crunch: chimey, upper-mid honk, EL84 breakup
+            { 3,  70.0f,  8.0f, 34.0f, 0.12f, 11000.0f,    0.0f, 25.0f,  60.0f,  0.0f, 110.0f, 1100.0f, 3800.0f, 0.8f,  0.0f, 3.0f, 0.50f, 1.9f },
+            // PVY Dist: tight, aggressive high gain
+            { 4, 140.0f, 20.0f, 44.0f, 0.25f,  7500.0f,  700.0f, 25.0f,  90.0f, 30.0f, 100.0f,  750.0f, 2600.0f, 0.9f,  0.0f, 1.0f, 0.30f, 1.6f },
+            // MB Dist: heavy, scooped, spongy high gain
+            { 4, 110.0f, 18.0f, 46.0f, 0.30f,  6500.0f,  600.0f, 25.0f,  90.0f, 25.0f,  90.0f,  500.0f, 2400.0f, 1.0f, -5.0f, 0.0f, 0.75f, 1.8f }
+        };
+        return v[std::max (0, std::min (kModels - 1, model))];
+    }
 
     struct Params
     {
-        int model = Crunch, cab = Cab4x12;
+        int model = MrsCrunch, cab = Cab4x12;
         float gain = 0.5f, bass = 0.5f, mid = 0.5f, treble = 0.5f, presence = 0.5f; // 0..1
         float masterDb = -6.0f, inputDb = 0.0f;
     };
@@ -124,29 +159,26 @@ namespace tcamp
         void setParams (const Params& p)
         {
             cur = p;
-            const bool lead = p.model == Lead, crunch = p.model == Crunch;
-            nStages = lead ? 4 : (crunch ? 3 : 2);
-            inHp.setCutoff (sr, lead ? 140.0 : (crunch ? 90.0 : 40.0));
+            const Voicing& v = voicing (p.model);
+            nStages = v.stages;
+            inHp.setCutoff (sr, v.inHpHz);
 
             // overall pre-amp gain from the Gain knob (exponential), split over the stages
             const float g = p.gain;
-            const float totalDb = lead ? (20.0f + 44.0f * g) : (crunch ? (10.0f + 36.0f * g) : (0.0f + 22.0f * g));
-            float perStage[kStages];
-            for (int i = 0; i < nStages; ++i)
-                perStage[i] = std::pow (10.0f, totalDb / (20.0f * (float) nStages));
+            const float totalDb = v.gainBaseDb + v.gainSpanDb * g;
+            const float stageGain = std::pow (10.0f, totalDb / (20.0f * (float) nStages));
             for (int i = 0; i < nStages; ++i)
             {
-                gainS[i] = perStage[i];
-                bias[i] = lead ? 0.25f : (crunch ? 0.18f : 0.10f);
-                cp[i].setCutoff (sr, i == 0 ? 25.0 : (lead ? 90.0 + 30.0 * i : 60.0));
-                miller[i].setCutoff (sr, lead ? 7500.0 - 700.0 * i : (crunch ? 9000.0 : 12000.0));
+                gainS[i] = stageGain;
+                bias[i] = v.bias;
+                cp[i].setCutoff (sr, i == 0 ? v.cp0Hz : v.cpHz + v.cpStep * (float) i);
+                miller[i].setCutoff (sr, std::max (3000.0f, v.millerHz - v.millerStep * (float) i));
             }
 
             // tone stack
-            const double bassF = lead ? 100.0 : 120.0, midF = lead ? 750.0 : (crunch ? 650.0 : 480.0), trebF = lead ? 2600.0 : 3200.0;
-            tone[0].lowShelf (sr, bassF, (p.bass - 0.5f) * 24.0f);
-            tone[1].peak (sr, midF, (p.mid - 0.5f) * 20.0f, lead ? 0.9 : 0.7);
-            tone[2].highShelf (sr, trebF, (p.treble - 0.5f) * 24.0f);
+            tone[0].lowShelf (sr, v.bassHz, (p.bass - 0.5f) * 24.0f);
+            tone[1].peak (sr, v.midHz, (p.mid - 0.5f) * 20.0f + v.fixedMidDb, v.midQ);
+            tone[2].highShelf (sr, v.trebleHz, (p.treble - 0.5f) * 24.0f + v.fixedTrebleDb);
             pres.highShelf (sr, 4500.0, p.presence * 9.0f);
 
             // cabinet (minimum phase)
@@ -173,10 +205,12 @@ namespace tcamp
             inGain = std::pow (10.0f, p.inputDb / 20.0f);
             sagAttack = 1.0f - std::exp (-1.0f / (float) (sr * 0.004));
             sagRelease = 1.0f - std::exp (-1.0f / (float) (sr * 0.15));
-            sagAmount = lead ? 0.55f : (crunch ? 0.45f : 0.25f);
+            sagAmount = v.sag;
+            powerDrive = v.powerDrive;
         }
 
-        float process (float in)
+        // pre-amp and tone stack (the part before the effects loop of a real amp)
+        float preamp (float in)
         {
             float x = inHp.hp (in * inGain) * 0.7f;
             for (int i = 0; i < nStages; ++i)
@@ -189,12 +223,17 @@ namespace tcamp
             x = tone[0].process (x);
             x = tone[1].process (x);
             x = tone[2].process (x);
+            return x;
+        }
 
-            // power amp: the supply sags under load, then a push-pull soft clip
+        // power amp, presence, cabinet and master (the part after the effects loop)
+        float power (float x)
+        {
+            // the supply sags under load, then a push-pull soft clip
             const float lvl = std::abs (x);
             sag += (lvl - sag) * (lvl > sag ? sagAttack : sagRelease);
             x /= 1.0f + sagAmount * sag * 2.0f;
-            x = powerClip.process (x * 1.6f, 0.0f) * 0.7f;
+            x = powerClip.process (x * powerDrive, 0.0f) * 0.7f * (1.6f / powerDrive);
             x = pres.process (x);
 
             if (cur.cab != CabOff)
@@ -206,11 +245,14 @@ namespace tcamp
             return (x - dc) * comp * master;
         }
 
+        float process (float in) { return power (preamp (in)); }
+
         // set by the calibration table below
         static float compensation (const Params& p);
 
     private:
         double sr = 48000.0;
+        float powerDrive = 1.6f;
         Params cur;
         int nStages = 3;
         OnePole inHp, cp[kStages], miller[kStages];
@@ -220,15 +262,18 @@ namespace tcamp
         float sag = 0.0f, sagAttack = 0.01f, sagRelease = 0.001f, sagAmount = 0.4f, comp = 1.0f, master = 0.5f, inGain = 1.0f, dc = 0.0f;
     };
 
-    // Calibrated offline with a guitar-like test signal: equal output level (about +4 dB over the input) at every Gain.
+    // Calibrated offline with a guitar-like test signal: equal output level (the same for all six amps) at every Gain.
     inline float Channel::compensation (const Params& p)
     {
-        static const float t[3][5] = { { 1.923f, 1.096f, 0.667f, 0.445f, 0.327f },
-                                       { 1.331f, 0.642f, 0.394f, 0.322f, 0.299f },
-                                       { 1.885f, 0.842f, 0.577f, 0.477f, 0.431f } };
+        static const float t[kModels][5] = { { 2.801f, 1.535f, 0.875f, 0.536f, 0.362f },
+                                             { 2.400f, 1.370f, 0.802f, 0.493f, 0.328f },
+                                             { 1.483f, 0.697f, 0.415f, 0.300f, 0.253f },
+                                             { 1.688f, 0.814f, 0.482f, 0.341f, 0.279f },
+                                             { 1.474f, 0.624f, 0.370f, 0.284f, 0.256f },
+                                             { 2.476f, 1.010f, 0.589f, 0.454f, 0.411f } };
         const float pos = std::min (1.0f, std::max (0.0f, p.gain)) * 4.0f;
         const int i = std::min (3, (int) pos);
-        const auto& r = t[std::max (0, std::min (2, p.model))];
+        const auto& r = t[std::max (0, std::min (kModels - 1, p.model))];
         return r[i] + (r[i + 1] - r[i]) * (pos - (float) i);
     }
 }

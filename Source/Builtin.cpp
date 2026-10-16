@@ -2,6 +2,7 @@
 #include "ReverbCore.h"
 #include "OverdriveCore.h"
 #include "AmpCore.h"
+#include "AmpBoard.h"
 #include "AutotuneCore.h"
 #include "Text.h"
 
@@ -2183,16 +2184,22 @@ namespace
 
     juce::AudioProcessorEditor* OverdrivePlugin::createEditor() { return new OverdriveEditor (*this); }
 
-    // ------------------------------------------------------------ guitar amp + cabinet (zero latency, see AmpCore.h)
-    class AmpPlugin : public BuiltinBase
+    // ------------------------------------------------------------ guitar amp + pedal board (zero latency, see AmpBoard.h)
+    class AmpPlugin;
+    std::vector<AmpPlugin*>& ampRegistry() { static std::vector<AmpPlugin*> r; return r; }
+    juce::CriticalSection& ampRegistryLock() { static juce::CriticalSection l; return l; }
+
+    class AmpPlugin : public BuiltinBase, private juce::AudioProcessorParameter::Listener, private juce::AsyncUpdater
     {
     public:
-        AmpPlugin() : BuiltinBase ("amp", "Amp", "Guitar amplifier and cabinet (zero latency)")
+        static constexpr int kScenes = 4;
+        static constexpr int kSmooth = 29;
+
+        AmpPlugin() : BuiltinBase ("amp", "Amp", "Guitar amplifier, cabinet and pedals with four scenes (zero latency)")
         {
-            model = new juce::AudioParameterChoice (juce::ParameterID { "md", 1 }, "Channel", juce::StringArray { "Clean", "Crunch", "Lead" }, 1);
-            juce::AudioProcessor::addParameter (model);
-            cab = new juce::AudioParameterChoice (juce::ParameterID { "cb", 1 }, "Cabinet", juce::StringArray { "Off", "1x12", "2x12", "4x12" }, 3);
-            juce::AudioProcessor::addParameter (cab);
+            // ---- amplifier
+            model = addChoice ("md", "Amp", { "TWN Clean", "RLD Clean", "MRS Crunch", "VX Crunch", "PVY Dist", "MB Dist" }, 2);
+            cab = addChoice ("cb", "Cabinet", { "Off", "1x12", "2x12", "4x12" }, 3);
             input = addLinear ("in", "Input", -12.0f, 12.0f, 0.0f);
             gain = addLinear ("ga", "Gain", 0.0f, 100.0f, 50.0f);
             bass = addLinear ("ba", "Bass", 0.0f, 100.0f, 50.0f);
@@ -2200,53 +2207,366 @@ namespace
             treble = addLinear ("tr", "Treble", 0.0f, 100.0f, 50.0f);
             presence = addLinear ("pr", "Presence", 0.0f, 100.0f, 50.0f);
             master = addLinear ("ma", "Master", -40.0f, 6.0f, -6.0f);
+
+            // ---- pedals, in the order of the signal path
+            driveOn = addSwitch ("dro", "Drive on");
+            driveAmt = addLinear ("drd", "Drive", 0.0f, 100.0f, 50.0f);
+            driveTone = addLinear ("drt", "Drive tone", 0.0f, 100.0f, 50.0f);
+            driveLevel = addLinear ("drl", "Drive level", -12.0f, 12.0f, 0.0f);
+
+            compOn = addSwitch ("cpo", "Comp on");
+            compSens = addLinear ("cps", "Comp sensitivity", 0.0f, 100.0f, 50.0f);
+            compLevel = addLinear ("cpl", "Comp level", -12.0f, 12.0f, 0.0f);
+
+            eqOn = addSwitch ("eqo", "EQ on");
+            static const char* eqIds[8] = { "e0", "e1", "e2", "e3", "e4", "e5", "e6", "e7" };
+            static const char* eqNames[8] = { "EQ 62", "EQ 125", "EQ 250", "EQ 500", "EQ 1k", "EQ 2k", "EQ 4k", "EQ 8k" };
+            for (int i = 0; i < 8; ++i)
+                eqBand[i] = addLinear (eqIds[i], eqNames[i], -12.0f, 12.0f, 0.0f);
+
+            chorusOn = addSwitch ("cho", "Chorus on");
+            chorusRate = addLinear ("chr", "Chorus rate", 0.1f, 8.0f, 0.8f);
+            chorusDepth = addLinear ("chd", "Chorus depth", 0.0f, 100.0f, 50.0f);
+            chorusMix = addLinear ("chm", "Chorus mix", 0.0f, 100.0f, 50.0f);
+
+            delayOn = addSwitch ("dlo", "Delay on");
+            std::vector<juce::String> names;
+            for (int i = 0; i < tcfx::kDivisions; ++i)
+                names.push_back (tcfx::divisions()[i].name);
+            delayDiv = addChoice ("dlt", "Delay time", names, 7);
+            delayFb = addLinear ("dlf", "Delay feedback", 0.0f, 95.0f, 35.0f);
+            delayMix = addLinear ("dlm", "Delay mix", 0.0f, 100.0f, 30.0f);
+            delayTone = addLinear ("dlk", "Delay tone", 0.0f, 100.0f, 60.0f);
+
+            reverbOn = addSwitch ("rvo", "Reverb on");
+            reverbType = addChoice ("rvt", "Reverb type", { "Hall", "Plate", "Room" }, 0);
+            reverbDecay = addLinear ("rvd", "Reverb decay", 0.3f, 8.0f, 2.2f);
+            reverbMix = addLinear ("rvm", "Reverb mix", 0.0f, 100.0f, 25.0f);
+            reverbTone = addLinear ("rvk", "Reverb tone", 0.0f, 100.0f, 50.0f);
+
+            loopP = addSwitch ("lp", "FX loop");
+
+            // ---- not part of a scene: who plays this amp, and which scene is active
+            guitarist = addChoice ("gt", "Guitarist", { "1", "2", "3", "4" }, 0);
+            sceneP = new juce::AudioParameterInt (juce::ParameterID { "sc", 1 }, "Scene", 0, kScenes - 1, 0);
+            juce::AudioProcessor::addParameter (sceneP);
+            sceneParamCount = getParameters().size();   // everything added so far, except the last two, belongs to a scene
+
+            smP = { input, gain, bass, mid, treble, presence, master, driveAmt, driveTone, driveLevel, compSens, compLevel,
+                    eqBand[0], eqBand[1], eqBand[2], eqBand[3], eqBand[4], eqBand[5], eqBand[6], eqBand[7],
+                    chorusRate, chorusDepth, chorusMix, delayFb, delayMix, delayTone, reverbDecay, reverbMix, reverbTone };
+
+            for (auto* p : getParameters())
+                if (auto* rp = dynamic_cast<juce::RangedAudioParameter*> (p))
+                {
+                    if (rp == guitarist || rp == sceneP)
+                    {
+                        sceneIndex.push_back (-1);
+                        continue;
+                    }
+                    sceneIndex.push_back ((int) sceneParams.size());
+                    sceneParams.push_back (rp);
+                }
+            for (auto& s : sceneVal)
+            {
+                s.resize (sceneParams.size());
+                for (size_t k = 0; k < sceneParams.size(); ++k)
+                    s[k] = sceneParams[k]->getDefaultValue();
+            }
+            buildDefaultScenes();
+            for (auto* p : getParameters())
+                p->addListener (this);
+
+            guitarName = "Гитарист 1"_ru;
+            {
+                const juce::ScopedLock sl (ampRegistryLock());
+                ampRegistry().push_back (this);
+            }
+            loadScene (0);
         }
 
+        ~AmpPlugin() override
+        {
+            cancelPendingUpdate();
+            for (auto* p : getParameters())
+                p->removeListener (this);
+            const juce::ScopedLock sl (ampRegistryLock());
+            auto& r = ampRegistry();
+            r.erase (std::remove (r.begin(), r.end(), this), r.end());
+        }
+
+        // ------------------------------------------------------------ scenes
+        void setScene (int n)
+        {
+            n = juce::jlimit (0, kScenes - 1, n);
+            sceneP->beginChangeGesture();
+            *sceneP = n;
+            sceneP->endChangeGesture();
+            loadScene (n);
+        }
+        int activeScene() const { return sceneP->get(); }
+        juce::String getSceneName (int i) const { return sceneName[juce::jlimit (0, kScenes - 1, i)]; }
+        void setSceneName (int i, const juce::String& n) { sceneName[juce::jlimit (0, kScenes - 1, i)] = n.trim().isEmpty() ? juce::String (i + 1) : n.trim(); }
+        int guitaristSlot() const { return guitarist->getIndex(); }
+        juce::String guitaristName() const { return guitarName; }
+        void setGuitaristName (const juce::String& n) { guitarName = n.trim().isEmpty() ? juce::String ("Guitarist") : n.trim(); }
+
+        void getStateInformation (juce::MemoryBlock& dest) override
+        {
+            juce::XmlElement xml ("TCFX");
+            for (auto* p : getParameters())
+                if (auto* pp = dynamic_cast<juce::AudioProcessorParameterWithID*> (p))
+                    xml.setAttribute (pp->paramID, (double) pp->getValue());
+            xml.setAttribute ("guitarName", guitarName);
+            auto* sc = xml.createNewChildElement ("SCENES");
+            for (int i = 0; i < kScenes; ++i)
+            {
+                auto* e = sc->createNewChildElement ("S");
+                e->setAttribute ("name", sceneName[i]);
+                juce::StringArray v;
+                for (float f : sceneVal[i])
+                    v.add (juce::String (f, 5));
+                e->setAttribute ("v", v.joinIntoString (" "));
+            }
+            copyXmlToBinary (xml, dest);
+        }
+
+        void setStateInformation (const void* data, int size) override
+        {
+            auto xml = getXmlFromBinary (data, size);
+            if (xml == nullptr)
+                return;
+            loadingState = true;
+            if (xml->hasAttribute ("guitarName"))
+                guitarName = xml->getStringAttribute ("guitarName");
+            bool haveScenes = false;
+            if (auto* sc = xml->getChildByName ("SCENES"))
+            {
+                int i = 0;
+                for (auto* e : sc->getChildWithTagNameIterator ("S"))
+                {
+                    if (i >= kScenes)
+                        break;
+                    sceneName[i] = e->getStringAttribute ("name", juce::String (i + 1));
+                    const auto v = juce::StringArray::fromTokens (e->getStringAttribute ("v"), " ", "");
+                    if ((size_t) v.size() == sceneParams.size())
+                    {
+                        for (int k = 0; k < v.size(); ++k)
+                            sceneVal[i][(size_t) k] = v[k].getFloatValue();
+                        haveScenes = true;
+                    }
+                    ++i;
+                }
+            }
+            for (auto* p : getParameters())
+                if (auto* pp = dynamic_cast<juce::AudioProcessorParameterWithID*> (p))
+                    if (xml->hasAttribute (pp->paramID))
+                        pp->setValueNotifyingHost ((float) xml->getDoubleAttribute (pp->paramID));
+            if (! haveScenes)   // a project from before the scenes: what is loaded becomes the active scene
+                storeCurrent (sceneP->get());
+            loadingState = false;
+        }
+
+        // ------------------------------------------------------------ audio
         void processBlock (juce::AudioBuffer<float>& buf, juce::MidiBuffer&) override
         {
             juce::ScopedNoDenormals noDenormals;
             const int n = buf.getNumSamples(), nch = juce::jmin (2, buf.getNumChannels());
-            tcamp::Params p;
-            p.model = model->getIndex();
-            p.cab = cab->getIndex();
-            p.inputDb = input->get();
-            p.gain = gain->get() * 0.01f;
-            p.bass = bass->get() * 0.01f;
-            p.mid = mid->get() * 0.01f;
-            p.treble = treble->get() * 0.01f;
-            p.presence = presence->get() * 0.01f;
-            p.masterDb = master->get();
-            if (! haveParams || std::memcmp (&p, &last, sizeof (p)) != 0)
+            if (nch == 0 || n == 0)
+                return;
+
+            double bpm = 120.0;
+            if (auto* ph = getPlayHead())
+                if (auto pos = ph->getPosition())
+                    if (auto b = pos->getBpm())
+                        bpm = *b;
+
+            // continuous values follow their targets smoothly (a scene change or a moved knob is not a step)
+            const float k = firstBlock ? 1.0f : 1.0f - std::exp (-(float) n / (0.025f * (float) sr));
+            for (int i = 0; i < kSmooth; ++i)
             {
-                last = p;
-                haveParams = true;
-                for (auto& c : ch)
-                    c.setParams (p);
+                const float t = smP[(size_t) i]->get();
+                sm[(size_t) i] = firstBlock ? t : sm[(size_t) i] + (t - sm[(size_t) i]) * k;
             }
-            for (int c = 0; c < nch; ++c)
+            firstBlock = false;
+
+            // the amp model, the cabinet and the loop position cannot be blended: the sound is faded out for one block,
+            // changed, and faded in for the next one
+            const int dModel = model->getIndex(), dCab = cab->getIndex();
+            const bool dLoop = loopP->get();
+            if (! haveApplied)
             {
-                auto* d = buf.getWritePointer (c);
-                for (int i = 0; i < n; ++i)
-                    d[i] = ch[c].process (d[i]);
+                aModel = dModel; aCab = dCab; aLoop = dLoop;
+                haveApplied = true;
+            }
+            float g0 = 1.0f, g1 = 1.0f;
+            if (duckPhase == 2)
+            {
+                g0 = 0.0f;
+                duckPhase = 0;
+            }
+            else if (aModel != dModel || aCab != dCab || aLoop != dLoop)
+            {
+                g1 = 0.0f;
+                duckPhase = 1;
+            }
+
+            tcamp::Params ap;
+            ap.model = aModel;
+            ap.cab = aCab;
+            ap.inputDb = sm[0];
+            ap.gain = sm[1] * 0.01f;
+            ap.bass = sm[2] * 0.01f;
+            ap.mid = sm[3] * 0.01f;
+            ap.treble = sm[4] * 0.01f;
+            ap.presence = sm[5] * 0.01f;
+            ap.masterDb = sm[6];
+            board.setAmp (ap);
+
+            tcboard::Pedals pd;
+            pd.driveOn = driveOn->get(); pd.compOn = compOn->get(); pd.eqOn = eqOn->get();
+            pd.chorusOn = chorusOn->get(); pd.delayOn = delayOn->get(); pd.reverbOn = reverbOn->get();
+            pd.loop = aLoop;
+            pd.drive = sm[7] * 0.01f; pd.driveTone = sm[8] * 0.01f; pd.driveLevelDb = sm[9];
+            pd.compSens = sm[10] * 0.01f; pd.compLevelDb = sm[11];
+            for (int i = 0; i < 8; ++i)
+                pd.eqDb[i] = sm[(size_t) (12 + i)];
+            pd.chorusRate = sm[20]; pd.chorusDepth = sm[21] * 0.01f; pd.chorusMix = sm[22] * 0.01f;
+            pd.delayDiv = delayDiv->getIndex();
+            pd.delayFeedback = sm[23] * 0.01f; pd.delayMix = sm[24] * 0.01f; pd.delayTone = sm[25] * 0.01f;
+            pd.reverbType = reverbType->getIndex();
+            pd.reverbDecay = sm[26]; pd.reverbMix = sm[27] * 0.01f; pd.reverbTone = sm[28] * 0.01f;
+
+            board.process (buf.getWritePointer (0), nch > 1 ? buf.getWritePointer (1) : nullptr, n, pd, bpm);
+
+            if (g0 != 1.0f || g1 != 1.0f)
+                for (int c = 0; c < nch; ++c)
+                {
+                    auto* d = buf.getWritePointer (c);
+                    for (int i = 0; i < n; ++i)
+                        d[i] *= g0 + (g1 - g0) * (float) i / (float) n;
+                }
+            if (duckPhase == 1)
+            {
+                aModel = dModel; aCab = dCab; aLoop = dLoop;
+                duckPhase = 2;
             }
         }
 
-        juce::AudioParameterChoice *model, *cab;
+        juce::AudioParameterChoice *model, *cab, *delayDiv, *reverbType, *guitarist;
+        juce::AudioParameterInt* sceneP;
+        juce::AudioParameterBool *driveOn, *compOn, *eqOn, *chorusOn, *delayOn, *reverbOn, *loopP;
         juce::AudioParameterFloat *input, *gain, *bass, *mid, *treble, *presence, *master;
+        juce::AudioParameterFloat *driveAmt, *driveTone, *driveLevel, *compSens, *compLevel, *eqBand[8];
+        juce::AudioParameterFloat *chorusRate, *chorusDepth, *chorusMix, *delayFb, *delayMix, *delayTone;
+        juce::AudioParameterFloat *reverbDecay, *reverbMix, *reverbTone;
         juce::AudioProcessorEditor* createEditor() override;
 
     protected:
         void prepare() override
         {
-            haveParams = false;
-            for (auto& c : ch)
-                c.prepare (sr);
+            board.prepare (sr);
+            firstBlock = true;
+            haveApplied = false;
+            duckPhase = 0;
         }
 
     private:
-        tcamp::Channel ch[2];
-        tcamp::Params last;
-        bool haveParams = false;
+        juce::AudioParameterChoice* addChoice (const char* pid, const juce::String& label, std::vector<juce::String> items, int def)
+        {
+            juce::StringArray a;
+            for (auto& s : items)
+                a.add (s);
+            auto* p = new juce::AudioParameterChoice (juce::ParameterID { pid, 1 }, label, a, def);
+            juce::AudioProcessor::addParameter (p);
+            return p;
+        }
+        juce::AudioParameterBool* addSwitch (const char* pid, const juce::String& label)
+        {
+            auto* p = new juce::AudioParameterBool (juce::ParameterID { pid, 1 }, label, false);
+            juce::AudioProcessor::addParameter (p);
+            return p;
+        }
+
+        // the parameters of a scene by id: real values are turned into the 0..1 values that the scenes keep
+        void put (int scene, juce::RangedAudioParameter* p, float real)
+        {
+            for (size_t k = 0; k < sceneParams.size(); ++k)
+                if (sceneParams[k] == p)
+                    sceneVal[scene][k] = p->convertTo0to1 (real);
+        }
+
+        void buildDefaultScenes()
+        {
+            sceneName[0] = "Clean"; sceneName[1] = "Crunch"; sceneName[2] = "Solo"; sceneName[3] = "Ambient";
+
+            // 1 Clean: bright clean amp with a little room
+            put (0, model, 0); put (0, cab, 2); put (0, gain, 35); put (0, bass, 55); put (0, mid, 45); put (0, treble, 60);
+            put (0, reverbOn, 1); put (0, reverbMix, 18); put (0, reverbDecay, 1.8f);
+
+            // 2 Crunch: British crunch
+            put (1, model, 2); put (1, cab, 3); put (1, gain, 55); put (1, bass, 55); put (1, mid, 60); put (1, treble, 55);
+
+            // 3 Solo: high gain, drive in front of it, delay and reverb
+            put (2, model, 4); put (2, cab, 3); put (2, gain, 65); put (2, mid, 60);
+            put (2, driveOn, 1); put (2, driveAmt, 30); put (2, driveTone, 60);
+            put (2, delayOn, 1); put (2, delayDiv, 9); put (2, delayFb, 35); put (2, delayMix, 28);
+            put (2, reverbOn, 1); put (2, reverbMix, 20);
+
+            // 4 Ambient: clean with chorus, a long delay and a big hall
+            put (3, model, 1); put (3, cab, 2); put (3, gain, 30);
+            put (3, chorusOn, 1); put (3, chorusRate, 0.6f); put (3, chorusDepth, 55); put (3, chorusMix, 45);
+            put (3, delayOn, 1); put (3, delayDiv, 12); put (3, delayFb, 50); put (3, delayMix, 40);
+            put (3, reverbOn, 1); put (3, reverbDecay, 4.5f); put (3, reverbMix, 35);
+        }
+
+        void storeCurrent (int scene)
+        {
+            for (size_t k = 0; k < sceneParams.size(); ++k)
+                sceneVal[juce::jlimit (0, kScenes - 1, scene)][k] = sceneParams[k]->getValue();
+        }
+
+        void loadScene (int n)
+        {
+            n = juce::jlimit (0, kScenes - 1, n);
+            loadingScene = true;
+            active = n;
+            for (size_t k = 0; k < sceneParams.size(); ++k)
+                sceneParams[k]->setValueNotifyingHost (sceneVal[n][k]);
+            loadingScene = false;
+        }
+
+        // every edit of a parameter is kept in the active scene; a change of the scene parameter (editor, automation) loads it
+        void parameterValueChanged (int index, float) override
+        {
+            if (loadingScene || loadingState)
+                return;
+            if (index >= 0 && index < (int) sceneIndex.size() && sceneIndex[(size_t) index] >= 0)
+            {
+                const auto k = (size_t) sceneIndex[(size_t) index];
+                sceneVal[(size_t) active][k] = sceneParams[k]->getValue();
+            }
+            else if (index >= 0 && getParameters()[index] == sceneP && sceneP->get() != active)
+                triggerAsyncUpdate();
+        }
+        void parameterGestureChanged (int, bool) override {}
+        void handleAsyncUpdate() override
+        {
+            if (sceneP->get() != active)
+                loadScene (sceneP->get());
+        }
+
+        tcboard::Board board;
+        std::array<juce::AudioParameterFloat*, kSmooth> smP {};
+        std::array<float, kSmooth> sm {};
+        std::vector<juce::RangedAudioParameter*> sceneParams;
+        std::vector<int> sceneIndex;
+        std::vector<float> sceneVal[kScenes];
+        juce::String sceneName[kScenes];
+        juce::String guitarName;
+        int sceneParamCount = 0, active = 0, duckPhase = 0, aModel = 0, aCab = 0;
+        bool aLoop = false, haveApplied = false, firstBlock = true;
+        std::atomic<bool> loadingScene { false }, loadingState { false };
     };
 
     class AmpEditor : public juce::AudioProcessorEditor, private juce::Timer
@@ -2254,117 +2574,793 @@ namespace
     public:
         explicit AmpEditor (AmpPlugin& p) : juce::AudioProcessorEditor (p), plug (p)
         {
-            setSize (720, 350);
-            addKnob (inS, inL, "INPUT", *p.input, inA);
-            addKnob (gaS, gaL, "GAIN", *p.gain, gaA);
-            addKnob (baS, baL, "BASS", *p.bass, baA);
-            addKnob (miS, miL, "MID", *p.mid, miA);
-            addKnob (trS, trL, "TREBLE", *p.treble, trA);
-            addKnob (prS, prL, "PRESENCE", *p.presence, prA);
-            addKnob (maS, maL, "MASTER", *p.master, maA);
-            auto tenth = [] (double v) { return juce::String (v / 10.0, 1); };
-            for (auto* s : { &gaS, &baS, &miS, &trS, &prS })
-                s->textFromValueFunction = tenth;
-            inS.textFromValueFunction = [] (double v) { return (v > 0 ? "+" : "") + juce::String (v, 1) + " dB"; };
-            maS.textFromValueFunction = [] (double v) { return juce::String (v, 1) + " dB"; };
-            for (auto* s : { &inS, &gaS, &baS, &miS, &trS, &prS, &maS })
-                s->updateText();
+            setSize (1340, 660);
 
-            const char* modelNames[3] = { "CLEAN", "CRUNCH", "LEAD" };
+            // ---- header: guitarist and the four scenes
+            guitarBtn.onClick = [this] { showGuitaristMenu(); };
+            styleButton (guitarBtn);
+            addAndMakeVisible (guitarBtn);
+            for (int i = 0; i < AmpPlugin::kScenes; ++i)
+            {
+                auto& b = sceneBtn[i];
+                styleButton (b);
+                b.onClick = [this, i] { plug.setScene (i); };
+                b.onRename = [this, i]
+                {
+                    askName ("Scene " + juce::String (i + 1), plug.getSceneName (i), [this, i] (const juce::String& t) { plug.setSceneName (i, t); refresh(); });
+                };
+                b.setTooltip ("Click: switch to this scene. Right click: rename. Every change of a knob is kept in the active scene.");
+                addAndMakeVisible (b);
+            }
+
+            // ---- amplifier
+            const char* modelNames[6] = { "TWN Clean", "RLD Clean", "MRS Crunch", "VX Crunch", "PVY Dist", "MB Dist" };
+            for (int i = 0; i < 6; ++i)
+            {
+                styleButton (modelBtn[i]);
+                modelBtn[i].setButtonText (modelNames[i]);
+                modelBtn[i].onClick = [this, i] { setChoice (*plug.model, i); };
+                addAndMakeVisible (modelBtn[i]);
+            }
             const char* cabNames[4] = { "NO CAB", "1x12", "2x12", "4x12" };
-            for (int i = 0; i < 3; ++i)
-                setupButton (modelBtn[i], modelNames[i], [this, i] { plug.model->beginChangeGesture(); *plug.model = i; plug.model->endChangeGesture(); });
             for (int i = 0; i < 4; ++i)
-                setupButton (cabBtn[i], cabNames[i], [this, i] { plug.cab->beginChangeGesture(); *plug.cab = i; plug.cab->endChangeGesture(); });
+            {
+                styleButton (cabBtn[i]);
+                cabBtn[i].setButtonText (cabNames[i]);
+                cabBtn[i].onClick = [this, i] { setChoice (*plug.cab, i); };
+                addAndMakeVisible (cabBtn[i]);
+            }
+            styleButton (loopBtn);
+            loopBtn.onClick = [this] { plug.loopP->beginChangeGesture(); *plug.loopP = ! plug.loopP->get(); plug.loopP->endChangeGesture(); };
+            loopBtn.setTooltip ("Where chorus, delay and reverb sit: in front of the amp, or in its effects loop (after the pre-amp, before the power amp). "
+                                "The loop is the right place when the amp itself distorts.");
+            addAndMakeVisible (loopBtn);
+
+            auto tenth = [] (double v) { return juce::String (v / 10.0, 1); };
+            auto dB = [] (double v) { return (v > 0 ? "+" : "") + juce::String (v, 1) + " dB"; };
+            auto hz = [] (double v) { return juce::String (v, 1) + " Hz"; };
+            auto sec = [] (double v) { return juce::String (v, 1) + " s"; };
+
+            ampKnobs = { addKnob ("INPUT", *plug.input, dB), addKnob ("GAIN", *plug.gain, tenth), addKnob ("BASS", *plug.bass, tenth),
+                         addKnob ("MID", *plug.mid, tenth), addKnob ("TREBLE", *plug.treble, tenth), addKnob ("PRESENCE", *plug.presence, tenth),
+                         addKnob ("MASTER", *plug.master, dB) };
+
+            // ---- pedals, in the order of the signal path
+            setupPedal (pedals[0], "DRIVE", *plug.driveOn, { addKnob ("DRIVE", *plug.driveAmt, tenth), addKnob ("TONE", *plug.driveTone, tenth),
+                                                              addKnob ("LEVEL", *plug.driveLevel, dB) });
+            setupPedal (pedals[1], "COMP", *plug.compOn, { addKnob ("SUSTAIN", *plug.compSens, tenth), addKnob ("LEVEL", *plug.compLevel, dB) });
+            setupPedal (pedals[2], "EQ", *plug.eqOn, {});
+            setupPedal (pedals[3], "CHORUS", *plug.chorusOn, { addKnob ("RATE", *plug.chorusRate, hz), addKnob ("DEPTH", *plug.chorusDepth, tenth),
+                                                                addKnob ("MIX", *plug.chorusMix, tenth) });
+            setupPedal (pedals[4], "DELAY", *plug.delayOn, { addKnob ("FEEDBACK", *plug.delayFb, tenth), addKnob ("MIX", *plug.delayMix, tenth),
+                                                              addKnob ("TONE", *plug.delayTone, tenth) });
+            setupPedal (pedals[5], "REVERB", *plug.reverbOn, { addKnob ("DECAY", *plug.reverbDecay, sec), addKnob ("MIX", *plug.reverbMix, tenth),
+                                                                addKnob ("TONE", *plug.reverbTone, tenth) });
+
+            // EQ: eight faders
+            static const char* eqLabels[8] = { "62", "125", "250", "500", "1k", "2k", "4k", "8k" };
+            for (int i = 0; i < 8; ++i)
+            {
+                auto& s = eqS[i];
+                s.setSliderStyle (juce::Slider::LinearVertical);
+                s.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 40, 16);
+                s.setNumDecimalPlacesToDisplay (0);
+                s.setColour (juce::Slider::thumbColourId, accent);
+                s.setColour (juce::Slider::trackColourId, accent.withAlpha (0.5f));
+                s.setColour (juce::Slider::textBoxTextColourId, text_);
+                s.setColour (juce::Slider::textBoxOutlineColourId, juce::Colours::transparentBlack);
+                s.setDoubleClickReturnValue (true, 0.0);
+                addAndMakeVisible (s);
+                eqA[i] = std::make_unique<juce::SliderParameterAttachment> (*plug.eqBand[i], s);
+                eqL[i].setText (eqLabels[i], juce::dontSendNotification);
+                eqL[i].setJustificationType (juce::Justification::centred);
+                eqL[i].setColour (juce::Label::textColourId, muted);
+                eqL[i].setFont (juce::FontOptions (11.0f, juce::Font::bold));
+                addAndMakeVisible (eqL[i]);
+            }
+
+            // delay time and reverb type
+            for (int i = 0; i < tcfx::kDivisions; ++i)
+                delayTime.addItem (tcfx::divisions()[i].name, i + 1);
+            delayTime.setTooltip ("Delay time as a note value of the project tempo");
+            addAndMakeVisible (delayTime);
+            delayTimeA = std::make_unique<juce::ComboBoxParameterAttachment> (*plug.delayDiv, delayTime);
+            reverbTypeBox.addItem ("Hall", 1);
+            reverbTypeBox.addItem ("Plate", 2);
+            reverbTypeBox.addItem ("Room", 3);
+            addAndMakeVisible (reverbTypeBox);
+            reverbTypeA = std::make_unique<juce::ComboBoxParameterAttachment> (*plug.reverbType, reverbTypeBox);
+
             startTimerHz (15);
-            timerCallback();
+            refresh();
         }
 
         void paint (juce::Graphics& g) override
         {
             g.fillAll (bg);
-            auto body = getLocalBounds().toFloat().reduced (10.0f);
+            auto body = getLocalBounds().toFloat().reduced (8.0f);
             juce::ColourGradient grad (juce::Colour (0xff23262e), body.getX(), body.getY(), juce::Colour (0xff181a20), body.getX(), body.getBottom(), false);
             g.setGradientFill (grad);
             g.fillRoundedRectangle (body, 10.0f);
             g.setColour (juce::Colour (0xff3a4152));
             g.drawRoundedRectangle (body, 10.0f, 2.0f);
+
             g.setColour (accent);
-            g.setFont (juce::FontOptions (20.0f, juce::Font::bold));
-            g.drawText ("AMP", 24, 16, 120, 30, juce::Justification::centredLeft);
+            g.setFont (juce::FontOptions (22.0f, juce::Font::bold));
+            g.drawText ("AMP", 24, 14, 80, 34, juce::Justification::centredLeft);
+
             g.setColour (muted);
             g.setFont (juce::FontOptions (11.0f, juce::Font::bold));
-            g.drawText ("CHANNEL", 150, 20, 60, 14, juce::Justification::centredLeft);
-            g.drawText ("CABINET", 24, getHeight() - 52, 70, 14, juce::Justification::centredLeft);
+            g.drawText ("CABINET", cabBtn[0].getX(), cabBtn[0].getY() - 13, 70, 12, juce::Justification::centredLeft);
+            g.drawText ("AMPLIFIER", modelBtn[0].getX(), modelBtn[0].getY() - 13, 90, 12, juce::Justification::centredLeft);
+
+            for (int i = 0; i < 6; ++i)
+            {
+                auto r = pedals[(size_t) i].area.toFloat();
+                const bool on = pedals[(size_t) i].sw.getToggleState();
+                g.setColour (juce::Colour (0xff1c1f27));
+                g.fillRoundedRectangle (r, 8.0f);
+                g.setColour (on ? accent.withAlpha (0.85f) : juce::Colour (0xff3a4152));
+                g.drawRoundedRectangle (r.reduced (0.5f), 8.0f, on ? 2.0f : 1.2f);
+                g.setColour (on ? accent : muted);
+                g.setFont (juce::FontOptions (13.0f, juce::Font::bold));
+                g.drawText (pedals[(size_t) i].title, r.getX() + 12, r.getY() + 8, r.getWidth() - 24, 18, juce::Justification::centredLeft);
+                // the arrow of the signal path between the pedals
+                if (i < 5)
+                {
+                    g.setColour (muted);
+                    const float x = r.getRight() + 5.0f, y = r.getCentreY();
+                    g.drawArrow (juce::Line<float> (x - 4.0f, y, x + 5.0f, y), 1.5f, 6.0f, 6.0f);
+                }
+            }
+            // the loop bracket over the three time effects
+            g.setColour (muted.withAlpha (0.6f));
+            g.setFont (juce::FontOptions (10.0f, juce::Font::bold));
+            const auto a = pedals[3].area, b = pedals[5].area;
+            g.drawText (plug.loopP->get() ? "IN THE EFFECTS LOOP" : "IN FRONT OF THE AMP", a.getX(), a.getY() - 16, b.getRight() - a.getX(), 12, juce::Justification::centred);
         }
 
         void resized() override
         {
-            for (int i = 0; i < 3; ++i)
-                modelBtn[i].setBounds (214 + i * 84, 16, 78, 28);
-            const int w = (getWidth() - 48) / 7;
-            juce::Slider* sl[7] = { &inS, &gaS, &baS, &miS, &trS, &prS, &maS };
-            juce::Label* lb[7] = { &inL, &gaL, &baL, &miL, &trL, &prL, &maL };
-            for (int i = 0; i < 7; ++i)
-            {
-                auto c = juce::Rectangle<int> (24 + i * w, 60, w, 190);
-                lb[i]->setBounds (c.removeFromTop (20));
-                sl[i]->setBounds (c);
-            }
+            guitarBtn.setBounds (112, 16, 200, 32);
+            for (int i = 0; i < AmpPlugin::kScenes; ++i)
+                sceneBtn[i].setBounds (336 + i * 158, 14, 150, 36);
+
+            for (int i = 0; i < 6; ++i)
+                modelBtn[i].setBounds (24 + i * 104, 82, 98, 28);
             for (int i = 0; i < 4; ++i)
-                cabBtn[i].setBounds (100 + i * 84, getHeight() - 58, 78, 28);
+                cabBtn[i].setBounds (676 + i * 70, 82, 64, 28);
+            loopBtn.setBounds (getWidth() - 24 - 250, 82, 250, 28);
+
+            const int kw = (getWidth() - 48) / 7;
+            for (int i = 0; i < 7; ++i)
+                placeKnob (ampKnobs[(size_t) i], { 24 + i * kw, 124, kw, 140 });
+
+            // pedal board
+            static const int widths[6] = { 200, 140, 300, 200, 200, 200 };
+            int x = 24;
+            for (int i = 0; i < 6; ++i)
+            {
+                auto& pd = pedals[(size_t) i];
+                pd.area = { x, 308, widths[i], 332 };
+                pd.sw.setBounds (pd.area.getX() + 16, pd.area.getBottom() - 62, pd.area.getWidth() - 32, 46);
+                x += widths[i] + 12;
+                auto inner = pd.area.reduced (8, 0).withTrimmedTop (36).withTrimmedBottom (72);
+                if (i == 4)
+                    delayTime.setBounds (inner.removeFromTop (30).reduced (8, 0));
+                if (i == 5)
+                    reverbTypeBox.setBounds (inner.removeFromTop (30).reduced (8, 0));
+                if (! pd.knobs.empty())
+                {
+                    const int w = inner.getWidth() / (int) pd.knobs.size();
+                    for (size_t k = 0; k < pd.knobs.size(); ++k)
+                        placeKnob (pd.knobs[k], inner.removeFromLeft (w).withTrimmedTop (12));
+                }
+            }
+            auto eq = pedals[2].area.reduced (10, 0).withTrimmedTop (40).withTrimmedBottom (78);
+            const int ew = eq.getWidth() / 8;
+            for (int i = 0; i < 8; ++i)
+            {
+                auto c = eq.removeFromLeft (ew);
+                eqL[i].setBounds (c.removeFromBottom (16));
+                eqS[i].setBounds (c);
+            }
         }
 
     private:
-        template <typename F>
-        void setupButton (juce::TextButton& b, const char* text, F&& onClick)
+        // ---- little helpers
+        struct Knob
         {
-            b.setButtonText (text);
+            juce::Slider s;
+            juce::Label l;
+            std::unique_ptr<juce::SliderParameterAttachment> a;
+        };
+        struct Pedal
+        {
+            juce::String title;
+            juce::Rectangle<int> area;
+            juce::TextButton sw;
+            std::unique_ptr<juce::ButtonParameterAttachment> swA;
+            std::vector<Knob*> knobs;
+        };
+        struct SceneButton : juce::TextButton
+        {
+            std::function<void()> onRename;
+            void mouseDown (const juce::MouseEvent& e) override
+            {
+                if (e.mods.isPopupMenu())
+                {
+                    if (onRename)
+                        onRename();
+                    return;
+                }
+                juce::TextButton::mouseDown (e);
+            }
+        };
+
+        void styleButton (juce::TextButton& b)
+        {
             b.setClickingTogglesState (false);
             b.setColour (juce::TextButton::buttonColourId, juce::Colour (0xff262b36));
             b.setColour (juce::TextButton::buttonOnColourId, accent);
             b.setColour (juce::TextButton::textColourOffId, text_);
             b.setColour (juce::TextButton::textColourOnId, juce::Colour (0xff15171c));
-            b.onClick = std::forward<F> (onClick);
-            addAndMakeVisible (b);
         }
 
-        void addKnob (juce::Slider& s, juce::Label& l, const juce::String& text, juce::RangedAudioParameter& prm, std::unique_ptr<juce::SliderParameterAttachment>& att)
+        Knob* addKnob (const juce::String& text, juce::RangedAudioParameter& prm, std::function<juce::String (double)> fmt)
         {
+            knobs.push_back (std::make_unique<Knob>());
+            auto* k = knobs.back().get();
+            auto& s = k->s;
             s.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
-            s.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 70, 20);
+            s.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 64, 18);
             s.setColour (juce::Slider::rotarySliderFillColourId, accent);
             s.setColour (juce::Slider::rotarySliderOutlineColourId, juce::Colour (0xff3a4152));
             s.setColour (juce::Slider::thumbColourId, accent);
             s.setColour (juce::Slider::textBoxTextColourId, text_);
             s.setColour (juce::Slider::textBoxOutlineColourId, juce::Colours::transparentBlack);
             addAndMakeVisible (s);
-            l.setText (text, juce::dontSendNotification);
-            l.setJustificationType (juce::Justification::centred);
-            l.setColour (juce::Label::textColourId, muted);
-            l.setFont (juce::FontOptions (12.0f, juce::Font::bold));
-            addAndMakeVisible (l);
-            att = std::make_unique<juce::SliderParameterAttachment> (prm, s);
+            k->l.setText (text, juce::dontSendNotification);
+            k->l.setJustificationType (juce::Justification::centred);
+            k->l.setColour (juce::Label::textColourId, muted);
+            k->l.setFont (juce::FontOptions (11.0f, juce::Font::bold));
+            addAndMakeVisible (k->l);
+            k->a = std::make_unique<juce::SliderParameterAttachment> (prm, s);
+            if (fmt)
+            {
+                s.textFromValueFunction = fmt;
+                s.updateText();
+            }
+            return k;
+        }
+
+        static void placeKnob (Knob* k, juce::Rectangle<int> r)
+        {
+            k->l.setBounds (r.removeFromTop (16));
+            k->s.setBounds (r);
+        }
+
+        void setupPedal (Pedal& p, const juce::String& title, juce::AudioParameterBool& on, std::vector<Knob*> ks)
+        {
+            p.title = title;
+            p.knobs = std::move (ks);
+            styleButton (p.sw);
+            p.sw.setClickingTogglesState (true);
+            p.sw.setButtonText ("ON / OFF");
+            p.swA = std::make_unique<juce::ButtonParameterAttachment> (on, p.sw);
+            p.sw.onStateChange = [this] { repaint(); };
+            addAndMakeVisible (p.sw);
+        }
+
+        static void setChoice (juce::AudioParameterChoice& p, int i)
+        {
+            p.beginChangeGesture();
+            p = i;
+            p.endChangeGesture();
+        }
+
+        void askName (const juce::String& title, const juce::String& initial, std::function<void (juce::String)> done)
+        {
+            auto* w = new juce::AlertWindow (title, "Name:", juce::MessageBoxIconType::NoIcon);
+            w->addTextEditor ("t", initial);
+            w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+            w->addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+            w->enterModalState (true, juce::ModalCallbackFunction::create ([w, done] (int r)
+                                {
+                                    if (r == 1 && done)
+                                        done (w->getTextEditorContents ("t").trim());
+                                }),
+                                true);
+        }
+
+        void showGuitaristMenu()
+        {
+            juce::PopupMenu m;
+            for (int i = 0; i < 4; ++i)
+                m.addItem (i + 1, "Guitarist slot " + juce::String (i + 1) + " (phone tab)", true, plug.guitaristSlot() == i);
+            m.addSeparator();
+            m.addItem (10, "Rename...");
+            m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&guitarBtn), [this] (int r)
+            {
+                if (r >= 1 && r <= 4)
+                    setChoice (*plug.guitarist, r - 1);
+                else if (r == 10)
+                    askName ("Guitarist", plug.guitaristName(), [this] (const juce::String& t) { plug.setGuitaristName (t); refresh(); });
+                refresh();
+            });
+        }
+
+        void refresh()
+        {
+            guitarBtn.setButtonText (plug.guitaristName() + "  [" + juce::String (plug.guitaristSlot() + 1) + "]");
+            guitarBtn.setTooltip ("Which guitarist plays through this amp. On the phone he picks his tab and switches his four scenes.");
+            for (int i = 0; i < AmpPlugin::kScenes; ++i)
+            {
+                sceneBtn[i].setButtonText (juce::String (i + 1) + "  " + plug.getSceneName (i));
+                sceneBtn[i].setToggleState (plug.activeScene() == i, juce::dontSendNotification);
+            }
+            for (int i = 0; i < 6; ++i)
+                modelBtn[i].setToggleState (plug.model->getIndex() == i, juce::dontSendNotification);
+            for (int i = 0; i < 4; ++i)
+                cabBtn[i].setToggleState (plug.cab->getIndex() == i, juce::dontSendNotification);
+            loopBtn.setButtonText (plug.loopP->get() ? "TIME FX: IN THE EFFECTS LOOP" : "TIME FX: IN FRONT OF THE AMP");
+            loopBtn.setToggleState (plug.loopP->get(), juce::dontSendNotification);
         }
 
         void timerCallback() override
         {
-            for (int i = 0; i < 3; ++i)
-                modelBtn[i].setToggleState (plug.model->getIndex() == i, juce::dontSendNotification);
-            for (int i = 0; i < 4; ++i)
-                cabBtn[i].setToggleState (plug.cab->getIndex() == i, juce::dontSendNotification);
+            refresh();
+            repaint();
         }
 
         AmpPlugin& plug;
-        juce::Slider inS, gaS, baS, miS, trS, prS, maS;
-        juce::Label inL, gaL, baL, miL, trL, prL, maL;
-        std::unique_ptr<juce::SliderParameterAttachment> inA, gaA, baA, miA, trA, prA, maA;
-        juce::TextButton modelBtn[3], cabBtn[4];
+        SceneButton sceneBtn[AmpPlugin::kScenes];
+        juce::TextButton guitarBtn, modelBtn[6], cabBtn[4], loopBtn;
+        std::vector<std::unique_ptr<Knob>> knobs;
+        std::vector<Knob*> ampKnobs;
+        Pedal pedals[6];
+        juce::Slider eqS[8];
+        juce::Label eqL[8];
+        std::unique_ptr<juce::SliderParameterAttachment> eqA[8];
+        juce::ComboBox delayTime, reverbTypeBox;
+        std::unique_ptr<juce::ComboBoxParameterAttachment> delayTimeA, reverbTypeA;
         juce::Colour bg { 0xff15171c }, accent { 0xffff9a2e }, text_ { 0xffe8eaf0 }, muted { 0xff8b93a7 };
     };
 
     juce::AudioProcessorEditor* AmpPlugin::createEditor() { return new AmpEditor (*this); }
 
+
+    // ------------------------------------------------------------ stereo delay (zero latency, see FxCores.h)
+    class DelayPlugin : public BuiltinBase
+    {
+    public:
+        DelayPlugin() : BuiltinBase ("delay", "Delay", "Tempo-synced stereo delay with ping-pong, modulation and filters (zero latency)")
+        {
+            unit = choice ("ut", "Time unit", { "BPM", "HOST", "MS" }, 1);
+            ownBpm = addLinear ("bp", "BPM", 20.0f, 300.0f, 120.0f);
+            std::vector<juce::String> names;
+            for (int i = 0; i < tcfx::kDivisions; ++i)
+                names.push_back (tcfx::divisions()[i].name);
+            divL = choice ("tl", "Delay L", names, 10);
+            divR = choice ("tr", "Delay R", names, 10);
+            msL = addFloat ("ml", "Delay L ms", 1.0f, 3000.0f, 400.0f, 0.15f);
+            msR = addFloat ("mr", "Delay R ms", 1.0f, 3000.0f, 400.0f, 0.15f);
+            mode = choice ("md", "Mode", { "Stereo", "Ping Pong", "Dual" }, 0);
+            feedback = addLinear ("fb", "Feedback", 0.0f, 200.0f, 35.0f);
+            depth = addLinear ("dp", "Mod depth", 0.0f, 100.0f, 0.0f);
+            rate = addFloat ("rt", "Mod rate", 0.1f, 10.0f, 0.6f, 0.2f);
+            hipass = addFloat ("hp", "HiPass", 20.0f, 20000.0f, 20.0f, 0.1f);
+            lopass = addFloat ("lp", "LoPass", 20.0f, 20000.0f, 20000.0f, 0.1f);
+            link = sw ("lk", "Filter link");
+            dryWet = addLinear ("dw", "Dry/Wet", 0.0f, 100.0f, 30.0f);
+            output = addLinear ("ou", "Output", -18.0f, 18.0f, 0.0f);
+            invL = sw ("pl", "Phase L");
+            invR = sw ("pr", "Phase R");
+        }
+
+        void processBlock (juce::AudioBuffer<float>& buf, juce::MidiBuffer&) override
+        {
+            juce::ScopedNoDenormals noDenormals;
+            const int n = buf.getNumSamples(), nch = juce::jmin (2, buf.getNumChannels());
+            if (nch == 0 || n == 0)
+                return;
+
+            double host = 120.0;
+            if (auto* ph = getPlayHead())
+                if (auto pos = ph->getPosition())
+                    if (auto b = pos->getBpm())
+                        host = *b;
+            hostBpm.store (host);
+            const int u = unit->getIndex();
+            const double tempo = u == 0 ? (double) ownBpm->get() : host;
+
+            tcfx::DelayEngine::Params p;
+            p.timeL = u == 2 ? msL->get() * 0.001 : tcfx::divisionSeconds (divL->getIndex(), tempo);
+            p.timeR = u == 2 ? msR->get() * 0.001 : tcfx::divisionSeconds (divR->getIndex(), tempo);
+            p.mode = mode->getIndex();
+            p.feedback = feedback->get() * 0.01f;
+            p.modDepth = depth->get() * 0.01f;
+            p.modRate = rate->get();
+            p.hpHz = hipass->get();
+            p.lpHz = lopass->get();
+            p.invertL = invL->get();
+            p.invertR = invR->get();
+            engine.setParams (p);
+            shownL.store (p.timeL);
+            shownR.store (p.mode == tcfx::Dual ? p.timeR : p.timeL);
+
+            const float w = dryWet->get() * 0.01f;
+            const float dryT = std::min (1.0f, 2.0f * (1.0f - w)), wetT = std::min (1.0f, 2.0f * w);
+            const float outT = std::pow (10.0f, output->get() / 20.0f);
+            const float k = 1.0f - std::exp (-1.0f / (0.01f * (float) sr));
+
+            auto* l = buf.getWritePointer (0);
+            auto* r = nch > 1 ? buf.getWritePointer (1) : nullptr;
+            float peak = 0.0f;
+            for (int i = 0; i < n; ++i)
+            {
+                dryG += (dryT - dryG) * k;
+                wetG += (wetT - wetG) * k;
+                outG += (outT - outG) * k;
+                const float inL = l[i], inR = r != nullptr ? r[i] : l[i];
+                float wl, wr;
+                engine.process (inL, inR, wl, wr);
+                if (r == nullptr)
+                    l[i] = (inL * dryG + 0.5f * (wl + wr) * wetG) * outG;
+                else
+                {
+                    l[i] = (inL * dryG + wl * wetG) * outG;
+                    r[i] = (inR * dryG + wr * wetG) * outG;
+                }
+                peak = std::max (peak, std::abs (l[i]));
+            }
+            level.store (std::max (level.load() * 0.9f, peak));
+        }
+
+        juce::AudioParameterChoice *unit, *divL, *divR, *mode;
+        juce::AudioParameterFloat *ownBpm, *msL, *msR, *feedback, *depth, *rate, *hipass, *lopass, *dryWet, *output;
+        juce::AudioParameterBool *link, *invL, *invR;
+        std::atomic<double> hostBpm { 120.0 }, shownL { 0.5 }, shownR { 0.5 };
+        std::atomic<float> level { 0.0f };
+        juce::AudioProcessorEditor* createEditor() override;
+
+    protected:
+        void prepare() override
+        {
+            engine.prepare (sr);
+            dryG = std::min (1.0f, 2.0f * (1.0f - dryWet->get() * 0.01f));
+            wetG = std::min (1.0f, 2.0f * dryWet->get() * 0.01f);
+            outG = std::pow (10.0f, output->get() / 20.0f);
+        }
+
+    private:
+        juce::AudioParameterChoice* choice (const char* pid, const juce::String& label, std::vector<juce::String> items, int def)
+        {
+            juce::StringArray a;
+            for (auto& s : items)
+                a.add (s);
+            auto* p = new juce::AudioParameterChoice (juce::ParameterID { pid, 1 }, label, a, def);
+            juce::AudioProcessor::addParameter (p);
+            return p;
+        }
+        juce::AudioParameterBool* sw (const char* pid, const juce::String& label)
+        {
+            auto* p = new juce::AudioParameterBool (juce::ParameterID { pid, 1 }, label, false);
+            juce::AudioProcessor::addParameter (p);
+            return p;
+        }
+
+        tcfx::DelayEngine engine;
+        float dryG = 1.0f, wetG = 0.5f, outG = 1.0f;
+    };
+
+    class DelayEditor : public juce::AudioProcessorEditor, private juce::Timer
+    {
+    public:
+        explicit DelayEditor (DelayPlugin& p) : juce::AudioProcessorEditor (p), plug (p)
+        {
+            setSize (940, 400);
+            auto pct = [] (double v) { return juce::String (v, 0) + " %"; };
+            auto dB = [] (double v) { return (v > 0 ? "+" : "") + juce::String (v, 1) + " dB"; };
+            auto divName = [] (double v) { return juce::String (tcfx::divisions()[juce::jlimit (0, tcfx::kDivisions - 1, (int) std::lround (v))].name); };
+            auto ms = [] (double v) { return juce::String (v, 0) + " ms"; };
+            auto freq = [] (double v) { return v >= 1000.0 ? juce::String (v / 1000.0, 2) + " k" : juce::String (v, 0) + " Hz"; };
+
+            setupKnob (kL, "DELAY L", *plug.divL, divName, 1.0);
+            setupKnob (kR, "DELAY R", *plug.divR, divName, 1.0);
+            setupKnob (kLms, "DELAY L", *plug.msL, ms, 0.0);
+            setupKnob (kRms, "DELAY R", *plug.msR, ms, 0.0);
+            setupKnob (kFb, "FEEDBACK", *plug.feedback, pct, 0.0);
+            setupKnob (kDepth, "DEPTH", *plug.depth, pct, 0.0);
+            setupKnob (kRate, "RATE", *plug.rate, [] (double v) { return juce::String (v, 1) + " Hz"; }, 0.0);
+            setupKnob (kHp, "HIPASS", *plug.hipass, freq, 0.0);
+            setupKnob (kLp, "LOPASS", *plug.lopass, freq, 0.0);
+            setupKnob (kWet, "DRY/WET", *plug.dryWet, pct, 0.0);
+            setupKnob (kOut, "OUTPUT", *plug.output, dB, 0.0);
+            setupKnob (kBpm, "BPM", *plug.ownBpm, [] (double v) { return juce::String (v, 1); }, 0.0);
+            kHp.s.onValueChange = [this] { linkMove (kHp, kLp, true); };
+            kLp.s.onValueChange = [this] { linkMove (kLp, kHp, false); };
+
+            for (auto* b : { &tap, &btnStereo, &btnPing, &btnDual, &btnPhL, &btnPhR, &btnBpm, &btnHost, &btnMs, &btnLink })
+            {
+                b->setClickingTogglesState (false);
+                b->setColour (juce::TextButton::buttonColourId, juce::Colour (0xff262b36));
+                b->setColour (juce::TextButton::buttonOnColourId, accent);
+                b->setColour (juce::TextButton::textColourOffId, text_);
+                b->setColour (juce::TextButton::textColourOnId, juce::Colour (0xff15171c));
+                addAndMakeVisible (b);
+            }
+            tap.setButtonText ("TAP");
+            tap.setTooltip ("Tap the tempo (BPM unit); in MS mode it sets the delay time");
+            tap.onClick = [this] { tapTempo(); };
+            btnStereo.setButtonText ("STEREO");
+            btnPing.setButtonText ("PING PONG");
+            btnDual.setButtonText ("DUAL");
+            btnPhL.setButtonText (juce::String::fromUTF8 ("\xC3\x98" "L"));
+            btnPhR.setButtonText (juce::String::fromUTF8 ("\xC3\x98" "R"));
+            btnBpm.setButtonText ("BPM");
+            btnHost.setButtonText ("HOST");
+            btnMs.setButtonText ("MS");
+            btnLink.setButtonText ("LINK");
+            btnStereo.onClick = [this] { setChoice (*plug.mode, 0); };
+            btnPing.onClick = [this] { setChoice (*plug.mode, 1); };
+            btnDual.onClick = [this] { setChoice (*plug.mode, 2); };
+            btnPhL.onClick = [this] { toggle (*plug.invL); };
+            btnPhR.onClick = [this] { toggle (*plug.invR); };
+            btnBpm.onClick = [this] { setChoice (*plug.unit, 0); };
+            btnHost.onClick = [this] { setChoice (*plug.unit, 1); };
+            btnMs.onClick = [this] { setChoice (*plug.unit, 2); };
+            btnLink.onClick = [this] { toggle (*plug.link); };
+            btnHost.setTooltip ("The delay follows the tempo of the project");
+            btnBpm.setTooltip ("The delay follows its own BPM value");
+            btnLink.setTooltip ("Move HiPass and LoPass together");
+            startTimerHz (20);
+            refresh();
+        }
+
+        void paint (juce::Graphics& g) override
+        {
+            g.fillAll (bg);
+            auto body = getLocalBounds().toFloat().reduced (8.0f);
+            juce::ColourGradient grad (juce::Colour (0xff23262e), body.getX(), body.getY(), juce::Colour (0xff181a20), body.getX(), body.getBottom(), false);
+            g.setGradientFill (grad);
+            g.fillRoundedRectangle (body, 10.0f);
+            g.setColour (juce::Colour (0xff3a4152));
+            g.drawRoundedRectangle (body, 10.0f, 2.0f);
+
+            g.setColour (accent);
+            g.setFont (juce::FontOptions (22.0f, juce::Font::bold));
+            g.drawText ("DELAY", 24, 14, 120, 30, juce::Justification::centredLeft);
+
+            // the display in the middle
+            auto lcd = lcdRect().toFloat();
+            g.setColour (juce::Colour (0xff0b0d11));
+            g.fillRoundedRectangle (lcd, 6.0f);
+            g.setColour (juce::Colour (0xff3a4152));
+            g.drawRoundedRectangle (lcd, 6.0f, 1.0f);
+            g.setColour (accent);
+            const int u = plug.unit->getIndex();
+            const double tempo = u == 0 ? (double) plug.ownBpm->get() : plug.hostBpm.load();
+            g.setFont (juce::FontOptions (30.0f, juce::Font::bold));
+            g.drawText (u == 2 ? juce::String ("MS") : juce::String (tempo, 1), lcd.withTrimmedBottom (26.0f), juce::Justification::centred);
+            g.setFont (juce::FontOptions (13.0f, juce::Font::bold));
+            if (u != 2)
+                g.drawText ("BPM", lcd.withTrimmedTop (50.0f), juce::Justification::centred);
+            const auto tl = plug.shownL.load(), tr = plug.shownR.load();
+            g.setColour (muted);
+            g.drawText ("L  " + juce::String (tl * 1000.0, 0) + " ms", lcd.reduced (10.0f, 6.0f), juce::Justification::topLeft);
+            g.drawText ("R  " + juce::String (tr * 1000.0, 0) + " ms", lcd.reduced (10.0f, 6.0f), juce::Justification::topRight);
+
+            // level meter
+            auto m = meterRect().toFloat();
+            g.setColour (juce::Colour (0xff0b0d11));
+            g.fillRoundedRectangle (m, 3.0f);
+            const float db = juce::Decibels::gainToDecibels (plug.level.load(), -48.0f);
+            const float h = juce::jmap (db, -48.0f, 0.0f, 0.0f, m.getHeight());
+            g.setColour (db > -3.0f ? juce::Colour (0xffe0503a) : accent);
+            g.fillRoundedRectangle (m.withTop (m.getBottom() - juce::jlimit (0.0f, m.getHeight(), h)), 3.0f);
+            g.setColour (muted);
+            g.setFont (juce::FontOptions (10.0f, juce::Font::bold));
+            g.drawText ("LEVEL", m.getX() - 12, m.getBottom() + 4, m.getWidth() + 24, 12, juce::Justification::centred);
+
+            // group captions
+            g.setColour (muted);
+            g.setFont (juce::FontOptions (11.0f, juce::Font::bold));
+            g.drawText ("MODULATION", 330, 392 - 150 + 8, 220, 14, juce::Justification::centred);
+            g.drawText ("FILTERS", 580, 392 - 150 + 8, 270, 14, juce::Justification::centred);
+            g.setColour (juce::Colour (0xff3a4152));
+            g.drawLine (340, 262, 540, 262, 1.0f);
+            g.drawLine (590, 262, 850, 262, 1.0f);
+        }
+
+        void resized() override
+        {
+            tap.setBounds (24, 64, 84, 84);
+            const bool msMode = plug.unit->getIndex() == 2;
+            place (kL, { 118, 40, 168, 190 });
+            place (kLms, { 118, 40, 168, 190 });
+            place (kFb, { 614, 40, 168, 190 });
+            place (kWet, { 828, 36, 96, 100 });
+            place (kOut, { 828, 146, 96, 100 });
+            place (kR, { 118, 252, 118, 130 });
+            place (kRms, { 118, 252, 118, 130 });
+            place (kBpm, { 24, 164, 84, 100 });
+            place (kDepth, { 340, 272, 100, 116 });
+            place (kRate, { 440, 272, 100, 116 });
+            place (kHp, { 590, 272, 110, 116 });
+            place (kLp, { 740, 272, 110, 116 });
+            btnLink.setBounds (706, 310, 28, 40);
+            juce::ignoreUnused (msMode);
+
+            const auto lcd = lcdRect();
+            btnPhL.setBounds (lcd.getX(), lcd.getBottom() + 8, 40, 26);
+            btnStereo.setBounds (lcd.getX() + 46, lcd.getBottom() + 8, 70, 26);
+            btnPing.setBounds (lcd.getX() + 120, lcd.getBottom() + 8, 84, 26);
+            btnDual.setBounds (lcd.getX() + 208, lcd.getBottom() + 8, 52, 26);
+            btnPhR.setBounds (lcd.getRight() - 36, lcd.getBottom() + 8, 36, 26);
+            btnBpm.setBounds (lcd.getX(), lcd.getBottom() + 44, 92, 26);
+            btnHost.setBounds (lcd.getX() + 98, lcd.getBottom() + 44, 92, 26);
+            btnMs.setBounds (lcd.getX() + 196, lcd.getBottom() + 44, 92, 26);
+            updateVisibility();
+        }
+
+    private:
+        struct Knob
+        {
+            juce::Slider s;
+            juce::Label l;
+            std::unique_ptr<juce::SliderParameterAttachment> a;
+        };
+
+        juce::Rectangle<int> lcdRect() const { return { 304, 56, 288, 86 }; }
+        juce::Rectangle<int> meterRect() const { return { 796, 60, 16, 170 }; }
+
+        void setupKnob (Knob& k, const juce::String& text, juce::RangedAudioParameter& prm, std::function<juce::String (double)> fmt, double interval)
+        {
+            auto& s = k.s;
+            s.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
+            s.setTextBoxStyle (juce::Slider::TextBoxBelow, true, 90, 20);   // read only: the knob is the control
+            s.setColour (juce::Slider::rotarySliderFillColourId, accent);
+            s.setColour (juce::Slider::rotarySliderOutlineColourId, juce::Colour (0xff3a4152));
+            s.setColour (juce::Slider::thumbColourId, accent);
+            s.setColour (juce::Slider::textBoxTextColourId, text_);
+            s.setColour (juce::Slider::textBoxOutlineColourId, juce::Colours::transparentBlack);
+            addAndMakeVisible (s);
+            k.l.setText (text, juce::dontSendNotification);
+            k.l.setJustificationType (juce::Justification::centred);
+            k.l.setColour (juce::Label::textColourId, muted);
+            k.l.setFont (juce::FontOptions (12.0f, juce::Font::bold));
+            addAndMakeVisible (k.l);
+            k.a = std::make_unique<juce::SliderParameterAttachment> (prm, s);
+            if (interval > 0.0)
+                s.setNumDecimalPlacesToDisplay (0);
+            s.textFromValueFunction = fmt;
+            s.updateText();
+        }
+
+        static void place (Knob& k, juce::Rectangle<int> r)
+        {
+            k.l.setBounds (r.removeFromTop (18));
+            k.s.setBounds (r);
+        }
+
+        void linkMove (Knob& moved, Knob& other, bool movedIsHp)
+        {
+            if (linking || ! plug.link->get())
+                return;
+            // keep the distance of the two cut-offs (in octaves) while the pair slides
+            const double hp = kHp.s.getValue(), lp = kLp.s.getValue();
+            if (moved.s.isMouseButtonDown())
+            {
+                linking = true;
+                const double ratio = (movedIsHp ? lastLp / lastHp : lastLp / lastHp);
+                const double target = movedIsHp ? hp * ratio : lp / ratio;
+                other.s.setValue (juce::jlimit (20.0, 20000.0, target), juce::sendNotificationSync);
+                linking = false;
+            }
+            lastHp = kHp.s.getValue();
+            lastLp = kLp.s.getValue();
+        }
+
+        void tapTempo()
+        {
+            const auto now = juce::Time::getMillisecondCounterHiRes();
+            if (now - lastTap > 2000.0)
+                taps.clear();
+            lastTap = now;
+            taps.push_back (now);
+            if (taps.size() > 6)
+                taps.erase (taps.begin());
+            if (taps.size() < 2)
+                return;
+            const double interval = (taps.back() - taps.front()) / (double) (taps.size() - 1);   // ms per tap
+            if (plug.unit->getIndex() == 2)
+            {
+                plug.msL->beginChangeGesture();
+                *plug.msL = (float) juce::jlimit (1.0, 3000.0, interval);
+                plug.msL->endChangeGesture();
+                plug.msR->beginChangeGesture();
+                *plug.msR = (float) juce::jlimit (1.0, 3000.0, interval);
+                plug.msR->endChangeGesture();
+            }
+            else
+            {
+                setChoice (*plug.unit, 0);
+                plug.ownBpm->beginChangeGesture();
+                *plug.ownBpm = (float) juce::jlimit (20.0, 300.0, 60000.0 / interval);
+                plug.ownBpm->endChangeGesture();
+            }
+        }
+
+        static void setChoice (juce::AudioParameterChoice& p, int i)
+        {
+            p.beginChangeGesture();
+            p = i;
+            p.endChangeGesture();
+        }
+        static void toggle (juce::AudioParameterBool& p)
+        {
+            p.beginChangeGesture();
+            p = ! p.get();
+            p.endChangeGesture();
+        }
+
+        void updateVisibility()
+        {
+            const bool ms = plug.unit->getIndex() == 2;
+            const bool dual = plug.mode->getIndex() == 2;
+            kL.s.setVisible (! ms); kL.l.setVisible (! ms);
+            kLms.s.setVisible (ms); kLms.l.setVisible (ms);
+            kR.s.setVisible (! ms); kR.l.setVisible (! ms);
+            kRms.s.setVisible (ms); kRms.l.setVisible (ms);
+            for (auto* c : { (juce::Component*) &kR.s, (juce::Component*) &kRms.s })
+                c->setEnabled (dual);
+            kBpm.s.setVisible (plug.unit->getIndex() == 0);
+            kBpm.l.setVisible (plug.unit->getIndex() == 0);
+            kL.l.setText (dual || plug.mode->getIndex() == 1 ? "DELAY" : "DELAY", juce::dontSendNotification);
+        }
+
+        void refresh()
+        {
+            btnStereo.setToggleState (plug.mode->getIndex() == 0, juce::dontSendNotification);
+            btnPing.setToggleState (plug.mode->getIndex() == 1, juce::dontSendNotification);
+            btnDual.setToggleState (plug.mode->getIndex() == 2, juce::dontSendNotification);
+            btnPhL.setToggleState (plug.invL->get(), juce::dontSendNotification);
+            btnPhR.setToggleState (plug.invR->get(), juce::dontSendNotification);
+            btnBpm.setToggleState (plug.unit->getIndex() == 0, juce::dontSendNotification);
+            btnHost.setToggleState (plug.unit->getIndex() == 1, juce::dontSendNotification);
+            btnMs.setToggleState (plug.unit->getIndex() == 2, juce::dontSendNotification);
+            btnLink.setToggleState (plug.link->get(), juce::dontSendNotification);
+            if (plug.unit->getIndex() != lastUnit || plug.mode->getIndex() != lastMode)
+            {
+                lastUnit = plug.unit->getIndex();
+                lastMode = plug.mode->getIndex();
+                updateVisibility();
+            }
+            if (! kHp.s.isMouseButtonDown() && ! kLp.s.isMouseButtonDown())
+            {
+                lastHp = kHp.s.getValue();
+                lastLp = kLp.s.getValue();
+            }
+        }
+
+        void timerCallback() override
+        {
+            refresh();
+            repaint();
+        }
+
+        DelayPlugin& plug;
+        Knob kL, kR, kLms, kRms, kFb, kDepth, kRate, kHp, kLp, kWet, kOut, kBpm;
+        juce::TextButton tap, btnStereo, btnPing, btnDual, btnPhL, btnPhR, btnBpm, btnHost, btnMs, btnLink;
+        std::vector<double> taps;
+        double lastTap = 0.0, lastHp = 20.0, lastLp = 20000.0;
+        int lastUnit = -1, lastMode = -1;
+        bool linking = false;
+        juce::Colour bg { 0xff15171c }, accent { 0xffff9a2e }, text_ { 0xffe8eaf0 }, muted { 0xff8b93a7 };
+    };
+
+    juce::AudioProcessorEditor* DelayPlugin::createEditor() { return new DelayEditor (*this); }
 
     // ------------------------------------------------------------ autotune (short bounded delay, see AutotuneCore.h)
     namespace tunekeys
@@ -2403,23 +3399,25 @@ namespace
             retune = addFloat ("rt", "Retune Speed", 0.0f, 400.0f, 30.0f, 0.12f);
             human = addLinear ("hu", "Humanize", 0.0f, 100.0f, 10.0f);
             flex = addLinear ("fx", "Flex Tune", 0.0f, 100.0f, 15.0f);
-            harmLevel = addLinear ("hl", "Harmony", 0.0f, 100.0f, 60.0f);
+            harmLevel = addLinear ("hl", "Harmony", 0.0f, 100.0f, 0.0f);   // the choir is off until the player turns it up
             widthP = addLinear ("wd", "Width", 0.0f, 100.0f, 60.0f);
             synthP = addLinear ("sy", "Synth", 0.0f, 100.0f, 0.0f);
             detune = addLinear ("de", "Detune", 430.0f, 450.0f, 440.0f);
             classic = new juce::AudioParameterBool (juce::ParameterID { "cl", 1 }, "Classic", false);
             hq = new juce::AudioParameterBool (juce::ParameterID { "hq", 1 }, "HQ", false);
             on = new juce::AudioParameterBool (juce::ParameterID { "on", 1 }, "On", true);
+            followProject = new juce::AudioParameterBool (juce::ParameterID { "pk", 1 }, "Project key", false);
             range = new juce::AudioParameterChoice (juce::ParameterID { "ra", 1 }, "Vocal Range",
                                                     juce::StringArray { "Soprano", "Alto/Tenor", "Low Male", "Instrument" }, 1);
             key = new juce::AudioParameterInt (juce::ParameterID { "ky", 1 }, "Key", 0, 48, 0);
             for (auto* p : { (juce::AudioProcessorParameter*) classic, (juce::AudioProcessorParameter*) hq, (juce::AudioProcessorParameter*) on,
-                             (juce::AudioProcessorParameter*) range, (juce::AudioProcessorParameter*) key })
+                             (juce::AudioProcessorParameter*) range, (juce::AudioProcessorParameter*) key,
+                             (juce::AudioProcessorParameter*) followProject })
                 juce::AudioProcessor::addParameter (p);
             for (int k = 0; k < 4; ++k)
             {
                 harm[k] = new juce::AudioParameterChoice (juce::ParameterID { "h" + juce::String (k), 1 }, "Voice " + juce::String (k + 1),
-                                                          juce::StringArray { "Off", "-Oct", "-5th", "-3rd", "+3rd", "+4th", "+5th", "+6th", "+Oct" }, 0);
+                                                          juce::StringArray { "Off", "-Oct", "-5th", "-3rd", "+3rd", "+5th", "+Oct" }, 0);
                 juce::AudioProcessor::addParameter (harm[k]);
             }
             for (int i = 0; i < 12; ++i)
@@ -2443,17 +3441,13 @@ namespace
             p.classic = classic->get();
             p.hq = hq->get();
             p.refHz = detune->get();
-            static const int steps[9] = { 0, -7, -4, -2, 2, 3, 4, 5, 7 };
+            static const int steps[7] = { 0, -7, -4, -2, 2, 4, 7 };   // scale steps: octave 7, fifth 4, third 2
             for (int k = 0; k < 4; ++k)
                 p.harmony[k] = steps[harm[k]->getIndex()];
             p.harmLevel = harmLevel->get();
             p.width = widthP->get();
             p.synth = synthP->get();
-            std::uint16_t m = 0;
-            for (int i = 0; i < 12; ++i)
-                if (note[i]->get())
-                    m |= (std::uint16_t) (1u << i);
-            p.mask = m;
+            p.mask = effectiveMask();
             static const float lows[4] = { 140.0f, 80.0f, 60.0f, 45.0f }, highs[4] = { 1100.0f, 700.0f, 450.0f, 1500.0f };
             p.rangeLowHz = lows[range->getIndex()];
             p.rangeHighHz = highs[range->getIndex()];
@@ -2488,9 +3482,22 @@ namespace
             ramp = w;
         }
 
+        // the notes the correction may use: the keyboard, or the key of the project when that box is ticked and a key is known
+        bool followingProject() const { return followProject->get() && tcshared::project().keyTonic.load() >= 0; }
+        std::uint16_t effectiveMask() const
+        {
+            if (followingProject())
+                return tunekeys::maskFor (1 + tcshared::project().keyTonic.load() * 4 + (tcshared::project().keyMinor.load() ? 1 : 0));
+            std::uint16_t m = 0;
+            for (int i = 0; i < 12; ++i)
+                if (note[i]->get())
+                    m |= (std::uint16_t) (1u << i);
+            return m;
+        }
+
         juce::AudioParameterFloat *retune, *human, *flex, *harmLevel, *widthP, *synthP, *detune;
         juce::AudioParameterChoice* harm[4];
-        juce::AudioParameterBool *classic, *hq, *on, *note[12];
+        juce::AudioParameterBool *classic, *hq, *on, *followProject, *note[12];
         juce::AudioParameterChoice* range;
         juce::AudioParameterInt* key;
         tctune::Core core;
@@ -2555,7 +3562,7 @@ namespace
             knob (rtS, "Retune Speed", *p.retune, rtA, teal, 0);
             knob (huS, "Humanize", *p.human, huA, juce::Colour (0xff8a63d2), 0);
             knob (fxS, "Flex Tune", *p.flex, fxA, juce::Colour (0xffe6d94a), 0);
-            knob (voS, "Harmony", *p.harmLevel, voA, juce::Colour (0xff4fb3ff), 0);
+            knob (voS, "Level", *p.harmLevel, voA, juce::Colour (0xff4fb3ff), 0);
             knob (spS, "Width", *p.widthP, spA, juce::Colour (0xffff9a4d), 0);
             knob (syS, "Synth", *p.synthP, syA, juce::Colour (0xffe05cc0), 0);
             for (int k = 0; k < 4; ++k)
@@ -2580,6 +3587,14 @@ namespace
                 harmBtn[k].setTooltip ("Harmony voice: interval above / below the sung note, in steps of the chosen scale");
                 addAndMakeVisible (harmBtn[k]);
             }
+
+            followBtn.setButtonText ("Project key");
+            followBtn.setColour (juce::ToggleButton::textColourId, juce::Colours::white);
+            followBtn.setColour (juce::ToggleButton::tickColourId, teal);
+            followBtn.setColour (juce::ToggleButton::tickDisabledColourId, muted);
+            followBtn.setTooltip ("Follow the key of the project (the Key box of the window). While no key is known, the keyboard below is used");
+            addAndMakeVisible (followBtn);
+            followA = std::make_unique<juce::ButtonParameterAttachment> (*p.followProject, followBtn);
 
             detuneS.setSliderStyle (juce::Slider::LinearBar);
             detuneS.setTextBoxIsEditable (true);
@@ -2721,10 +3736,11 @@ namespace
             g.setFont (juce::FontOptions (13.0f));
             g.drawText ("Edit Notes", 40, 286, 100, 18, juce::Justification::centredLeft);
             g.drawText (juce::String::fromUTF8 ("\xE2\x86\xBA"), resetRect().toNearestInt(), juce::Justification::centred);
+            const std::uint16_t effMask = plug.effectiveMask();
             for (int i = 0; i < 12; ++i)
             {
                 auto k = keyRect (i).toFloat();
-                const bool allowed = plug.note[i]->get();
+                const bool allowed = (effMask & (1u << i)) != 0;
                 const bool hot = voiced && target == i;
                 g.setColour (hot ? teal.withAlpha (0.9f) : allowed ? teal.withAlpha (0.18f) : juce::Colour (0xff161c1f));
                 g.fillRoundedRectangle (k, k.getWidth() * 0.4f);
@@ -2735,17 +3751,13 @@ namespace
                 g.drawText (tunekeys::noteNames[i], k.toNearestInt(), juce::Justification::centred);
             }
 
-            // bottom of the left panel
+            // bottom of the left panel (below the keys, nothing overlaps them)
             g.setColour (muted);
             g.setFont (juce::FontOptions (11.0f));
-            g.drawText ("Detune", detuneS.getX(), detuneS.getY() - 14, 80, 12, juce::Justification::centredLeft);
-            g.drawText ("Mode", modeLL.getX(), modeLL.getY() - 14, 80, 12, juce::Justification::centredLeft);
+            g.drawText ("Detune", detuneS.getX(), detuneS.getY() - 16, 80, 12, juce::Justification::centredLeft);
+            g.drawText ("Mode", modeLL.getX(), modeLL.getY() - 16, 80, 12, juce::Justification::centredLeft);
             g.setColour (juce::Colour (0xff2a3338));
-            g.drawLine (30.0f, 408.0f, left.getRight() - 20.0f, 408.0f);
-            g.drawLine (30.0f, 492.0f, left.getRight() - 20.0f, 492.0f);
-            g.setColour (muted);
-            g.setFont (juce::FontOptions (11.0f));
-            g.drawText ("Harmony voices (scale steps from the sung note)", 40, 506, 400, 14, juce::Justification::centredLeft);
+            g.drawLine (30.0f, 460.0f, left.getRight() - 20.0f, 460.0f);
 
             // right panel
             for (auto* s : { &rtS, &huS, &fxS, &voS, &spS, &syS })
@@ -2754,35 +3766,38 @@ namespace
                 g.setFont (juce::FontOptions (s == &rtS ? 16.0f : 13.0f));
                 g.drawText (s->getName(), s->getX() - 20, s->getY() - (s == &rtS ? 22 : 18), s->getWidth() + 40, 18, juce::Justification::centred);
             }
-            // power
-            auto pw = powerRect().toFloat();
-            const bool o = plug.on->get();
-            g.setColour (o ? teal : juce::Colour (0xff2a3338));
-            g.fillEllipse (pw);
-            g.setColour (o ? juce::Colours::black : muted);
-            juce::Path arc;
-            arc.addCentredArc (pw.getCentreX(), pw.getCentreY(), 8.0f, 8.0f, 0.0f, 0.6f, 6.28f - 0.6f, true);
-            g.strokePath (arc, juce::PathStrokeType (2.0f));
-            g.drawLine (pw.getCentreX(), pw.getCentreY() - 11.0f, pw.getCentreX(), pw.getCentreY() - 2.0f, 2.0f);
+
+            // the harmony block: the three knobs and the four voices belong together
+            const auto hb = harmonyBlock().toFloat();
+            const auto blue = juce::Colour (0xff4fb3ff);
+            g.setColour (blue.withAlpha (0.06f));
+            g.fillRoundedRectangle (hb, 10.0f);
+            g.setColour (blue.withAlpha (0.45f));
+            g.drawRoundedRectangle (hb.reduced (0.5f), 10.0f, 1.2f);
+            g.setColour (blue);
+            g.setFont (juce::FontOptions (12.0f, juce::Font::bold));
+            g.drawText ("HARMONY", (int) hb.getX() + 12, (int) hb.getY() + 5, 120, 14, juce::Justification::centredLeft);
         }
 
         void resized() override
         {
             rangeBtn.setBounds (260, 36, 130, 28);
             keyBtn.setBounds (404, 36, 150, 28);
-            detuneS.setBounds (40, 436, 110, 28);
-            modeLL.setBounds (240, 436, 110, 26);
-            modeHQ.setBounds (354, 436, 60, 26);
+            followBtn.setBounds (404, 68, 150, 24);
+            detuneS.setBounds (40, 484, 110, 28);
+            modeLL.setBounds (240, 484, 110, 26);
+            modeHQ.setBounds (354, 484, 60, 26);
 
             auto r = rightPanel();
             rtS.setBounds (r.getX() + 60, 70, 170, 170);
             huS.setBounds (r.getX() + 28, 296, 84, 84);
             fxS.setBounds (r.getX() + 130, 296, 84, 84);
-            voS.setBounds (r.getX() + 8, 430, 72, 84);
-            spS.setBounds (r.getX() + 79, 430, 72, 84);
-            syS.setBounds (r.getX() + 150, 430, 72, 84);
+            const auto hb = harmonyBlock();
+            voS.setBounds (hb.getX() + 6, hb.getY() + 40, 64, 78);
+            spS.setBounds (hb.getX() + 75, hb.getY() + 40, 64, 78);
+            syS.setBounds (hb.getX() + 144, hb.getY() + 40, 64, 78);
             for (int k = 0; k < 4; ++k)
-                harmBtn[k].setBounds (40 + k * 130, 538, 118, 30);
+                harmBtn[k].setBounds (hb.getX() + 8 + (k % 2) * 101, hb.getY() + 126 + (k / 2) * 30, 97, 26);
             styleModern.setBounds (r.getX() + 20, 250, 98, 26);
             styleClassic.setBounds (r.getX() + 126, 250, 98, 26);
         }
@@ -2792,15 +3807,15 @@ namespace
             for (int i = 0; i < 12; ++i)
                 if (keyRect (i).contains (e.position))
                 {
+                    if (plug.followingProject())
+                        return;   // the project key decides
                     plug.note[i]->beginChangeGesture();
                     *plug.note[i] = ! plug.note[i]->get();
                     plug.note[i]->endChangeGesture();
                     return;
                 }
-            if (resetRect().contains (e.position))
+            if (resetRect().contains (e.position) && ! plug.followingProject())
                 setKey (plug.key->get());
-            if (powerRect().toFloat().contains (e.position))
-                setBool (*plug.on, ! plug.on->get());
         }
 
     private:
@@ -2823,7 +3838,7 @@ namespace
             return {};
         }
         juce::Rectangle<float> resetRect() const { return { 540.0f, 284.0f, 24.0f, 22.0f }; }
-        juce::Rectangle<int> powerRect() const { return { rightPanel().getRight() - 62, getHeight() - 70, 36, 36 }; }
+        juce::Rectangle<int> harmonyBlock() const { return { rightPanel().getX() + 8, 392, rightPanel().getWidth() - 16, getHeight() - 28 - 392 + 4 }; }
 
         void knob (juce::Slider& s, const juce::String& name, juce::RangedAudioParameter& prm, std::unique_ptr<juce::SliderParameterAttachment>& att, juce::Colour c, int)
         {
@@ -2868,7 +3883,13 @@ namespace
                     cur |= (std::uint16_t) (1u << i);
             if (cur != tunekeys::maskFor (plug.key->get()))
                 name = "Custom";
+            const bool following = plug.followingProject();
+            if (following)
+                name = "Project: " + juce::String (tunekeys::noteNames[tcshared::project().keyTonic.load()]) + (tcshared::project().keyMinor.load() ? "m" : "");
+            else if (plug.followProject->get())
+                name += "  (no project key)";
             keyBtn.setButtonText (name);
+            keyBtn.setEnabled (! following);
             for (int k = 0; k < 4; ++k)
             {
                 const int idx = plug.harm[k]->getIndex();
@@ -2900,6 +3921,8 @@ namespace
         TunePlugin& plug;
         TuneLook look;
         juce::Slider rtS, huS, fxS, voS, spS, syS, detuneS;
+        juce::ToggleButton followBtn;
+        std::unique_ptr<juce::ButtonParameterAttachment> followA;
         std::unique_ptr<juce::SliderParameterAttachment> rtA, huA, fxA, voA, spA, syA, detuneA;
         juce::TextButton harmBtn[4];
         juce::TextButton rangeBtn, keyBtn, modeLL, modeHQ, styleModern, styleClassic;
@@ -2924,10 +3947,48 @@ namespace
             return std::make_unique<AmpPlugin>();
         if (id == "TC:tune")
             return std::make_unique<TunePlugin>();
+        if (id == "TC:delay")
+            return std::make_unique<DelayPlugin>();
         return nullptr;
     }
 
-    const char* const allIds[] = { "TC:eq", "TC:comp", "TC:gate", "TC:reverb", "TC:od808", "TC:amp", "TC:tune" };
+    const char* const allIds[] = { "TC:eq", "TC:comp", "TC:gate", "TC:reverb", "TC:od808", "TC:amp", "TC:tune", "TC:delay" };
+}
+
+std::vector<tcshared::Guitarist> tcshared::guitarists()
+{
+    std::vector<Guitarist> out;
+    const juce::ScopedLock sl (ampRegistryLock());
+    bool seen[4] = {};
+    for (auto* a : ampRegistry())
+    {
+        const int slot = juce::jlimit (0, 3, a->guitaristSlot());
+        if (seen[slot])
+            continue;
+        seen[slot] = true;
+        Guitarist g;
+        g.slot = slot;
+        g.name = a->guitaristName();
+        g.scene = a->activeScene();
+        for (int i = 0; i < 4; ++i)
+            g.sceneNames.add (a->getSceneName (i));
+        out.push_back (g);
+    }
+    std::sort (out.begin(), out.end(), [] (const Guitarist& x, const Guitarist& y) { return x.slot < y.slot; });
+    return out;
+}
+
+bool tcshared::setGuitarScene (int slot, int scene)
+{
+    bool found = false;
+    const juce::ScopedLock sl (ampRegistryLock());
+    for (auto* a : ampRegistry())
+        if (a->guitaristSlot() == slot)
+        {
+            a->setScene (scene);
+            found = true;
+        }
+    return found;
 }
 
 std::vector<juce::PluginDescription> BuiltinFormat::allDescriptions()

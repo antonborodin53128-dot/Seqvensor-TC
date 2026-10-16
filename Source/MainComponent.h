@@ -93,6 +93,8 @@ private:
     void stepSong (int delta);
     void refreshPlayerBar();
     void createLyricsWindow();
+    void showQr();                     // QR tab of the player bar
+    void publishGuitars();             // guitarists and scenes for the phone page
     void showLyrics();                 // the lyrics window (T button)
     void syncLyrics();                 // shows the lyrics of the open song
     void preloadNeighbours();
@@ -162,6 +164,7 @@ private:
     IconButton menuButton { IconButton::Icon::Menu };
     TempoControl bpmSlider;
     juce::TextButton tapButton { "Tap" };
+    bool liveKeyReset = false;                                 // the live key was dropped after silence (until the next signal)
     juce::TextButton keyLabel { "key" };                       // click: menu with the key of the mix
     juce::TextButton keyDown { "-" }, keyUp { "+" };           // transposition of the whole mix, semitones
     IconButton analysisButton { IconButton::Icon::Gear };

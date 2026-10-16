@@ -192,7 +192,7 @@ public:
     {
         g.setColour (hot ? Pal::text : Pal::textDim);
         auto c = getLocalBounds().toFloat().getCentre();
-        for (int row = -2; row <= 2; ++row)
+        for (int row = -1; row <= 1; ++row)   // 3 rows x 2 columns = 6 dots
             for (int col = -1; col <= 0; ++col)
                 g.fillEllipse (c.x + (float) col * 5.0f + 0.5f, c.y + (float) row * 6.0f - 1.5f, 3.0f, 3.0f);
     }

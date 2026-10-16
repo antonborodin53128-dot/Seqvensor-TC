@@ -1,4 +1,5 @@
 #include "Lyrics.h"
+#include "QrCode.h"
 #include <map>
 
 #include <cstring>
@@ -235,15 +236,22 @@ static const char* phonePage = R"HTML(<!doctype html>
 :root{--bg:#000;--panel:#161618;--raise:#2a2a2d;--text:#f2f2f7;--dim:#8e8e93;--acc:#ffa81f}
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 html,body{margin:0;height:100%;background:#000;color:var(--text);font-family:"Segoe UI",Roboto,-apple-system,"Helvetica Neue",Arial,sans-serif;-webkit-text-size-adjust:100%;overflow:hidden}
-#stage{position:absolute;left:50%;top:50%;width:360px;height:660px;overflow:hidden;background:#000;transform-origin:50% 50%}
-#top{position:absolute;left:0;right:0;top:0;height:58px;padding:9px 10px 9px 16px;background:var(--panel);border-bottom:2px solid var(--acc);display:flex;align-items:center;gap:10px}
+#stage{--pb:84px;position:absolute;left:50%;top:50%;width:360px;height:704px;overflow:hidden;background:#000;transform-origin:50% 50%}
+#stage.min{--pb:36px}
+#tabs{position:absolute;left:0;right:0;top:0;height:44px;display:flex;background:#0b0b0c;border-bottom:1px solid #2c2c2e}
+.tb{flex:1;border:0;background:none;color:var(--dim);font-size:14px;font-weight:700;padding:0;border-bottom:3px solid transparent;font-family:inherit}
+.tb.on{color:var(--acc);border-bottom-color:var(--acc)}
+#qb{flex:none;width:46px;border:0;background:none;color:var(--text);padding:0}
+#qb svg{width:22px;height:22px;fill:currentColor}
+.view{position:absolute;left:0;right:0;top:102px;bottom:var(--pb);visibility:hidden;pointer-events:none}
+.view.on{visibility:visible;pointer-events:auto}
+#top{position:absolute;left:0;right:0;top:44px;height:58px;padding:9px 10px 9px 16px;background:var(--panel);border-bottom:2px solid var(--acc);display:flex;align-items:center;gap:10px}
 #cur{flex:1;min-width:0}
 #cur b{display:block;font-size:17px;color:var(--acc);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #cur small{display:block;font-size:12px;color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px}
 #cur small i{font-style:normal;color:var(--text)}
 #ib{flex:none;width:40px;height:40px;border:0;border-radius:11px;background:var(--raise);color:var(--text);padding:0}
 #ib svg{width:22px;height:22px;fill:currentColor}
-#w{position:absolute;left:0;right:0;top:58px;bottom:84px}
 #t{position:absolute;left:0;right:0;top:0;bottom:0;padding:14px 16px 0;overflow-x:hidden;overflow-y:auto;scrollbar-width:none;touch-action:pan-y;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;transition:opacity .15s}
 #t::-webkit-scrollbar{display:none}
 #t.all{padding-bottom:140px}
@@ -254,7 +262,11 @@ html,body{margin:0;height:100%;background:#000;color:var(--text);font-family:"Se
 .ln.tg{color:var(--acc)}
 .ln.n.tg{color:#7a5412}
 .e{white-space:normal;color:var(--dim);font-weight:400;font-size:16px}
-#b{position:absolute;left:0;right:0;bottom:0;height:84px;display:flex;gap:8px;padding:12px;background:var(--panel);border-top:1px solid #2c2c2e}
+#b{position:absolute;left:0;right:0;bottom:0;height:var(--pb);display:flex;gap:8px;padding:12px;background:var(--panel);border-top:1px solid #2c2c2e}
+#b button.hb{flex:none;width:40px;font-size:16px;color:var(--dim)}
+#stage.min #b{padding:4px 12px}
+#stage.min #b button{display:none}
+#stage.min #b button.hb{display:flex;flex:1;width:auto;font-size:14px;font-weight:700;color:var(--text)}
 #b button{flex:1;border:0;border-radius:12px;background:var(--raise);color:var(--text);padding:0;display:flex;align-items:center;justify-content:center}
 #b button svg{width:26px;height:26px;fill:currentColor}
 #b button.on{background:var(--acc);color:#000}
@@ -271,28 +283,101 @@ html,body{margin:0;height:100%;background:#000;color:var(--text);font-family:"Se
 .r.now .t{color:var(--acc);font-weight:700}
 .r button{flex:none;width:40px;height:46px;font-size:16px;border:0;background:none;color:var(--dim)}
 .r button:active{color:var(--acc)}
+#gt .gh{padding:10px 12px 0}
+#gt select{width:100%;height:44px;font-size:16px;font-weight:700;border:0;border-radius:11px;background:var(--raise);color:var(--text);padding:0 10px;font-family:inherit}
+#gg{display:grid;grid-template-columns:156px 156px;gap:12px;justify-content:center;padding:12px}
+.pd{position:relative;height:214px;border-radius:16px;background:linear-gradient(#2d2d31,#17171a);border:2px solid #3a3a3e;text-align:center;padding-top:30px}
+.pd .led{position:absolute;left:50%;top:10px;width:12px;height:12px;margin-left:-6px;border-radius:50%;background:#3a2a0a}
+.pd .num{font-size:52px;line-height:56px;font-weight:800;color:#5d5d62}
+.pd .nm{margin:6px 8px 0;font-size:17px;font-weight:700;line-height:21px;height:42px;overflow:hidden;word-break:break-word}
+.pd .fs{position:absolute;left:50%;bottom:14px;width:58px;height:58px;margin-left:-29px;border-radius:50%;background:radial-gradient(circle at 35% 30%,#d6d6da,#6c6c72 60%,#3d3d42);box-shadow:0 3px 6px #000}
+.pd.on{border-color:var(--acc);background:linear-gradient(#3a2608,#1c1307)}
+.pd.on .led{background:var(--acc);box-shadow:0 0 12px 3px rgba(255,168,31,.7)}
+.pd.on .num{color:var(--acc)}
+.pd:active .fs{filter:brightness(.8)}
+.msg{padding:30px 22px;font-size:16px;color:var(--dim);line-height:22px}
+#qr{position:absolute;left:0;right:0;top:0;bottom:0;background:#000;z-index:6;display:none;flex-direction:column}
+#qr.on{display:flex}
+#qh{flex:none;display:flex;align-items:center;gap:8px;padding:9px 10px 9px 16px;height:58px;background:var(--panel);border-bottom:2px solid var(--acc)}
+#qh b{flex:1;font-size:17px;color:var(--acc)}
+#qh button{flex:none;width:40px;height:40px;font-size:20px;border:0;border-radius:11px;background:var(--raise);color:var(--text);padding:0}
+#qc{flex:1;display:flex;flex-direction:column;align-items:center;padding:20px 18px;gap:14px}
+#qi{width:264px;height:264px;background:#fff;border-radius:10px}
+#qu{font-size:13px;color:var(--dim);word-break:break-all;text-align:center}
+#qcp{height:48px;padding:0 20px;font-size:16px;font-weight:700;border:0;border-radius:12px;background:var(--acc);color:#000;font-family:inherit}
+#qm{color:var(--text);font-size:14px;min-height:18px}
 </style></head><body>
 <div id="stage">
+<div id="qr"><div id="qh"><b>Подключение</b><button onclick="closeQr()">&#10005;</button></div><div id="qc"><img id="qi" alt="QR"><div id="qu"></div><button id="qcp" onclick="copyLink()">Скопировать ссылку</button><div id="qm"></div></div></div>
+<div id="tabs"><button class="tb on" onclick="setTab(0)">Вокал</button><button class="tb" onclick="setTab(1)">Гитара</button><button class="tb" onclick="setTab(2)">Барабаны</button><button class="tb" onclick="setTab(3)">Бас</button><button id="qb" onclick="openQr()"><svg viewBox="0 0 24 24"><path d="M3 3h8v8H3zm2 2v4h4V5zM13 3h8v8h-8zm2 2v4h4V5zM3 13h8v8H3zm2 2v4h4v-4zM13 13h3v3h-3zm5 0h3v3h-3zm-5 5h3v3h-3zm5 0h3v3h-3z"/></svg></button></div>
 <div id="pl"><div id="ph"><select id="ls" onchange="cmd('list:'+this.value)"></select><button onclick="closePl()">&#10005;</button></div><div id="pi"></div></div>
 <div id="top"><div id="cur"><b id="n">TC</b><small id="nx"></small></div>
 <button id="ib" onclick="openPl()"><svg viewBox="0 0 24 24"><path d="M3 5h18v2.4H3zM3 10.8h18v2.4H3zM3 16.6h18V19H3z"/></svg></button></div>
-<div id="w"><div id="t"></div></div>
+<div id="w" class="view on"><div id="t"></div></div>
+<div id="gt" class="view"></div>
+<div id="mt" class="view"><div class="msg" id="mm"></div></div>
 <div id="b">
 <button onclick="cmd('prev')"><svg viewBox="0 0 24 24"><path d="M5 5h2.4v14H5zM20 5v14L9 12z"/></svg></button>
 <button id="bp" onclick="cmd('start')"><svg viewBox="0 0 24 24"><path d="M7 4.5v15L19.5 12z"/></svg></button>
 <button id="bz" onclick="cmd('pause')"><svg viewBox="0 0 24 24"><path d="M6 5h4.2v14H6zM13.8 5H18v14h-4.2z"/></svg></button>
 <button onclick="cmd('stop')"><svg viewBox="0 0 24 24"><path d="M6 6h12v12H6z"/></svg></button>
 <button onclick="cmd('next')"><svg viewBox="0 0 24 24"><path d="M16.6 5H19v14h-2.4zM4 5v14l11-7z"/></svg></button>
+<button class="hb" id="hb" onclick="togglePlayer()">&#9660;</button>
 </div>
 </div>
 <script>
-// The page is a fixed 360 x 660 screen that is scaled to the phone, so it looks the same on every phone.
+// The page is a fixed 360 x 704 screen that is scaled to the phone, so it looks the same on every phone.
 // Text: 20 px bold, 26 px rows, 19 px between lines of the song, left aligned. The rows are already cut by TC.
-var rev=-1,plRev=-1,lines=[],secs=[],cur="",lastS=null,K=new URLSearchParams(location.search).get("k")||"";
+var rev=-1,plRev=-1,grRev=-1,gdata=[],gsel=0,tab=0,lines=[],secs=[],cur="",lastS=null,K=new URLSearchParams(location.search).get("k")||"";
 var T=document.getElementById("t"),stage=document.getElementById("stage");
-function layout(){var s=Math.min(innerWidth/360,innerHeight/660);stage.style.transform="translate(-50%,-50%) scale("+s+")"}
+function layout(){var s=Math.min(innerWidth/360,innerHeight/704);stage.style.transform="translate(-50%,-50%) scale("+s+")"}
 function cmd(c){fetch("/cmd?do="+encodeURIComponent(c)+"&k="+encodeURIComponent(K),{cache:"no-store"}).catch(function(){})}
 function get(u){return fetch(u,{cache:"no-store"}).then(function(r){return r.json()})}
+function setTab(i){
+  tab=i;var tb=document.querySelectorAll(".tb");for(var k=0;k<tb.length;k++)tb[k].className="tb"+(k===i?" on":"");
+  document.getElementById("w").className="view"+(i===0?" on":"");
+  document.getElementById("gt").className="view"+(i===1?" on":"");
+  document.getElementById("mt").className="view"+(i>=2?" on":"");
+  document.getElementById("mm").textContent=i===2?"Барабаны: эта вкладка скоро появится":"Бас: эта вкладка скоро появится";
+  try{localStorage.setItem("tcTab",i)}catch(e){}
+}
+function togglePlayer(){
+  var m=stage.classList.toggle("min");
+  document.getElementById("hb").innerHTML=m?"&#9650; Плеер":"&#9660;";
+  try{localStorage.setItem("tcMin",m?"1":"0")}catch(e){}
+  cur="";if(lastS)render(lastS.sec,lastS.done,lastS.playing);
+}
+function drawGuitar(d){
+  gdata=d.g||[];var box=document.getElementById("gt");box.innerHTML="";
+  if(!gdata.length){var m=document.createElement("div");m.className="msg";m.textContent="Нет гитарных усилителей. Добавьте плагин Amp на дорожку гитариста.";box.appendChild(m);return}
+  var found=false;gdata.forEach(function(g){if(g.slot===gsel)found=true});if(!found)gsel=gdata[0].slot;
+  var h=document.createElement("div");h.className="gh";var sel=document.createElement("select");
+  gdata.forEach(function(g){var o=document.createElement("option");o.value=g.slot;o.textContent=g.name;if(g.slot===gsel)o.selected=true;sel.appendChild(o)});
+  sel.onchange=function(){gsel=parseInt(this.value,10);try{localStorage.setItem("tcGt",gsel)}catch(e){}drawGuitar({g:gdata})};
+  h.appendChild(sel);box.appendChild(h);
+  var cg=null;gdata.forEach(function(g){if(g.slot===gsel)cg=g});
+  var grid=document.createElement("div");grid.id="gg";
+  for(var i=0;i<4;i++)(function(i){
+    var p=document.createElement("div");p.className="pd"+(cg.scene===i?" on":"");
+    p.innerHTML='<div class="led"></div><div class="num">'+(i+1)+'</div><div class="nm"></div><div class="fs"></div>';
+    p.querySelector(".nm").textContent=cg.scenes[i]||"";
+    p.onclick=function(){cmd("scene:"+cg.slot+":"+i)};
+    grid.appendChild(p)})(i);
+  box.appendChild(grid);
+}
+function linkUrl(){return location.origin+"/?k="+encodeURIComponent(K)}
+function openQr(){
+  document.getElementById("qi").src="/qr.svg?_="+Date.now();
+  document.getElementById("qu").textContent=linkUrl();document.getElementById("qm").textContent="";
+  document.getElementById("qr").classList.add("on");
+}
+function closeQr(){document.getElementById("qr").classList.remove("on")}
+function copyLink(){
+  var t=linkUrl(),ok=false;
+  try{if(navigator.clipboard&&window.isSecureContext){navigator.clipboard.writeText(t);ok=true}}catch(e){}
+  if(!ok){try{var a=document.createElement("textarea");a.value=t;a.style.position="fixed";a.style.opacity="0";document.body.appendChild(a);a.focus();a.select();ok=document.execCommand("copy");document.body.removeChild(a)}catch(e){}}
+  document.getElementById("qm").textContent=ok?"Ссылка скопирована":"Не удалось скопировать: выделите ссылку выше";
+}
 function openPl(){document.getElementById("pl").classList.add("on")}
 function closePl(){document.getElementById("pl").classList.remove("on")}
 function shown(i){return i<lines.length&&lines[i].trim()!==""}
@@ -369,11 +454,13 @@ function poll(){
     document.getElementById("bz").className=s.paused?"on":"";
     names(s);
     if(s.pl!==plRev){plRev=s.pl;get("/playlist").then(drawPl)}
+    if(s.gr!==grRev){grRev=s.gr;get("/guitar").then(drawGuitar)}
     if(s.rev!==rev){rev=s.rev;return get("/lyrics").then(build).then(function(){names(s);render(s.sec,s.done,s.playing)})}
     render(s.sec,s.done,s.playing);
   }).catch(function(){});
 }
 addEventListener("resize",layout);layout();
+try{var t0=parseInt(localStorage.getItem("tcTab"),10);if(t0>=0&&t0<4)setTab(t0);var g0=parseInt(localStorage.getItem("tcGt"),10);if(g0>=0)gsel=g0;if(localStorage.getItem("tcMin")==="1")togglePlayer()}catch(e){}
 document.addEventListener("click",function(){try{navigator.wakeLock.request("screen")}catch(e){}},{once:true});
 setInterval(poll,250);poll();
 </script></body></html>)HTML";
@@ -447,6 +534,16 @@ void LyricsServer::publishPlaylist (const juce::String& current, const juce::Str
     {
         playlistJson = listJson;
         ++plRevision;
+    }
+}
+
+void LyricsServer::publishGuitar (const juce::String& json)
+{
+    const juce::ScopedLock sl (lock);
+    if (json != guitarJson)
+    {
+        guitarJson = json;
+        ++grRevision;
     }
 }
 
@@ -526,7 +623,7 @@ void LyricsServer::serve (juce::StreamingSocket& client)
         juce::String json;
         {
             const juce::ScopedLock sl (lock);
-            json = "{\"rev\":" + juce::String (revision) + ",\"pl\":" + juce::String (plRevision) + ",\"pos\":" + juce::String (livePos, 2)
+            json = "{\"rev\":" + juce::String (revision) + ",\"pl\":" + juce::String (plRevision) + ",\"gr\":" + juce::String (grRevision) + ",\"pos\":" + juce::String (livePos, 2)
                  + ",\"playing\":" + (livePlaying ? "true" : "false") + ",\"paused\":" + (livePaused ? "true" : "false") + ",\"sec\":" + juce::String (liveSection) + ",\"done\":" + juce::String (liveFinished)
                  + ",\"bpm\":" + juce::String (liveBpm, 2) + ",\"semis\":" + juce::String (liveSemis)
                  + ",\"cur\":" + juce::JSON::toString (juce::var (curName)) + ",\"nxt\":" + juce::JSON::toString (juce::var (nextName)) + "}";
@@ -550,6 +647,26 @@ void LyricsServer::serve (juce::StreamingSocket& client)
             json = playlistJson.isEmpty() ? juce::String ("{\"items\":[],\"lists\":[]}") : playlistJson;
         }
         reply (client, "application/json", json);
+    }
+    else if (path == "/guitar")
+    {
+        juce::String json;
+        {
+            const juce::ScopedLock sl (lock);
+            json = guitarJson.isEmpty() ? juce::String ("{\"g\":[]}") : guitarJson;
+        }
+        reply (client, "application/json", json);
+    }
+    else if (path == "/qr.svg")
+    {
+        // the code of the address the phone used to get here (so it is right for whatever network the phone is in)
+        juce::String host;
+        for (auto& line : juce::StringArray::fromLines (request))
+            if (line.startsWithIgnoreCase ("host:"))
+                host = line.fromFirstOccurrenceOf (":", false, false).trim();
+        const juce::String link = host.isNotEmpty() ? "http://" + host + "/?k=" + key : connectUrl();
+        const auto code = tcqr::encode (link.toStdString());
+        reply (client, "image/svg+xml", code.size > 0 ? juce::String (tcqr::toSvg (code)) : juce::String ("<svg xmlns='http://www.w3.org/2000/svg'/>"));
     }
     else if (path == "/cmd")
     {
@@ -1216,10 +1333,11 @@ LyricsPanel::LyricsPanel (Engine& e) : engine (e)
     phoneButton.setTooltip ("Скопировать адрес страницы для телефона (телефон и ПК в одной сети)"_ru);
     phoneButton.onClick = [this]
     {
-        if (url.isEmpty())
+        const auto now = phoneUrl();
+        if (now.isEmpty())
             return;
-        juce::SystemClipboard::copyTextToClipboard (url);
-        say ("Адрес скопирован: "_ru + url);
+        juce::SystemClipboard::copyTextToClipboard (now);
+        say ("Адрес скопирован: "_ru + now);
     };
     plusButton.setButtonText ("+");
     plusButton.setTooltip ("Поставить маркер: выделенные строки ложатся на таймлайн в текущий момент (F9)"_ru);
@@ -1308,7 +1426,7 @@ void LyricsPanel::paint (juce::Graphics& g)
     g.fillAll (Pal::window);
     g.setColour (Pal::textDim);
     g.setFont (juce::FontOptions (12.0f));
-    g.drawText (serverOk ? "Телефон: "_ru + url : "Страница для телефона не запущена (нет свободного порта)"_ru,
+    g.drawText (serverOk ? "Телефон: "_ru + phoneUrl() : "Страница для телефона не запущена (нет свободного порта)"_ru,
                 getLocalBounds().reduced (12, 0).removeFromTop (44).withTrimmedLeft (380), juce::Justification::centredRight, true);
 }
 
