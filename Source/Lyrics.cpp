@@ -244,12 +244,15 @@ html,body{margin:0;height:100%;background:#000;color:var(--text);font-family:"Se
 #ib{flex:none;width:40px;height:40px;border:0;border-radius:11px;background:var(--raise);color:var(--text);padding:0}
 #ib svg{width:22px;height:22px;fill:currentColor}
 #w{position:absolute;left:0;right:0;top:58px;bottom:84px}
-#t{position:absolute;left:0;right:0;top:0;bottom:0;padding:14px 16px 0;overflow:hidden;transition:opacity .15s}
-#t.all{overflow-y:auto;scrollbar-width:none}
+#t{position:absolute;left:0;right:0;top:0;bottom:0;padding:14px 16px 0;overflow-x:hidden;overflow-y:auto;scrollbar-width:none;touch-action:pan-y;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;transition:opacity .15s}
+#t::-webkit-scrollbar{display:none}
+#t.all{padding-bottom:140px}
 #t.out{opacity:0}
-.ln{white-space:pre;font-size:18px;line-height:23px;font-weight:700;color:var(--text);margin-top:17px;text-align:left}
+.ln{white-space:pre;font-size:20px;line-height:26px;font-weight:700;color:var(--text);margin-top:19px;text-align:left}
 .ln:first-child{margin-top:0}
 .ln.n{color:#5d5d62;font-weight:600}
+.ln.tg{color:var(--acc)}
+.ln.n.tg{color:#7a5412}
 .e{white-space:normal;color:var(--dim);font-weight:400;font-size:16px}
 #b{position:absolute;left:0;right:0;bottom:0;height:84px;display:flex;gap:8px;padding:12px;background:var(--panel);border-top:1px solid #2c2c2e}
 #b button{flex:1;border:0;border-radius:12px;background:var(--raise);color:var(--text);padding:0;display:flex;align-items:center;justify-content:center}
@@ -284,7 +287,7 @@ html,body{margin:0;height:100%;background:#000;color:var(--text);font-family:"Se
 </div>
 <script>
 // The page is a fixed 360 x 660 screen that is scaled to the phone, so it looks the same on every phone.
-// Text: 18 px bold, 23 px rows, 17 px between lines of the song, left aligned. The rows are already cut by TC.
+// Text: 20 px bold, 26 px rows, 19 px between lines of the song, left aligned. The rows are already cut by TC.
 var rev=-1,plRev=-1,lines=[],secs=[],cur="",lastS=null,K=new URLSearchParams(location.search).get("k")||"";
 var T=document.getElementById("t"),stage=document.getElementById("stage");
 function layout(){var s=Math.min(innerWidth/360,innerHeight/660);stage.style.transform="translate(-50%,-50%) scale("+s+")"}
@@ -293,7 +296,7 @@ function get(u){return fetch(u,{cache:"no-store"}).then(function(r){return r.jso
 function openPl(){document.getElementById("pl").classList.add("on")}
 function closePl(){document.getElementById("pl").classList.remove("on")}
 function shown(i){return i<lines.length&&lines[i].trim()!==""}
-function addLine(t,cls){var e=document.createElement("div");e.className="ln"+(cls?" "+cls:"");e.textContent=t;T.appendChild(e)}
+function addLine(t,cls){var e=document.createElement("div");var tag=/^\s*\[.*\]\s*$/.test(t);e.className="ln"+(cls?" "+cls:"")+(tag?" tg":"");e.textContent=t;T.appendChild(e)}
 function render(c,done){
   var key=c+"/"+done;if(key===cur)return;cur=key;
   var apply=function(){
@@ -305,7 +308,7 @@ function render(c,done){
     for(var k=secs[i][0];k<last;k++)if(shown(k))addLine(lines[k],c>=0?"":"n");
     for(var k=last;k<lines.length;k++)if(shown(k)){addLine(lines[k].split("\n")[0],"n");break}
     var els=T.querySelectorAll(".ln");
-    for(var j=0;j<els.length;j++){var w=els[j].scrollWidth;if(w>328)els[j].style.fontSize=(18*328/w)+"px"}
+    for(var j=0;j<els.length;j++){var w=els[j].scrollWidth;if(w>328)els[j].style.fontSize=(20*328/w)+"px"}
   };
   if(T.firstChild&&secs.length){T.classList.add("out");setTimeout(apply,120)}else apply();
 }
@@ -543,22 +546,16 @@ void LyricsServer::serve (juce::StreamingSocket& client)
 
 // ---------------------------------------------------------------- helpers
 
-// The phone screen is a fixed 360 x 660 page (see the phone page): 18 px bold text, 23 px rows,
-// 17 px between lines of the song. A block of the lyrics has to fit the text area together with the first row of what follows.
+// The phone screen is a fixed 360 x 660 page (see the phone page): 20 px bold text, 26 px rows,
+// 19 px between lines of the song. A block of the lyrics has to fit the text area together with the first row of what follows.
 namespace phoneScreen
 {
     constexpr float textWidth = 308.0f;   // 328 px of the page minus a reserve for the different fonts of the phones
-    constexpr float rowHeight = 23.0f, lineGap = 17.0f, areaHeight = 494.0f;
-
-    bool isTag (const juce::String& line)   // [Verse 1] and so on: not shown on the phone
-    {
-        const auto t = line.trim();
-        return t.length() > 1 && t.startsWith ("[") && t.endsWith ("]");
-    }
+    constexpr float rowHeight = 26.0f, lineGap = 19.0f, areaHeight = 494.0f;
 
     float measure (const juce::String& text)
     {
-        static const juce::Font font (juce::FontOptions ("Segoe UI", 18.0f, juce::Font::bold));
+        static const juce::Font font (juce::FontOptions ("Segoe UI", 20.0f, juce::Font::bold));
         juce::GlyphArrangement ga;
         ga.addLineOfText (font, text, 0.0f, 0.0f);
         return ga.getBoundingBox (0, -1, true).getWidth();
@@ -569,7 +566,7 @@ namespace phoneScreen
     {
         juce::StringArray out;
         const auto trimmed = line.trim();
-        if (trimmed.isEmpty() || isTag (trimmed))
+        if (trimmed.isEmpty())
             return out;
 
         const auto words = juce::StringArray::fromTokens (trimmed, " \t", "");
@@ -772,6 +769,7 @@ public:
         press = hitAt (e.getPosition());
         startY = e.y;
         applied = 0;
+        dragged = false;
         if (press.zone == Zone::Divider)
             return;
         if (press.zone == Zone::None)
@@ -791,6 +789,8 @@ public:
     {
         auto& sections = owner.data.sections;
         const int n = owner.lines.size();
+        if (e.getDistanceFromDragStart() > 3)
+            dragged = true;
         const auto before = sections.items;
         switch (press.zone)
         {
@@ -832,7 +832,15 @@ public:
         owner.sectionsChanged();
     }
 
-    void mouseUp (const juce::MouseEvent&) override { press = {}; }
+    void mouseUp (const juce::MouseEvent& e) override
+    {
+        // a click (no drag) on a brace goes to the start of its marker on the timeline
+        const bool onBrace = press.zone == Zone::BraceTop || press.zone == Zone::BraceBottom || press.zone == Zone::BraceBody;
+        if (onBrace && ! dragged && ! e.mods.isPopupMenu() && press.index >= 0 && press.index < owner.data.sections.size())
+            owner.seekSeconds (owner.data.sections.items[(size_t) press.index].t0 * owner.beatSeconds());
+        press = {};
+        dragged = false;
+    }
 
     void mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& w) override
     {
@@ -877,6 +885,7 @@ private:
     LyricsPanel& owner;
     Hit press;
     int startY = 0, applied = 0;
+    bool dragged = false;
 };
 
 // ---------------------------------------------------------------- the timeline
@@ -950,20 +959,25 @@ public:
             g.setColour (colour);
             g.strokePath (brace, juce::PathStrokeType (selected ? 3.0f : 2.0f));
 
-            juce::String label = juce::String (i + 1) + "  ";
-            for (int k = s.first; k < s.last && k < owner.lines.size(); ++k)
-                if (owner.lines[k].trim().isNotEmpty())
-                {
-                    label += owner.lines[k].trim();
-                    break;
-                }
-            label += "  (" + juce::String (s.last - s.first) + ")";
             {
+                // a small copy of the text of the block: the number and the lines
                 juce::Graphics::ScopedSaveState state (g);
                 g.reduceClipRegion (bar.toNearestInt().reduced (4, 0));
+                float y = bar.getY() + 2.0f;
                 g.setColour (Pal::text);
-                g.setFont (juce::FontOptions (13.0f));
-                g.drawText (label, bar.toNearestInt().reduced (6, 2), juce::Justification::topLeft, false);
+                g.setFont (juce::FontOptions (12.0f, juce::Font::bold));
+                g.drawText (juce::String (i + 1), (int) bar.getX() + 6, (int) y, 60, 14, juce::Justification::topLeft, false);
+                y += 14.0f;
+                g.setFont (juce::FontOptions (10.5f));
+                g.setColour (Pal::text.withAlpha (0.85f));
+                for (int k = s.first; k < s.last && k < owner.lines.size() && y + 11.0f <= bar.getBottom(); ++k)
+                {
+                    const auto t = owner.lines[k].trim();
+                    if (t.isEmpty())
+                        continue;
+                    g.drawText (t, (int) bar.getX() + 6, (int) y, (int) bar.getWidth() - 8, 12, juce::Justification::topLeft, false);
+                    y += 11.0f;
+                }
             }
 
             // two sections that touch move together: shown by a bright joint

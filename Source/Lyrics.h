@@ -136,7 +136,7 @@ private:
     juce::StringArray lines;
     std::vector<int> lineStarts;
     juce::StringArray wrapped;        // every line cut into the rows of the phone screen (joined with \n)
-    std::vector<int> rowCount;        // rows of every line on the phone screen (0: empty line or [tag])
+    std::vector<int> rowCount;        // rows of every line on the phone screen (0: empty line)
     LyricsServer server;
     bool serverOk = false;
     juce::String url;
