@@ -92,6 +92,7 @@ private:
     void switchToSequence (juce::String name, int indexInPlaylist);
     void stepSong (int delta);
     void refreshPlayerBar();
+    void createLyricsWindow();
     void showLyrics();                 // the lyrics window (T button)
     void syncLyrics();                 // shows the lyrics of the open song
     void preloadNeighbours();

@@ -41,12 +41,14 @@ public:
     ~LyricsServer() override;
 
     bool start();
+    void setKey (const juce::String& k) { key = k; }
+    std::function<void (const juce::String& command)> onCommand;   // called on the server thread
     int getPort() const { return port; }
     static juce::String findLocalAddress();      // the address of this PC in the local network
 
     // message thread
     void publishText (const juce::String& title, const juce::StringArray& lines);
-    void publishLive (double seconds, bool playing, int line);
+    void publishLive (double seconds, bool playing, int line, double bpm, int semitones);
 
 private:
     void run() override;
@@ -62,6 +64,9 @@ private:
     double livePos = 0.0;
     bool livePlaying = false;
     int liveLine = -1;
+    double liveBpm = 0.0;
+    int liveSemis = 0;
+    juce::String key;
 };
 
 // The window with the lyrics: big lines, the current one is lit; tap mode puts the marks while the song plays.
@@ -73,6 +78,7 @@ public:
 
     std::function<void()> onTogglePlay;
     std::function<void (double seconds)> onSeek;
+    std::function<void (const juce::String& command)> onRemote;   // a button of the phone page (message thread)
 
     void setSong (const juce::String& name, const juce::File& songFile);   // the open song changed
     void loadTextFile (const juce::File& f);
@@ -125,7 +131,7 @@ private:
 class LyricsWindow : public juce::DocumentWindow
 {
 public:
-    explicit LyricsWindow (Engine& e);
+    explicit LyricsWindow (Engine& e);   // starts hidden: the phone page works without the window
     void closeButtonPressed() override { setVisible (false); }
     LyricsPanel& getPanel() { return *panel; }
 

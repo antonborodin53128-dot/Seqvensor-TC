@@ -405,6 +405,7 @@ MainComponent::MainComponent()
     initialiseLibrary();
     bpmSlider.setValue (engine.getBpm(), juce::dontSendNotification);
     rebuildTracks();
+    createLyricsWindow();
     startTimerHz (30);
 }
 
@@ -2013,14 +2014,33 @@ void MainComponent::deleteProject()
                    });
 }
 
+void MainComponent::createLyricsWindow()
+{
+    lyricsWindow = std::make_unique<LyricsWindow> (engine);   // hidden until the T button is pressed; the phone page already works
+    auto& panel = lyricsWindow->getPanel();
+    panel.onTogglePlay = [this] { if (engine.isPlaying()) engine.stopAll(); else engine.playAll(); };
+    panel.onSeek = [this] (double seconds) { seekTimeline (seconds); };
+    panel.onRemote = [this] (const juce::String& command)
+    {
+        auto changeTempo = [this] (double delta)
+        {
+            bpmSlider.setValue (std::round (engine.getBpm() + delta), juce::sendNotification);   // limits and engine.setTempo are inside
+        };
+        if (command == "play")       { if (engine.isPlaying()) engine.stopAll(); else engine.playAll(); }
+        else if (command == "stop")  engine.stopAll();
+        else if (command == "next")  stepSong (1);
+        else if (command == "prev")  stepSong (-1);
+        else if (command == "bpm+")  changeTempo (1.0);
+        else if (command == "bpm-")  changeTempo (-1.0);
+        else if (command == "key+")  { engine.setTranspose (engine.getTranspose() + 1); updateKeyDisplay(); }
+        else if (command == "key-")  { engine.setTranspose (engine.getTranspose() - 1); updateKeyDisplay(); }
+    };
+}
+
 void MainComponent::showLyrics()
 {
     if (lyricsWindow == nullptr)
-    {
-        lyricsWindow = std::make_unique<LyricsWindow> (engine);
-        lyricsWindow->getPanel().onTogglePlay = [this] { if (engine.isPlaying()) engine.stopAll(); else engine.playAll(); };
-        lyricsWindow->getPanel().onSeek = [this] (double seconds) { seekTimeline (seconds); };
-    }
+        createLyricsWindow();
     syncLyrics();
     lyricsWindow->setVisible (true);
     lyricsWindow->toFront (true);

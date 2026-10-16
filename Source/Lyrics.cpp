@@ -232,7 +232,13 @@ static const char* phonePage = R"HTML(<!doctype html>
 <style>
 html,body{margin:0;background:#000;color:#f2f2f7;font-family:-apple-system,"Segoe UI",Roboto,sans-serif;-webkit-text-size-adjust:100%}
 #t{position:fixed;top:0;left:0;right:0;padding:10px 16px;background:rgba(17,17,17,.92);color:#98989f;font-size:15px;z-index:2;display:flex;justify-content:space-between}
-#w{padding:45vh 18px 55vh}
+#w{padding:45vh 18px 60vh}
+#b{position:fixed;left:0;right:0;bottom:0;padding:8px 10px calc(8px + env(safe-area-inset-bottom));background:rgba(17,17,17,.96);display:flex;flex-wrap:wrap;gap:8px;z-index:2}
+#b button{flex:1;min-width:20%;font-size:22px;padding:14px 0;border:0;border-radius:12px;background:#2e2e2e;color:#f2f2f7}
+#b button:active{background:#ffa81f;color:#000}
+#b .r{flex-basis:100%;display:flex;gap:8px}
+#b .r button{font-size:18px;padding:10px 0}
+#b .r span{flex:1.4;text-align:center;align-self:center;color:#98989f;font-size:15px}
 .l{font-size:7.2vw;line-height:1.28;color:#d6d6db;padding:.18em 0;min-height:.6em;transition:color .25s}
 .l.p{color:#5a5a60}
 .l.c{color:#ffa81f;font-weight:700}
@@ -240,8 +246,14 @@ html,body{margin:0;background:#000;color:#f2f2f7;font-family:-apple-system,"Sego
 </style></head><body>
 <div id="t"><span id="n">TC</span><span id="s"></span></div>
 <div id="w"></div>
+<div id="b">
+<button onclick="cmd('prev')">&#9198;</button><button id="pp" onclick="cmd('play')">&#9654;</button><button onclick="cmd('next')">&#9197;</button>
+<div class="r"><button onclick="cmd('bpm-')">BPM &minus;</button><span id="bp"></span><button onclick="cmd('bpm+')">BPM +</button></div>
+<div class="r"><button onclick="cmd('key-')">KEY &minus;</button><span id="kp"></span><button onclick="cmd('key+')">KEY +</button></div>
+</div>
 <script>
-var rev=-1,els=[],cur=-2,manual=0,msg="";
+var rev=-1,els=[],cur=-2,manual=0,K=new URLSearchParams(location.search).get("k")||"";
+function cmd(c){fetch("/cmd?do="+encodeURIComponent(c)+"&k="+encodeURIComponent(K),{cache:"no-store"}).catch(function(){})}
 function get(u){return fetch(u,{cache:"no-store"}).then(function(r){return r.json()})}
 function build(d){
   var w=document.getElementById("w");w.innerHTML="";els=[];cur=-2;
@@ -320,12 +332,14 @@ void LyricsServer::publishText (const juce::String& title, const juce::StringArr
     ++revision;
 }
 
-void LyricsServer::publishLive (double seconds, bool playing, int line)
+void LyricsServer::publishLive (double seconds, bool playing, int line, double bpm, int semitones)
 {
     const juce::ScopedLock sl (lock);
     livePos = seconds;
     livePlaying = playing;
     liveLine = line;
+    liveBpm = bpm;
+    liveSemis = semitones;
 }
 
 void LyricsServer::run()
@@ -393,7 +407,8 @@ void LyricsServer::serve (juce::StreamingSocket& client)
         {
             const juce::ScopedLock sl (lock);
             json = "{\"rev\":" + juce::String (revision) + ",\"pos\":" + juce::String (livePos, 2)
-                 + ",\"playing\":" + (livePlaying ? "true" : "false") + ",\"cur\":" + juce::String (liveLine) + "}";
+                 + ",\"playing\":" + (livePlaying ? "true" : "false") + ",\"cur\":" + juce::String (liveLine)
+                 + ",\"bpm\":" + juce::String (liveBpm, 2) + ",\"semis\":" + juce::String (liveSemis) + "}";
         }
         reply (client, "application/json", json);
     }
@@ -405,6 +420,22 @@ void LyricsServer::serve (juce::StreamingSocket& client)
             json = lyricsJson.isEmpty() ? juce::String ("{\"title\":\"TC\",\"lines\":[],\"empty\":\"\"}") : lyricsJson;
         }
         reply (client, "application/json", json);
+    }
+    else if (path == "/cmd")
+    {
+        const auto query = firstLine.fromFirstOccurrenceOf ("?", false, false).upToFirstOccurrenceOf (" ", false, false);
+        juce::String command, given;
+        for (auto& part : juce::StringArray::fromTokens (query, "&", {}))
+        {
+            if (part.startsWith ("do="))
+                command = juce::URL::removeEscapeChars (part.substring (3));
+            else if (part.startsWith ("k="))
+                given = juce::URL::removeEscapeChars (part.substring (2));
+        }
+        const bool allowed = key.isNotEmpty() && given == key && command.isNotEmpty();
+        if (allowed && onCommand)
+            onCommand (command);
+        reply (client, "text/plain", allowed ? "ok" : "no");
     }
     else if (path == "/" || path == "/index.html")
         reply (client, "text/html", juce::String::fromUTF8 (phonePage));
@@ -453,9 +484,24 @@ LyricsPanel::LyricsPanel (Engine& e) : engine (e)
         addAndMakeVisible (b);
     }
 
+    // the phone must know this key to press the buttons (kept between runs, so a bookmark keeps working)
+    auto keyFile = engine.getDataDirectory().getChildFile ("phone-key.txt");
+    auto key = keyFile.loadFileAsString().trim();
+    if (key.length() < 4)
+    {
+        key = juce::String (juce::Random::getSystemRandom().nextInt (900000) + 100000);
+        keyFile.replaceWithText (key);
+    }
+    server.setKey (key);
+    juce::Component::SafePointer<LyricsPanel> safeThis (this);
+    server.onCommand = [safeThis] (const juce::String& command)
+    {
+        juce::MessageManager::callAsync ([safeThis, command] { if (safeThis != nullptr && safeThis->onRemote) safeThis->onRemote (command); });
+    };
+
     serverOk = server.start();
     if (serverOk)
-        url = "http://" + LyricsServer::findLocalAddress() + ":" + juce::String (server.getPort());
+        url = "http://" + LyricsServer::findLocalAddress() + ":" + juce::String (server.getPort()) + "/?k=" + key;
 
     setWantsKeyboardFocus (true);
     startTimerHz (30);
@@ -700,7 +746,7 @@ void LyricsPanel::timerCallback()
     }
 
     if (serverOk)
-        server.publishLive (clock, engine.isPlaying(), line);
+        server.publishLive (clock, engine.isPlaying(), line, engine.getBpm(), engine.getTranspose());
 
     if (juce::Time::currentTimeMillis() >= manualUntil)
     {
@@ -821,5 +867,4 @@ LyricsWindow::LyricsWindow (Engine& e)
     setResizable (true, true);
     setResizeLimits (340, 420, 1400, 1800);
     centreWithSize (520, 760);
-    setVisible (true);
 }
