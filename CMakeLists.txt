@@ -69,6 +69,7 @@ target_sources(TC PRIVATE
     Source/LiveStretch.cpp
     Source/KeyDetect.cpp
     Source/LiveKey.cpp
+    Source/Lyrics.cpp
     Source/Builtin.cpp)
 
 if(WIN32)

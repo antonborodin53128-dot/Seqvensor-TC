@@ -7,6 +7,7 @@
 #include "Style.h"
 #include "PlayerBar.h"
 #include "Library.h"
+#include "Lyrics.h"
 
 class PluginWindow : public juce::DocumentWindow
 {
@@ -91,6 +92,8 @@ private:
     void switchToSequence (juce::String name, int indexInPlaylist);
     void stepSong (int delta);
     void refreshPlayerBar();
+    void showLyrics();                 // the lyrics window (T button)
+    void syncLyrics();                 // shows the lyrics of the open song
     void preloadNeighbours();
     void showAddTrackMenu();
     void showDeleteMenu();
@@ -179,6 +182,7 @@ private:
     juce::Label emptyHint;
 
     juce::OwnedArray<PluginWindow> pluginWindows;
+    std::unique_ptr<LyricsWindow> lyricsWindow;
     std::unique_ptr<juce::FileChooser> chooser;
     std::unique_ptr<juce::PropertiesFile> pluginScanProps;
     juce::Array<juce::int64> tapTimes;

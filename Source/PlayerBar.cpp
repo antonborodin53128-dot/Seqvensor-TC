@@ -21,6 +21,11 @@ PlayerBar::PlayerBar() : list ("songs", nullptr)
     saveButton.onClick = [this] { if (cb.save) cb.save (tab); };
     trashButton.onClick = [this] { if (cb.remove) cb.remove (tab); };
     plusButton.onClick = [this] { if (cb.add) cb.add (tab); };
+    lyricsButton.setButtonText (juce::String (juce::CharPointer_UTF8 ("T\xe2\x89\xa1")));
+    lyricsButton.setTooltip ("Текст песни"_ru);
+    lyricsButton.setWantsKeyboardFocus (false);
+    lyricsButton.onClick = [this] { if (cb.lyrics) cb.lyrics(); };
+    addAndMakeVisible (lyricsButton);
     prevButton.setTooltip ("Предыдущий трек"_ru);
     prevButton.onClick = [this] { if (cb.previous) cb.previous(); };
     nextButton.setTooltip ("Следующий трек"_ru);
@@ -121,6 +126,7 @@ void PlayerBar::resized()
     nextButton.setBounds (r.removeFromRight (bigW));
     r.removeFromRight (gap);
     plateRect = r;
+    lyricsButton.setBounds (plateRect.getRight() - 56, plateRect.getBottom() - 38, 44, 28);
 
     // tab row: [Seq] [Playlist] [Tracks] ............ [save] [delete] [add]
     auto tabsRow = leftBlock.withHeight (30);

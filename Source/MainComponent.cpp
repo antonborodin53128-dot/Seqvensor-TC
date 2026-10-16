@@ -361,6 +361,7 @@ MainComponent::MainComponent()
     addAndMakeVisible (playerBar);
     playerBar.cb.heightChanged = [this] { resized(); repaint(); };
     playerBar.cb.save = [this] (PlayerBar::Tab tab) { saveSelectionToFile (tab); };
+    playerBar.cb.lyrics = [this] { showLyrics(); };
     playerBar.cb.previous = [this] { stepSong (-1); };
     playerBar.cb.next = [this] { stepSong (1); };
     playerBar.cb.rowMoved = [this] (PlayerBar::Tab tab, int from, int to) { onPlayerRowMoved (tab, from, to); };
@@ -414,6 +415,7 @@ MainComponent::~MainComponent()
     engine.knownPlugins.removeChangeListener (this);
     engine.onTracksChanged = nullptr;
     engine.onAnalysisDone = nullptr;
+    lyricsWindow.reset();
     pluginWindows.clear();
     trackComponents.clear();
     engine.shutdown();
@@ -1707,6 +1709,7 @@ void MainComponent::keepOnTop()
 void MainComponent::timerCallback()
 {
     keepOnTop();
+    syncLyrics();
     for (auto* t : trackComponents)
         t->updateLive();
 
@@ -1965,6 +1968,7 @@ void MainComponent::deleteSelectedRows (PlayerBar::Tab tab)
             playlist.items.removeString (d);
             const auto file = library.sequenceFile (d);
             engine.discardSequences (file);   // also when it is the open one: nothing is saved back
+            LyricsData::remove (file);
             file.deleteFile();
         }
 
@@ -2007,6 +2011,27 @@ void MainComponent::deleteProject()
                        library.deleteProject (cur);
                        refreshPlayerBar();
                    });
+}
+
+void MainComponent::showLyrics()
+{
+    if (lyricsWindow == nullptr)
+    {
+        lyricsWindow = std::make_unique<LyricsWindow> (engine);
+        lyricsWindow->getPanel().onTogglePlay = [this] { if (engine.isPlaying()) engine.stopAll(); else engine.playAll(); };
+        lyricsWindow->getPanel().onSeek = [this] (double seconds) { seekTimeline (seconds); };
+    }
+    syncLyrics();
+    lyricsWindow->setVisible (true);
+    lyricsWindow->toFront (true);
+}
+
+void MainComponent::syncLyrics()
+{
+    if (lyricsWindow == nullptr)
+        return;
+    auto seq = engine.getActiveSequence();
+    lyricsWindow->getPanel().setSong (seq != nullptr ? seq->name : juce::String(), seq != nullptr ? seq->file : juce::File());
 }
 
 void MainComponent::refreshPlayerBar()
@@ -2339,6 +2364,7 @@ void MainComponent::renameSequence()
                  const auto from = s->file, to = library.sequenceFile (newName);
                  if (! from.moveFileTo (to))
                      return;
+                 LyricsData::rename (from, to);
 
                  const auto oldName = s->name;
                  engine.renameSequenceFile (from, to);
@@ -2434,6 +2460,7 @@ void MainComponent::showDeleteMenu()
 
                                                       safe->switchToSequence (next, safe->playlist.items.indexOf (next));
                                                       safe->engine.forgetSequence (file);
+                                                      LyricsData::remove (file);
                                                       file.deleteFile();
                                                       safe->engine.pruneAnalysisCacheSoon();
                                                       if (others.isEmpty())

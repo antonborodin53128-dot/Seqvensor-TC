@@ -23,6 +23,7 @@ public:
         std::function<void (Tab)> add, remove;
         std::function<void (Tab)> save;
         std::function<void()> previous, next, heightChanged;
+        std::function<void()> lyrics;                           // the lyrics button: open the lyrics window
         std::function<void (Tab, int from, int to)> rowMoved;   // a row was dragged to a new place
     };
 
@@ -91,6 +92,7 @@ private:
     juce::String currentTitle, nextTitle, counterText;
     juce::Rectangle<int> leftBlock, plateRect;
 
+    juce::TextButton lyricsButton;
     juce::ListBox list;
     IconButton saveButton { IconButton::Icon::Save }, trashButton { IconButton::Icon::Trash }, plusButton { IconButton::Icon::Plus };
     IconButton prevButton { IconButton::Icon::Prev }, nextButton { IconButton::Icon::Next };
