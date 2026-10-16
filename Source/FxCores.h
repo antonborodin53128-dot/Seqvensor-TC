@@ -21,17 +21,18 @@ namespace tcfx
         double beats;   // length in quarter notes
     };
 
-    constexpr int kDivisions = 17;
+    constexpr int kDivisions = 15;
 
-    // sorted by length: triplet (T) = 2/3 of the note, dotted (.) = 3/2 of the note
+    // grouped by note: triplet (T) = 2/3 of the note, straight, dotted (.) = 3/2 of the note
     inline const Division* divisions()
     {
         static const Division d[kDivisions] = {
-            { "1/64T", 0.0625 * 2.0 / 3.0 }, { "1/32T", 0.125 * 2.0 / 3.0 }, { "1/32", 0.125 },  { "1/16T", 0.25 * 2.0 / 3.0 },
-            { "1/16", 0.25 },                { "1/8T", 0.5 * 2.0 / 3.0 },    { "1/16.", 0.375 }, { "1/8", 0.5 },
-            { "1/4T", 2.0 / 3.0 },           { "1/8.", 0.75 },               { "1/4", 1.0 },     { "1/2T", 2.0 * 2.0 / 3.0 },
-            { "1/4.", 1.5 },                 { "1/2", 2.0 },                 { "1/2.", 3.0 },    { "1 Bar", 4.0 },
-            { "2 Bar", 8.0 }
+            { "1/32", 0.125 },
+            { "1/16T", 0.25 * 2.0 / 3.0 },  { "1/16", 0.25 },  { "1/16.", 0.375 },
+            { "1/8T", 0.5 * 2.0 / 3.0 },    { "1/8", 0.5 },    { "1/8.", 0.75 },
+            { "1/4T", 2.0 / 3.0 },          { "1/4", 1.0 },    { "1/4.", 1.5 },
+            { "1/2T", 4.0 / 3.0 },          { "1/2", 2.0 },    { "1/2.", 3.0 },
+            { "1 Bar", 4.0 },               { "2 Bar", 8.0 }
         };
         return d;
     }

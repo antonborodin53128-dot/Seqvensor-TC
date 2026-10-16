@@ -2233,7 +2233,7 @@ namespace
             std::vector<juce::String> names;
             for (int i = 0; i < tcfx::kDivisions; ++i)
                 names.push_back (tcfx::divisions()[i].name);
-            delayDiv = addChoice ("dlt", "Delay time", names, 7);
+            delayDiv = addChoice ("dlt", "Delay time", names, 5);
             delayFb = addLinear ("dlf", "Delay feedback", 0.0f, 95.0f, 35.0f);
             delayMix = addLinear ("dlm", "Delay mix", 0.0f, 100.0f, 30.0f);
             delayTone = addLinear ("dlk", "Delay tone", 0.0f, 100.0f, 60.0f);
@@ -2510,13 +2510,13 @@ namespace
             // 3 Solo: high gain, drive in front of it, delay and reverb
             put (2, model, 4); put (2, cab, 3); put (2, gain, 65); put (2, mid, 60);
             put (2, driveOn, 1); put (2, driveAmt, 30); put (2, driveTone, 60);
-            put (2, delayOn, 1); put (2, delayDiv, 9); put (2, delayFb, 35); put (2, delayMix, 28);
+            put (2, delayOn, 1); put (2, delayDiv, 6); put (2, delayFb, 35); put (2, delayMix, 28);
             put (2, reverbOn, 1); put (2, reverbMix, 20);
 
             // 4 Ambient: clean with chorus, a long delay and a big hall
             put (3, model, 1); put (3, cab, 2); put (3, gain, 30);
             put (3, chorusOn, 1); put (3, chorusRate, 0.6f); put (3, chorusDepth, 55); put (3, chorusMix, 45);
-            put (3, delayOn, 1); put (3, delayDiv, 12); put (3, delayFb, 50); put (3, delayMix, 40);
+            put (3, delayOn, 1); put (3, delayDiv, 9); put (3, delayFb, 50); put (3, delayMix, 40);
             put (3, reverbOn, 1); put (3, reverbDecay, 4.5f); put (3, reverbMix, 35);
         }
 
@@ -2944,8 +2944,8 @@ namespace
             std::vector<juce::String> names;
             for (int i = 0; i < tcfx::kDivisions; ++i)
                 names.push_back (tcfx::divisions()[i].name);
-            divL = choice ("tl", "Delay L", names, 10);
-            divR = choice ("tr", "Delay R", names, 10);
+            divL = choice ("tl", "Delay L", names, 8);
+            divR = choice ("tr", "Delay R", names, 8);
             msL = addFloat ("ml", "Delay L ms", 1.0f, 3000.0f, 400.0f, 0.15f);
             msR = addFloat ("mr", "Delay R ms", 1.0f, 3000.0f, 400.0f, 0.15f);
             mode = choice ("md", "Mode", { "Stereo", "Ping Pong", "Dual" }, 0);
@@ -3185,25 +3185,33 @@ namespace
             place (kFb, { 614, 40, 168, 190 });
             place (kWet, { 828, 36, 96, 100 });
             place (kOut, { 828, 146, 96, 100 });
-            place (kR, { 118, 252, 118, 130 });
-            place (kRms, { 118, 252, 118, 130 });
+            place (kR, { 143, 252, 118, 130 });
+            place (kRms, { 143, 252, 118, 130 });
             place (kBpm, { 24, 164, 84, 100 });
-            place (kDepth, { 340, 272, 100, 116 });
-            place (kRate, { 440, 272, 100, 116 });
+            place (kDepth, { 348, 272, 100, 116 });
+            place (kRate, { 448, 272, 100, 116 });
             place (kHp, { 590, 272, 110, 116 });
             place (kLp, { 740, 272, 110, 116 });
             btnLink.setBounds (706, 310, 28, 40);
             juce::ignoreUnused (msMode);
 
             const auto lcd = lcdRect();
-            btnPhL.setBounds (lcd.getX(), lcd.getBottom() + 8, 40, 26);
-            btnStereo.setBounds (lcd.getX() + 46, lcd.getBottom() + 8, 70, 26);
-            btnPing.setBounds (lcd.getX() + 120, lcd.getBottom() + 8, 84, 26);
-            btnDual.setBounds (lcd.getX() + 208, lcd.getBottom() + 8, 52, 26);
-            btnPhR.setBounds (lcd.getRight() - 36, lcd.getBottom() + 8, 36, 26);
-            btnBpm.setBounds (lcd.getX(), lcd.getBottom() + 44, 92, 26);
-            btnHost.setBounds (lcd.getX() + 98, lcd.getBottom() + 44, 92, 26);
-            btnMs.setBounds (lcd.getX() + 196, lcd.getBottom() + 44, 92, 26);
+            {   // the two rows of buttons fill the width of the display evenly
+                const int widths1[5] = { 34, 66, 80, 50, 34 };
+                const int gap = 4;
+                int x = lcd.getX();
+                juce::TextButton* row1[5] = { &btnPhL, &btnStereo, &btnPing, &btnDual, &btnPhR };
+                for (int i = 0; i < 5; ++i)
+                {
+                    const int w = i == 4 ? lcd.getRight() - x : widths1[i];
+                    row1[i]->setBounds (x, lcd.getBottom() + 8, w, 26);
+                    x += w + gap;
+                }
+                const int w3 = (lcd.getWidth() - 2 * 6) / 3;
+                btnBpm.setBounds (lcd.getX(), lcd.getBottom() + 44, w3, 26);
+                btnHost.setBounds (lcd.getX() + w3 + 6, lcd.getBottom() + 44, w3, 26);
+                btnMs.setBounds (lcd.getRight() - w3, lcd.getBottom() + 44, w3, 26);
+            }
             updateVisibility();
         }
 
@@ -3701,11 +3709,11 @@ namespace
             const bool sharp = target >= 0 && voiced && juce::String (tunekeys::noteNames[target]).contains ("#");
             g.setColour (voiced ? juce::Colours::white : juce::Colour (0xff4a555c));
             g.setFont (juce::FontOptions (104.0f, juce::Font::plain));
-            g.drawText (letter, 190, 74, 180, 120, juce::Justification::centred);
+            g.drawText (letter, 219, 74, 180, 120, juce::Justification::centred);
             if (sharp)
             {
                 g.setFont (juce::FontOptions (40.0f));
-                g.drawText (juce::String::fromUTF8 ("\xE2\x99\xAF"), 330, 78, 50, 50, juce::Justification::centred);
+                g.drawText (juce::String::fromUTF8 ("\xE2\x99\xAF"), 359, 78, 50, 50, juce::Justification::centred);
             }
 
             // cents bar
@@ -3787,22 +3795,22 @@ namespace
             rangeBtn.setBounds (260, 36, 130, 28);
             keyBtn.setBounds (404, 36, 150, 28);
             followBtn.setBounds (404, 68, 150, 24);
-            detuneS.setBounds (40, 484, 110, 28);
-            modeLL.setBounds (240, 484, 110, 26);
-            modeHQ.setBounds (354, 484, 60, 26);
+            detuneS.setBounds (122, 484, 110, 28);
+            modeLL.setBounds (322, 484, 110, 26);
+            modeHQ.setBounds (436, 484, 60, 26);
 
             auto r = rightPanel();
-            rtS.setBounds (r.getX() + 60, 70, 170, 170);
-            huS.setBounds (r.getX() + 28, 296, 84, 84);
-            fxS.setBounds (r.getX() + 130, 296, 84, 84);
+            rtS.setBounds (r.getX() + 30, 70, 170, 170);
+            huS.setBounds (r.getX() + 22, 296, 84, 84);
+            fxS.setBounds (r.getX() + 124, 296, 84, 84);
             const auto hb = harmonyBlock();
             voS.setBounds (hb.getX() + 6, hb.getY() + 40, 64, 78);
             spS.setBounds (hb.getX() + 75, hb.getY() + 40, 64, 78);
             syS.setBounds (hb.getX() + 144, hb.getY() + 40, 64, 78);
             for (int k = 0; k < 4; ++k)
                 harmBtn[k].setBounds (hb.getX() + 8 + (k % 2) * 101, hb.getY() + 126 + (k / 2) * 30, 97, 26);
-            styleModern.setBounds (r.getX() + 20, 250, 98, 26);
-            styleClassic.setBounds (r.getX() + 126, 250, 98, 26);
+            styleModern.setBounds (r.getX() + 13, 250, 98, 26);
+            styleClassic.setBounds (r.getX() + 119, 250, 98, 26);
         }
 
         void mouseDown (const juce::MouseEvent& e) override
@@ -3824,12 +3832,12 @@ namespace
     private:
         juce::Rectangle<int> leftPanel() const { return { 14, 14, 590, getHeight() - 28 }; }
         juce::Rectangle<int> rightPanel() const { return { 616, 14, 230, getHeight() - 28 }; }
-        juce::Rectangle<int> meterRect() const { return { 44, 214, 520, 30 }; }
+        juce::Rectangle<int> meterRect() const { return { 49, 214, 520, 30 }; }
         juce::Rectangle<float> keyRect (int i) const
         {
             // white keys C D E F G A B on the lower row, black keys between them on the upper row
             static const int white[7] = { 0, 2, 4, 5, 7, 9, 11 };
-            const float w = 62.0f, h = 62.0f, gap = 8.0f, x0 = 62.0f;
+            const float w = 62.0f, h = 62.0f, gap = 8.0f, x0 = 68.0f;
             for (int k = 0; k < 7; ++k)
                 if (white[k] == i)
                     return { x0 + (float) k * (w + gap), 372.0f - 0.0f, w, h - 0.0f };
@@ -3840,7 +3848,7 @@ namespace
                     return { x0 + pos[k] * (w + gap) + 2.0f, 304.0f, 54.0f, 54.0f };
             return {};
         }
-        juce::Rectangle<float> resetRect() const { return { 540.0f, 284.0f, 24.0f, 22.0f }; }
+        juce::Rectangle<float> resetRect() const { return { 545.0f, 284.0f, 24.0f, 22.0f }; }
         juce::Rectangle<int> harmonyBlock() const { return { rightPanel().getX() + 8, 392, rightPanel().getWidth() - 16, getHeight() - 28 - 392 + 4 }; }
 
         void knob (juce::Slider& s, const juce::String& name, juce::RangedAudioParameter& prm, std::unique_ptr<juce::SliderParameterAttachment>& att, juce::Colour c, int)

@@ -29,7 +29,7 @@ namespace tcboard
         float compSens = 0.5f, compLevelDb = 0.0f;                           // 0..1, dB
         float eqDb[8] = {};                                                  // dB per band
         float chorusRate = 0.8f, chorusDepth = 0.5f, chorusMix = 0.5f;       // Hz, 0..1, 0..1
-        int delayDiv = 7;                                                    // index in tcfx::divisions()
+        int delayDiv = 5;                                                    // index in tcfx::divisions()
         float delayFeedback = 0.35f, delayMix = 0.3f, delayTone = 0.6f;      // 0..0.95, 0..1, 0..1
         int reverbType = 0;                                                  // 0 Hall, 1 Plate, 2 Room
         float reverbDecay = 2.2f, reverbMix = 0.25f, reverbTone = 0.5f;      // s, 0..1, 0..1
