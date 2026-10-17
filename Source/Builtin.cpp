@@ -2529,16 +2529,13 @@ namespace
                 aModel = dModel; aCab = dCab; aLoop = dLoop;
                 haveApplied = true;
             }
-            float g0 = 1.0f, g1 = 1.0f;
-            if (duckPhase == 2)
-            {
-                g0 = 0.0f;
-                duckPhase = 0;
-            }
-            else if (aModel != dModel || aCab != dCab || aLoop != dLoop)
-            {
-                g1 = 0.0f;
+            if (duckPhase == 0 && (aModel != dModel || aCab != dCab || aLoop != dLoop))
                 duckPhase = 1;
+            if (duckPhase == 1 && duckGain <= 0.0f)
+            {
+                aModel = dModel; aCab = dCab; aLoop = dLoop;
+                board.resetAmp();   // silent now: the old model's filter and clipper states must not leak into the new one
+                duckPhase = 2;
             }
 
             tcamp::Params ap;
@@ -2569,17 +2566,27 @@ namespace
 
             board.process (buf.getWritePointer (0), nch > 1 ? buf.getWritePointer (1) : nullptr, n, pd, bpm);
 
-            if (g0 != 1.0f || g1 != 1.0f)
+            if (duckPhase != 0)
+            {
+                const float step = (float) (1.0 / (0.020 * sr));
+                const float start = duckGain;
                 for (int c = 0; c < nch; ++c)
                 {
                     auto* d = buf.getWritePointer (c);
+                    float g = start;
                     for (int i = 0; i < n; ++i)
-                        d[i] *= g0 + (g1 - g0) * (float) i / (float) n;
+                    {
+                        if (duckPhase == 1)
+                            g = std::max (0.0f, g - step);
+                        else
+                            g = std::min (1.0f, g + step);
+                        d[i] *= g;
+                    }
+                    if (c == nch - 1)
+                        duckGain = g;
                 }
-            if (duckPhase == 1)
-            {
-                aModel = dModel; aCab = dCab; aLoop = dLoop;
-                duckPhase = 2;
+                if (duckPhase == 2 && duckGain >= 1.0f)
+                    duckPhase = 0;
             }
         }
 
@@ -2599,6 +2606,7 @@ namespace
             firstBlock = true;
             haveApplied = false;
             duckPhase = 0;
+            duckGain = 1.0f;
         }
 
     private:
@@ -2694,6 +2702,7 @@ namespace
         std::vector<float> sceneVal[kScenes];
         juce::String sceneName[kScenes];
         juce::String guitarName;
+        float duckGain = 1.0f;
         int sceneParamCount = 0, active = 0, duckPhase = 0, aModel = 0, aCab = 0;
         bool aLoop = false, haveApplied = false, firstBlock = true;
         std::atomic<bool> loadingScene { false }, loadingState { false };

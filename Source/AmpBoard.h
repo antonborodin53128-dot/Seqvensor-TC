@@ -77,6 +77,12 @@ namespace tcboard
             haveAmp = false;
         }
 
+        void resetAmp()
+        {
+            for (auto& c : amp)
+                c.reset();
+        }
+
         // rate: block rate parameters of the amp (changed only when something changed)
         void setAmp (const tcamp::Params& p)
         {
