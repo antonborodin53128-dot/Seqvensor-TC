@@ -18,12 +18,17 @@ public:
     static constexpr int barHeight = 34;
 
     PluginFrame (juce::AudioProcessorEditor* editorToOwn, std::function<bool()> isBypassed, std::function<void()> toggleBypass)
-        : editor (editorToOwn), bypassed (std::move (isBypassed)), toggle (std::move (toggleBypass)),
-          power (IconButton::Icon::Power)
+        : editor (editorToOwn), bypassed (std::move (isBypassed)), toggle (std::move (toggleBypass))
     {
         addAndMakeVisible (editor.get());
         editor->addComponentListener (this);
+        power.setButtonText ("ON");
         power.setTooltip ("Включить / выключить плагин"_ru);
+        power.setWantsKeyboardFocus (false);
+        power.setColour (juce::TextButton::buttonColourId, Pal::sunken);
+        power.setColour (juce::TextButton::buttonOnColourId, Pal::accent);
+        power.setColour (juce::TextButton::textColourOffId, Pal::textDim);
+        power.setColour (juce::TextButton::textColourOnId, Pal::onAccent);
         power.onClick = [this] { if (toggle) toggle(); refreshState(); };
         addAndMakeVisible (power);
         refreshState();
@@ -38,12 +43,12 @@ public:
         g.fillAll (Pal::surface);
         g.setColour (on ? Pal::text : Pal::textDim);
         g.setFont (juce::FontOptions (14.0f, juce::Font::bold));
-        g.drawText (on ? "Включён"_ru : "Выключен (обход)"_ru, 52, 0, getWidth() - 60, barHeight, juce::Justification::centredLeft);
+        g.drawText (on ? "Включён"_ru : "Выключен"_ru, 58, 0, getWidth() - 60, barHeight, juce::Justification::centredLeft);
     }
 
     void resized() override
     {
-        power.setBounds (10, 4, 34, barHeight - 8);
+        power.setBounds (10, 5, 40, barHeight - 10);
         editor->setTopLeftPosition (0, barHeight);
         if (editor->getWidth() != getWidth() || editor->getHeight() != getHeight() - barHeight)
             editor->setSize (getWidth(), getHeight() - barHeight);
@@ -65,13 +70,13 @@ private:
             on = now;
             repaint();
         }
-        power.setActive (on);
+        power.setToggleState (on, juce::dontSendNotification);
     }
 
     std::unique_ptr<juce::AudioProcessorEditor> editor;
     std::function<bool()> bypassed;
     std::function<void()> toggle;
-    IconButton power;
+    juce::TextButton power;
     bool on = true;
 };
 

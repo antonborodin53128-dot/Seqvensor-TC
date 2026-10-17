@@ -216,10 +216,29 @@ private:
 class LevelMeter : public juce::Component
 {
 public:
-    void setLevels (float l, float r)
+    // peak: instantaneous peak of the last interval; rms: its RMS. The bar shows the loudness (VU-like, smoothed);
+    // a thin line shows the peak and holds it for a moment.
+    void setLevels (float peakL, float peakR, float rmsL, float rmsR)
     {
-        left = juce::jmax (l, left * 0.88f);
-        right = juce::jmax (r, right * 0.88f);
+        const double now = juce::Time::getMillisecondCounterHiRes();
+        const float dt = lastTime > 0.0 ? (float) juce::jlimit (1.0, 200.0, now - lastTime) : 33.0f;
+        lastTime = now;
+        const float attack = 1.0f - std::exp (-dt / 40.0f), release = 1.0f - std::exp (-dt / 300.0f);
+        auto follow = [&] (float& shown, float in) { shown += (in - shown) * (in > shown ? attack : release); };
+        follow (barL, rmsL * 1.4142f);   // +3 dB: a full-scale sine reads 0 dB
+        follow (barR, rmsR * 1.4142f);
+        auto hold = [&] (float& h, double& at, float in)
+        {
+            if (in >= h)
+            {
+                h = in;
+                at = now;
+            }
+            else if (now - at > 1200.0)   // held for 1.2 s, then it falls
+                h = juce::jmax (in, h * std::exp (-dt / 250.0f));
+        };
+        hold (holdL, holdAtL, peakL);
+        hold (holdR, holdAtR, peakR);
         repaint();
     }
 
@@ -233,21 +252,28 @@ public:
         const float gap = 2.0f;
         const float w = (inner.getWidth() - gap) / 2.0f;
 
-        auto drawBar = [&g, &inner] (float x, float width, float level)
+        auto norm = [] (float level) { return juce::jlimit (0.0f, 1.0f, (juce::Decibels::gainToDecibels (level, -48.0f) + 48.0f) / 48.0f); };
+        auto drawBar = [&] (float x, float width, float level, float peak)
         {
-            const float db = juce::Decibels::gainToDecibels (level, -60.0f);
-            const float norm = juce::jlimit (0.0f, 1.0f, (db + 60.0f) / 60.0f);
-            const float h = inner.getHeight() * norm;
-            g.setColour (db > -1.0f ? Pal::red : db > -12.0f ? Pal::yellow : Pal::green);
+            const float db = juce::Decibels::gainToDecibels (level, -48.0f);
+            const float h = inner.getHeight() * norm (level);
+            g.setColour (db > -3.0f ? Pal::red : db > -12.0f ? Pal::yellow : Pal::green);
             g.fillRoundedRectangle (x, inner.getBottom() - h, width, h, 1.5f);
+            if (peak > 0.0005f)
+            {
+                const float py = inner.getBottom() - inner.getHeight() * norm (peak);
+                g.setColour (juce::Decibels::gainToDecibels (peak, -48.0f) > -1.0f ? Pal::red : Pal::text);
+                g.fillRect (x, py, width, 1.5f);
+            }
         };
 
-        drawBar (inner.getX(), w, left);
-        drawBar (inner.getX() + w + gap, w, right);
+        drawBar (inner.getX(), w, barL, holdL);
+        drawBar (inner.getX() + w + gap, w, barR, holdR);
     }
 
 private:
-    float left = 0.0f, right = 0.0f;
+    float barL = 0.0f, barR = 0.0f, holdL = 0.0f, holdR = 0.0f;
+    double holdAtL = 0.0, holdAtR = 0.0, lastTime = 0.0;
 };
 
 // Numeric readout of the fader position in dB (what the fader is set to, not the level of the audio).

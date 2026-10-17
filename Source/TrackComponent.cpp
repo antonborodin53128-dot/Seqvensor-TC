@@ -283,7 +283,9 @@ void TrackComponent::updateLive()
 {
     const float pl = track->peakL.exchange (0.0f);
     const float pr = track->peakR.exchange (0.0f);
-    meter.setLevels (pl, pr);
+    const float rl = track->rmsL.exchange (0.0f);
+    const float rr = track->rmsR.exchange (0.0f);
+    meter.setLevels (pl, pr, rl, rr);
 
     const double sr = juce::jmax (1.0, engine.getSampleRate());
     const double ms = track->getCachedLatencySamples() * 1000.0 / sr;

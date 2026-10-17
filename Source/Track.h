@@ -61,6 +61,7 @@ public:
     std::atomic<bool> compensate { false };
     std::atomic<bool> metronomeOn { false };
     std::atomic<float> peakL { 0.0f }, peakR { 0.0f };
+    std::atomic<float> rmsL { 0.0f }, rmsR { 0.0f };   // loudest block RMS since the display last looked
     std::atomic<int> loadingClips { 0 };
     bool inputChosenByUser = false;
 

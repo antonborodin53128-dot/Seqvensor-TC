@@ -187,6 +187,34 @@ namespace
         return { b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0 };
     }
 
+    // Bell whose magnitude follows the analogue prototype up to Nyquist (matched at DC, the centre and Nyquist, after M. Vicanek).
+    // The usual bilinear bell is pulled to 0 dB at Nyquist, so a band near 20 kHz showed (and did) a sudden fall; this one keeps going.
+    inline bool matchedBell (double sr, float fIn, float gDb, float qIn, Coef& out)
+    {
+        const double pi_ = 3.14159265358979323846, f = fIn, Q = qIn;
+        const double A = std::pow (10.0, gDb / 40.0), G = A * A, w0 = 2.0 * pi_ * f / sr;
+        if (std::abs (gDb) < 0.01 || w0 < 0.01)
+            return false;
+        const double zeta = 1.0 / (2.0 * A * Q);
+        const double a1 = zeta < 1.0 ? -2.0 * std::exp (-zeta * w0) * std::cos (std::sqrt (1.0 - zeta * zeta) * w0)
+                                     : -2.0 * std::exp (-zeta * w0) * std::cosh (std::sqrt (zeta * zeta - 1.0) * w0);
+        const double a2 = std::exp (-2.0 * zeta * w0);
+        const double A0 = (1 + a1 + a2) * (1 + a1 + a2), A1 = (1 - a1 + a2) * (1 - a1 + a2), A2 = -4.0 * a2;
+        const double p1 = std::sin (w0 / 2) * std::sin (w0 / 2), p0 = 1.0 - p1, p2 = 4.0 * p0 * p1;
+        if (p2 < 1.0e-9)
+            return false;
+        const double om = pi_ / w0, u = (1 - om * om) * (1 - om * om);
+        const double hn = (u + (A * om / Q) * (A * om / Q)) / (u + (om / (A * Q)) * (om / (A * Q)));
+        const double B0 = A0, B1 = A1 * hn;
+        const double B2 = (G * G * (A0 * p0 + A1 * p1 + A2 * p2) - B0 * p0 - B1 * p1) / p2;
+        const double s0 = std::sqrt (B0), s1 = std::sqrt (juce::jmax (0.0, B1)), W = 0.5 * (s0 + s1), d = W * W + B2;
+        if (d < 0.0 || ! std::isfinite (d) || a2 >= 1.0)
+            return false;
+        const double b0 = 0.5 * (W + std::sqrt (d)), b2 = 0.5 * (W - std::sqrt (d)), b1 = 0.5 * (s0 - s1);
+        out = normCoef ((float) b0, (float) b1, (float) b2, 1.0f, (float) a1, (float) a2);
+        return true;
+    }
+
     // returns the number of 2nd-order sections (1..4)
     int designBand (int type, double sr, float f, float gDb, float q, int slope, Coef* out)
     {
@@ -199,6 +227,8 @@ namespace
             case 0:   // bell
             {
                 const float A = std::pow (10.0f, gDb / 40.0f), al = s / (2.0f * q);
+                if (matchedBell (sr, f, gDb, q, out[0]))
+                    return 1;
                 out[0] = normCoef (1 + al * A, -2 * c, 1 - al * A, 1 + al / A, -2 * c, 1 - al / A);
                 return 1;
             }
@@ -1230,7 +1260,14 @@ namespace
             addKnob (mxS, mxL, "MIX");
             addKnob (bpS, bpL, "BPM");
 
-            thA = std::make_unique<juce::SliderParameterAttachment> (*p.thresh, thS);
+            thS.setRange (0.0, 48.0, 0.0);
+            thS.setDoubleClickReturnValue (true, 18.0);
+            thS.valueFromTextFunction = [] (const juce::String& t) { return (double) std::abs (t.getDoubleValue()); };
+            thA = std::make_unique<juce::ParameterAttachment> (*p.thresh, [this] (float v) { thS.setValue (-v, juce::dontSendNotification); thS.updateText(); });
+            thS.onDragStart = [this] { thA->beginGesture(); };
+            thS.onDragEnd = [this] { thA->endGesture(); };
+            thS.onValueChange = [this] { thA->setValueAsPartOfGesture ((float) -thS.getValue()); };
+            thA->sendInitialUpdate();
             raA = std::make_unique<juce::SliderParameterAttachment> (*p.ratio, raS);
             atA = std::make_unique<juce::SliderParameterAttachment> (*p.attack, atS);
             reA = std::make_unique<juce::SliderParameterAttachment> (*p.release, reS);
@@ -1239,7 +1276,7 @@ namespace
             mxA = std::make_unique<juce::SliderParameterAttachment> (*p.mix, mxS);
             bpA = std::make_unique<juce::SliderParameterAttachment> (*p.bpm, bpS);
 
-            thS.textFromValueFunction = [] (double v) { return juce::String (v, 1) + " dB"; };
+            thS.textFromValueFunction = [] (double v) { return juce::String (-v, 1) + " dB"; };
             raS.textFromValueFunction = [] (double v) { return v < 1.05 ? juce::String ("1 : 1") : juce::String (v, 1) + " : 1"; };
             atS.textFromValueFunction = [] (double v) { return juce::String (v, 1) + " ms"; };
             reS.textFromValueFunction = [] (double v) { return v >= 1000.0 ? juce::String (v / 1000.0, 2) + " s" : juce::String ((int) v) + " ms"; };
@@ -1323,7 +1360,7 @@ namespace
             const int ticks = mode == 1 ? 20 : 43;
             for (int i = 0; i <= ticks; ++i)
             {
-                // GR: 0 dB on the right, 20 dB on the left; IN/OUT: -40 dB on the left, +3 dB on the right
+                // GR: 0 dB on the left, 20 dB on the right (more reduction = further right); IN/OUT: -40 dB on the left, +3 dB on the right
                 const float t = (float) i / (float) ticks;
                 const bool major = mode == 1 ? (i % 5 == 0) : (i % 10 == 3 || i == ticks);
                 const bool red = mode == 1 ? false : (i >= 40);
@@ -1331,7 +1368,7 @@ namespace
                 g.drawLine (juce::Line<float> (pt (t, rad - (major ? 16.0f : 9.0f)), pt (t, rad - 2.0f)), major ? 2.0f : 1.0f);
                 if (major)
                 {
-                    const int val = mode == 1 ? 20 - i : -40 + i;
+                    const int val = mode == 1 ? i : -40 + i;
                     auto tp = pt (t, rad - 30.0f);
                     g.setColour (red ? juce::Colour (0xffc0392b) : juce::Colour (0xff2b2417));
                     g.drawText (mode == 1 ? juce::String (val) : (val > 0 ? "+" + juce::String (val) : juce::String (val)),
@@ -1440,7 +1477,7 @@ namespace
             // the GR needle follows the real reduction (so attack and release are visible), the level needles are VU-like
             grShown += (plug.reduction.load() - grShown) * 0.6f;
             const int m = plug.meter->getIndex();
-            const float target = m == 1 ? juce::jlimit (0.0f, 1.0f, 1.0f + grShown / 20.0f)
+            const float target = m == 1 ? juce::jlimit (0.0f, 1.0f, -grShown / 20.0f)
                                         : juce::jlimit (0.0f, 1.0f, (juce::Decibels::gainToDecibels (m == 0 ? inShown : outShown, -60.0f) + 40.0f) / 43.0f);
             needle += (target - needle) * (m == 1 ? 0.7f : 0.35f);
             repaint (meterArea.expanded (6, 24));
@@ -1449,11 +1486,12 @@ namespace
         CompPlugin& plug;
         juce::Slider thS, raS, atS, reS, rnS, ouS, mxS, bpS;
         juce::Label thL, raL, atL, reL, rnL, ouL, mxL, bpL;
-        std::unique_ptr<juce::SliderParameterAttachment> thA, raA, atA, reA, rnA, ouA, mxA, bpA;
+        std::unique_ptr<juce::ParameterAttachment> thA;
+        std::unique_ptr<juce::SliderParameterAttachment> raA, atA, reA, rnA, ouA, mxA, bpA;
         juce::TextButton syncMs, syncBpm, syncHost, mIn, mGr, mOut, limBtn;
         std::unique_ptr<juce::ButtonParameterAttachment> limA;
         juce::Rectangle<int> meterArea;
-        float inShown = 0.0f, outShown = 0.0f, grShown = 0.0f, needle = 1.0f;
+        float inShown = 0.0f, outShown = 0.0f, grShown = 0.0f, needle = 0.0f;
         juce::Colour bg { 0xff15171c }, bg2 { 0xff262b36 }, border { 0xff2a2f3a }, accent { 0xffff9a2e }, text_ { 0xffe8eaf0 }, muted { 0xff8b93a7 };
     };
 
@@ -1465,6 +1503,8 @@ namespace
     class GatePlugin : public BuiltinBase
     {
     public:
+        static constexpr float kHysteresis = 4.0f;   // dB between opening and closing, fixed: it only keeps the tail of a note from chattering
+
         GatePlugin() : BuiltinBase ("gate", "Gate", "Noise gate (zero latency)")
         {
             thresh = addLinear ("th", "Threshold", -80.0f, 0.0f, -45.0f);
@@ -1472,12 +1512,9 @@ namespace
             attack = addFloat ("at", "Attack", 0.05f, 50.0f, 0.5f, 0.1f);
             hold = addFloat ("ho", "Hold", 0.0f, 1000.0f, 80.0f, 0.15f);
             release = addFloat ("re", "Release", 5.0f, 3000.0f, 150.0f, 0.1f);
-            hyst = addLinear ("hy", "Hysteresis", 0.0f, 20.0f, 4.0f);
             lowCut = addFloat ("lc", "Low Cut", 20.0f, 2000.0f, 20.0f, 0.1f);
             highCut = addFloat ("hc", "High Cut", 500.0f, 20000.0f, 20000.0f, 0.3f);
             ratio = addFloat ("ra", "Ratio", 1.5f, 100.0f, 10.0f, 0.1f);
-            on = new juce::AudioParameterBool (juce::ParameterID { "on", 1 }, "On", true);
-            juce::AudioProcessor::addParameter (on);
         }
 
         void processBlock (juce::AudioBuffer<float>& buf, juce::MidiBuffer&) override
@@ -1487,16 +1524,7 @@ namespace
             if (nch == 0)
                 return;
 
-            if (! on->get())
-            {
-                gain = 1.0f;
-                inLevel.store (0.0f);
-                reduction.store (0.0f);
-                isOpen.store (true);
-                return;
-            }
-
-            const float th = thresh->get(), hy = hyst->get(), rangeDb = range->get(), expand = ratio->get() - 1.0f;
+            const float th = thresh->get(), hy = kHysteresis, rangeDb = range->get(), expand = ratio->get() - 1.0f;
             const int holdSamples = (int) (sr * 0.001 * hold->get());
             const float atkC = std::exp (-1.0f / (float) (sr * 0.001 * attack->get()));
             const float relC = std::exp (-1.0f / (float) (sr * 0.001 * release->get()));
@@ -1560,8 +1588,7 @@ namespace
 
         juce::AudioProcessorEditor* createEditor() override;
 
-        juce::AudioParameterFloat *thresh, *range, *attack, *hold, *release, *hyst, *lowCut, *highCut, *ratio;
-        juce::AudioParameterBool* on;
+        juce::AudioParameterFloat *thresh, *range, *attack, *hold, *release, *lowCut, *highCut, *ratio;
         std::atomic<float> inLevel { 0.0f }, outLevel { 0.0f }, reduction { 0.0f };
         std::atomic<bool> isOpen { false };
 
@@ -1584,14 +1611,13 @@ namespace
     public:
         explicit GateEditor (GatePlugin& p) : juce::AudioProcessorEditor (p), plug (p)
         {
-            setSize (760, 360);
+            setSize (760, 500);
             addRow (atS, atL, "ATTACK", *p.attack, atA);
             addRow (hoS, hoL, "HOLD", *p.hold, hoA);
             addRow (reS, reL, "RELEASE", *p.release, reA);
             addRow (thS, thL, "THRESHOLD", *p.thresh, thA);
             addRow (raS, raL, "RATIO", *p.ratio, raA);
             addRow (rgS, rgL, "RANGE", *p.range, rgA);
-            addRow (hyS, hyL, "HYSTERESIS", *p.hyst, hyA);
             addRow (lcS, lcL, "KEY LOW CUT", *p.lowCut, lcA);
             addRow (hcS, hcL, "KEY HIGH CUT", *p.highCut, hcA);
 
@@ -1603,20 +1629,10 @@ namespace
             atS.textFromValueFunction = ms;
             hoS.textFromValueFunction = ms;
             reS.textFromValueFunction = ms;
-            hyS.textFromValueFunction = [] (double v) { return juce::String (v, 1) + " dB"; };
             lcS.textFromValueFunction = hz;
             hcS.textFromValueFunction = hz;
-            for (auto* s : { &thS, &rgS, &atS, &hoS, &reS, &hyS, &lcS, &hcS, &raS })
+            for (auto* s : { &thS, &rgS, &atS, &hoS, &reS, &lcS, &hcS, &raS })
                 s->updateText();
-
-            onBtn.setButtonText ("ON");
-            onBtn.setClickingTogglesState (true);
-            onBtn.setColour (juce::TextButton::buttonColourId, bg2);
-            onBtn.setColour (juce::TextButton::buttonOnColourId, accent);
-            onBtn.setColour (juce::TextButton::textColourOffId, text_);
-            onBtn.setColour (juce::TextButton::textColourOnId, juce::Colour (0xff15171c));
-            addAndMakeVisible (onBtn);
-            onA = std::make_unique<juce::ButtonParameterAttachment> (*p.on, onBtn);
 
             startTimerHz (60);
         }
@@ -1626,41 +1642,181 @@ namespace
             g.fillAll (bg);
             g.setColour (text_);
             g.setFont (juce::FontOptions (16.0f, juce::Font::bold));
-            g.drawText ("GATE", 90, 8, 120, 28, juce::Justification::centredLeft);
+            g.drawText ("GATE", 20, 10, 120, 28, juce::Justification::centredLeft);
 
-            const bool o = plug.isOpen.load() && plug.on->get();
+            const bool o = plug.isOpen.load();
             g.setColour (o ? juce::Colour (0xff4cd964) : juce::Colour (0xff3a4152));
-            g.fillEllipse (200.0f, 16.0f, 12.0f, 12.0f);
+            g.fillEllipse (110.0f, 18.0f, 12.0f, 12.0f);
             g.setColour (muted);
             g.setFont (juce::FontOptions (12.0f));
-            g.drawText (o ? "OPEN" : "CLOSED", 218, 8, 70, 28, juce::Justification::centredLeft);
+            g.drawText (o ? "OPEN" : "CLOSED", 128, 10, 70, 28, juce::Justification::centredLeft);
 
             paintTransfer (g);
+            paintKeyFilter (g);
         }
 
         void resized() override
         {
-            onBtn.setBounds (16, 8, 64, 28);
             transferArea = juce::Rectangle<int> (16, 48, 340, 290);
+            filterArea = juce::Rectangle<int> (16, 346, 340, 140);
 
-            juce::Slider* sl[9] = { &thS, &raS, &rgS, &atS, &hoS, &reS, &hyS, &lcS, &hcS };
-            juce::Label* lb[9] = { &thL, &raL, &rgL, &atL, &hoL, &reL, &hyL, &lcL, &hcL };
-            for (int i = 0; i < 9; ++i)
+            juce::Slider* sl[8] = { &thS, &raS, &rgS, &atS, &hoS, &reS, &lcS, &hcS };
+            juce::Label* lb[8] = { &thL, &raL, &rgL, &atL, &hoL, &reL, &lcL, &hcL };
+            for (int i = 0; i < 8; ++i)
             {
-                auto row = juce::Rectangle<int> (372, 48 + i * 32, 372, 32);
+                auto row = juce::Rectangle<int> (372, 48 + i * 36, 372, 36);
                 lb[i]->setBounds (row.removeFromLeft (104));
                 sl[i]->setBounds (row);
             }
         }
 
+        // the threshold is dragged on the transfer graph, the two key filters on the frequency graph
+        void mouseDown (const juce::MouseEvent& e) override
+        {
+            drag = None;
+            const auto p = e.position;
+            if (std::abs (p.x - thresholdX()) < 9.0f && p.y >= plotRect().getY() - 6.0f && p.y <= plotRect().getBottom() + 6.0f)
+                drag = Threshold;
+            else if (filterPlot().expanded (6.0f).contains (p))
+            {
+                const float dl = std::abs (p.x - freqX ((float) plug.lowCut->get())), dh = std::abs (p.x - freqX ((float) plug.highCut->get()));
+                if (juce::jmin (dl, dh) < 12.0f)
+                    drag = dl <= dh ? LowCut : HighCut;
+            }
+            if (drag != None)
+            {
+                auto& prm = paramFor (drag);
+                prm.beginChangeGesture();
+                mouseDrag (e);
+            }
+        }
+
+        void mouseDrag (const juce::MouseEvent& e) override
+        {
+            if (drag == None)
+                return;
+            auto& prm = paramFor (drag);
+            const auto range = prm.getNormalisableRange();
+            float value = 0.0f;
+            if (drag == Threshold)
+                value = (e.position.x - plotRect().getX()) / plotRect().getWidth() * 100.0f - 100.0f;
+            else
+                value = xFreq (e.position.x);
+            value = juce::jlimit (range.start, range.end, value);
+            prm.setValueNotifyingHost (prm.convertTo0to1 (value));
+        }
+
+        void mouseUp (const juce::MouseEvent&) override
+        {
+            if (drag != None)
+                paramFor (drag).endChangeGesture();
+            drag = None;
+        }
+
+        void mouseMove (const juce::MouseEvent& e) override
+        {
+            const auto p = e.position;
+            bool hand = std::abs (p.x - thresholdX()) < 9.0f && p.y >= plotRect().getY() - 6.0f && p.y <= plotRect().getBottom() + 6.0f;
+            if (! hand && filterPlot().expanded (6.0f).contains (p))
+                hand = std::abs (p.x - freqX ((float) plug.lowCut->get())) < 12.0f || std::abs (p.x - freqX ((float) plug.highCut->get())) < 12.0f;
+            setMouseCursor (hand ? juce::MouseCursor::LeftRightResizeCursor : juce::MouseCursor::NormalCursor);
+        }
+
     private:
+        enum Drag { None, Threshold, LowCut, HighCut };
+
+        juce::RangedAudioParameter& paramFor (Drag d) { return d == Threshold ? (juce::RangedAudioParameter&) *plug.thresh : d == LowCut ? (juce::RangedAudioParameter&) *plug.lowCut : (juce::RangedAudioParameter&) *plug.highCut; }
+
+        juce::Rectangle<float> plotRect() const { return { (float) transferArea.getX() + 84.0f, (float) transferArea.getY() + 4.0f, 252.0f, 252.0f }; }
+        float dbX (float db) const { return plotRect().getX() + (juce::jlimit (-100.0f, 0.0f, db) + 100.0f) / 100.0f * plotRect().getWidth(); }
+        float thresholdX() const { return dbX (plug.thresh->get()); }
+
+        // frequency graph: 20 Hz .. 20 kHz on a log axis, +6 .. -36 dB
+        juce::Rectangle<float> filterPlot() const { return { (float) filterArea.getX() + 40.0f, (float) filterArea.getY() + 8.0f, (float) filterArea.getWidth() - 56.0f, (float) filterArea.getHeight() - 32.0f }; }
+        float freqX (float f) const
+        {
+            const auto r = filterPlot();
+            return r.getX() + std::log (juce::jlimit (20.0f, 20000.0f, f) / 20.0f) / std::log (1000.0f) * r.getWidth();
+        }
+        float xFreq (float x) const
+        {
+            const auto r = filterPlot();
+            return 20.0f * std::pow (1000.0f, juce::jlimit (0.0f, 1.0f, (x - r.getX()) / r.getWidth()));
+        }
+        float filterY (float db) const
+        {
+            const auto r = filterPlot();
+            return r.getY() + (6.0f - juce::jlimit (-36.0f, 6.0f, db)) / 42.0f * r.getHeight();
+        }
+
+        void paintKeyFilter (juce::Graphics& g)
+        {
+            g.setColour (juce::Colour (0xff0d0f13));
+            g.fillRect (filterArea.toFloat());
+            const auto r = filterPlot();
+
+            g.setFont (juce::FontOptions (10.0f));
+            for (float f : { 20.0f, 50.0f, 100.0f, 200.0f, 500.0f, 1000.0f, 2000.0f, 5000.0f, 10000.0f, 20000.0f })
+            {
+                g.setColour (juce::Colour (0xff1f2430));
+                g.drawVerticalLine ((int) freqX (f), r.getY(), r.getBottom());
+                g.setColour (muted);
+                const juce::String t = f >= 1000.0f ? juce::String ((int) (f / 1000.0f)) + "k" : juce::String ((int) f);
+                if (f == 20.0f || f == 100.0f || f == 1000.0f || f == 10000.0f || f == 20000.0f)
+                    g.drawText (t, juce::Rectangle<float> (freqX (f) - 18.0f, r.getBottom() + 3.0f, 36.0f, 12.0f), juce::Justification::centred);
+            }
+            for (int db : { 0, -12, -24, -36 })
+            {
+                g.setColour (juce::Colour (0xff1f2430));
+                g.drawHorizontalLine ((int) filterY ((float) db), r.getX(), r.getRight());
+                g.setColour (muted);
+                g.drawText (juce::String (db), juce::Rectangle<float> (r.getX() - 34.0f, filterY ((float) db) - 6.0f, 30.0f, 12.0f), juce::Justification::centredRight);
+            }
+            g.setColour (juce::Colour (0xff3a4152));
+            g.drawRect (r);
+
+            // response of the two key filters (second order, Butterworth)
+            const float lc = plug.lowCut->get(), hc = plug.highCut->get();
+            juce::Path curve, fill;
+            const int steps = 200;
+            for (int i = 0; i <= steps; ++i)
+            {
+                const float x = r.getX() + r.getWidth() * (float) i / (float) steps;
+                const float f = xFreq (x);
+                const float hp = 1.0f / (1.0f + std::pow (lc / f, 4.0f));
+                const float lp = 1.0f / (1.0f + std::pow (f / hc, 4.0f));
+                const float db = 10.0f * std::log10 (juce::jmax (1.0e-6f, hp * lp));
+                const auto pt = juce::Point<float> (x, filterY (db));
+                if (i == 0) { curve.startNewSubPath (pt); fill.startNewSubPath (x, filterY (-36.0f)); fill.lineTo (pt); }
+                else { curve.lineTo (pt); fill.lineTo (pt); }
+            }
+            fill.lineTo (r.getRight(), filterY (-36.0f));
+            fill.closeSubPath();
+            g.setColour (accent.withAlpha (0.16f));
+            g.fillPath (fill);
+            g.setColour (accent);
+            g.strokePath (curve, juce::PathStrokeType (2.0f));
+
+            // the two grips (-3 dB points)
+            for (float f : { lc, hc })
+            {
+                g.setColour (text_);
+                g.fillEllipse (freqX (f) - 5.0f, filterY (-3.0f) - 5.0f, 10.0f, 10.0f);
+                g.setColour (accent);
+                g.drawEllipse (freqX (f) - 5.0f, filterY (-3.0f) - 5.0f, 10.0f, 10.0f, 1.5f);
+            }
+            g.setColour (muted);
+            g.setFont (juce::FontOptions (10.0f, juce::Font::bold));
+            g.drawText ("KEY FILTER (dB)", juce::Rectangle<float> (r.getX() + 4.0f, r.getY() + 1.0f, 120.0f, 12.0f), juce::Justification::centredLeft);
+        }
+
         void paintTransfer (juce::Graphics& g)
         {
-            auto plot = juce::Rectangle<float> ((float) transferArea.getX() + 84.0f, (float) transferArea.getY() + 4.0f, 252.0f, 252.0f);
+            const auto plot = plotRect();
             g.setColour (juce::Colour (0xff0d0f13));
             g.fillRect (transferArea.toFloat());
 
-            auto X = [&] (float db) { return plot.getX() + (juce::jlimit (-100.0f, 0.0f, db) + 100.0f) / 100.0f * plot.getWidth(); };
+            auto X = [&] (float db) { return dbX (db); };
             auto Y = [&] (float db) { return plot.getBottom() - (juce::jlimit (-100.0f, 0.0f, db) + 100.0f) / 100.0f * plot.getHeight(); };
 
             g.setFont (juce::FontOptions (11.0f));
@@ -1709,9 +1865,16 @@ namespace
             g.setColour (accent);
             g.strokePath (path, juce::PathStrokeType (2.5f));
 
-            // threshold marker
-            g.setColour (juce::Colour (0x80ff9a2e));
+            // threshold line with a grip: drag it with the mouse
+            g.setColour (juce::Colour (0xc0ff9a2e));
             g.drawVerticalLine ((int) X (th), plot.getY(), plot.getBottom());
+            juce::Path grip;
+            grip.addTriangle (X (th) - 7.0f, plot.getY(), X (th) + 7.0f, plot.getY(), X (th), plot.getY() + 11.0f);
+            g.setColour (accent);
+            g.fillPath (grip);
+            g.setColour (text_);
+            g.setFont (juce::FontOptions (11.0f, juce::Font::bold));
+            g.drawText (juce::String (th, 1) + " dB", juce::Rectangle<float> (X (th) - 30.0f, plot.getBottom() - 18.0f, 60.0f, 14.0f), juce::Justification::centred);
 
             // live point
             const float outDb = inDb + grShown;
@@ -1746,16 +1909,16 @@ namespace
             if (now > inShown) inShown = now; else inShown += (now - inShown) * 0.2f;
             grShown += (plug.reduction.load() - grShown) * 0.6f;
             repaint (transferArea);
-            repaint (180, 8, 120, 28);
+            repaint (filterArea);
+            repaint (100, 8, 120, 28);
         }
 
         GatePlugin& plug;
-        juce::Slider thS, rgS, atS, hoS, reS, hyS, lcS, hcS, raS;
-        juce::Label thL, rgL, atL, hoL, reL, hyL, lcL, hcL, raL;
-        std::unique_ptr<juce::SliderParameterAttachment> thA, rgA, atA, hoA, reA, hyA, lcA, hcA, raA;
-        juce::TextButton onBtn;
-        std::unique_ptr<juce::ButtonParameterAttachment> onA;
-        juce::Rectangle<int> transferArea;
+        juce::Slider thS, rgS, atS, hoS, reS, lcS, hcS, raS;
+        juce::Label thL, rgL, atL, hoL, reL, lcL, hcL, raL;
+        std::unique_ptr<juce::SliderParameterAttachment> thA, rgA, atA, hoA, reA, lcA, hcA, raA;
+        juce::Rectangle<int> transferArea, filterArea;
+        Drag drag = None;
         float inShown = 0.0f, grShown = 0.0f;
         juce::Colour bg { 0xff15171c }, bg2 { 0xff262b36 }, accent { 0xffff9a2e }, text_ { 0xffe8eaf0 }, muted { 0xff8b93a7 };
     };
@@ -2071,7 +2234,7 @@ namespace
     public:
         explicit OverdriveEditor (OverdrivePlugin& p) : juce::AudioProcessorEditor (p), plug (p)
         {
-            setSize (340, 480);
+            setSize (340, 400);
             addKnob (drS, drL, "DRIVE", *p.drive, drA);
             addKnob (toS, toL, "TONE", *p.tone, toA);
             drS.textFromValueFunction = [] (double v) { return juce::String ((int) std::round (v / 10.0)); };
@@ -2106,27 +2269,6 @@ namespace
             g.drawText ("808", juce::Rectangle<int> (0, 292, getWidth(), 40), juce::Justification::centred);
             g.setFont (juce::FontOptions (15.0f, juce::Font::bold));
             g.drawText ("OVERDRIVE", juce::Rectangle<int> (0, 326, getWidth(), 20), juce::Justification::centred);
-
-            // LED and foot switch
-            const bool o = plug.on->get();
-            g.setColour (o ? juce::Colour (0xffff3b30) : juce::Colour (0xff4a2a2a));
-            g.fillEllipse (getWidth() * 0.5f - 7.0f, 368.0f, 14.0f, 14.0f);
-            if (o)
-            {
-                g.setColour (juce::Colour (0x40ff3b30));
-                g.fillEllipse (getWidth() * 0.5f - 14.0f, 361.0f, 28.0f, 28.0f);
-            }
-            auto fs = footSwitch().toFloat();
-            juce::ColourGradient metal (juce::Colour (0xffe6e9ea), fs.getX(), fs.getY(), juce::Colour (0xff8d9496), fs.getRight(), fs.getBottom(), false);
-            g.setGradientFill (metal);
-            g.fillEllipse (fs);
-            g.setColour (juce::Colour (0xff3b4244));
-            g.drawEllipse (fs, 2.5f);
-            g.setColour (juce::Colour (0xff6b7476));
-            g.drawEllipse (fs.reduced (14.0f), 1.5f);
-            g.setColour (juce::Colour (0xffd7e8d7));
-            g.setFont (juce::FontOptions (11.0f, juce::Font::bold));
-            g.drawText (o ? "ON  -  click to bypass" : "BYPASSED  -  click to turn on", juce::Rectangle<int> (0, 452, getWidth(), 14), juce::Justification::centred);
         }
 
         void resized() override
@@ -2142,19 +2284,7 @@ namespace
             }
         }
 
-        void mouseDown (const juce::MouseEvent& e) override
-        {
-            if (footSwitch().toFloat().contains (e.position))
-            {
-                plug.on->beginChangeGesture();
-                *plug.on = ! plug.on->get();
-                plug.on->endChangeGesture();
-                repaint();
-            }
-        }
-
     private:
-        juce::Rectangle<int> footSwitch() const { return juce::Rectangle<int> (getWidth() / 2 - 40, 388, 80, 60); }
 
         void addKnob (juce::Slider& s, juce::Label& l, const juce::String& text, juce::RangedAudioParameter& prm, std::unique_ptr<juce::SliderParameterAttachment>& att)
         {
