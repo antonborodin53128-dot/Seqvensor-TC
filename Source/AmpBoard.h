@@ -65,16 +65,15 @@ namespace tcboard
             chorus.prepare (sr);
             delay.prepare (sr);
             reverb.prepare (sr);
-            tailDelay.prepare (sr);
-            tailReverb.prepare (sr);
-            tailDelayOn = tailReverbOn = false;
             delayLive = reverbLive = false;
-            haveLast = false;
+            fxStep = (float) (1.0 / (0.050 * sr));
+            mixCoef = (float) (1.0 - std::exp (-1.0 / (0.030 * sr)));
             for (auto* f : { &fDrive, &fComp, &fEq, &fChorus, &fDelay, &fReverb })
             {
                 f->prepare (sr);
                 f->a = 0.0f;
             }
+            fDelay.step = fReverb.step = (float) (1.0 / (0.080 * sr));   // delay / reverb leave slowly: the tail fades instead of being cut
             haveAmp = false;
         }
 
@@ -203,72 +202,8 @@ namespace tcboard
         }
 
     private:
-        // When the delay or the reverb is switched off (a scene change, a pedal) or changes its time / type, the old effect is not
-        // cut: it goes on running as a "tail" with its input closed and fades out by itself, while the new one starts from silence.
-        void handOver (const Pedals& pd)
-        {
-            if (! haveLast)
-                return;
-            if (delayLive && ((! pd.delayOn && lastPd.delayOn) || (pd.delayOn && pd.delayDiv != lastPd.delayDiv)))
-            {
-                std::swap (delay, tailDelay);
-                delay.reset();
-                tailDelayOn = true;
-                tailDelayGain = 1.0f;
-                tailDelayMix = lastPd.delayMix;
-                delayLive = false;
-                fDelay.a = 0.0f;
-            }
-            if (reverbLive && ((! pd.reverbOn && lastPd.reverbOn) || (pd.reverbOn && pd.reverbType != lastPd.reverbType)))
-            {
-                std::swap (reverb, tailReverb);
-                reverb.reset();
-                tailReverbOn = true;
-                tailReverbGain = 1.0f;
-                tailReverbMix = lastPd.reverbMix;
-                reverbLive = false;
-                fReverb.a = 0.0f;
-            }
-        }
-
-        void playTails (float* l, float* r, int n)
-        {
-            if (tailDelayOn)
-            {
-                const float k = (float) std::exp (-1.0 / (0.40 * sr));
-                for (int i = 0; i < n; ++i)
-                {
-                    tailDelayGain *= k;
-                    float wl, wr;
-                    tailDelay.process (0.0f, 0.0f, wl, wr);
-                    l[i] += tailDelayGain * tailDelayMix * wl;
-                    r[i] += tailDelayGain * tailDelayMix * wr;
-                }
-                if (tailDelayGain < 1.0e-4f)
-                    tailDelayOn = false;
-            }
-            if (tailReverbOn)
-            {
-                const float k = (float) std::exp (-1.0 / (0.60 * sr));
-                for (int i = 0; i < n; ++i)
-                {
-                    tailReverbGain *= k;
-                    float wl, wr;
-                    tailReverb.process (0.0f, 0.0f, wl, wr);
-                    l[i] += tailReverbGain * tailReverbMix * wl;
-                    r[i] += tailReverbGain * tailReverbMix * wr;
-                }
-                if (tailReverbGain < 1.0e-4f)
-                    tailReverbOn = false;
-            }
-        }
-
         void timeEffects (float* l, float* r, int n, const Pedals& pd, double bpm)
         {
-            handOver (pd);
-            lastPd = pd;
-            haveLast = true;
-
             if (! fChorus.idle())
             {
                 chorus.setParams (pd.chorusRate, pd.chorusDepth, pd.chorusMix);
@@ -282,23 +217,51 @@ namespace tcboard
                 }
             }
 
+            // Delay and reverb sit behind their own "post-fader": when the preset changes the delay time / reverb type, the wet
+            // signal is ducked smoothly, the engine is switched while it is silent, and the wet signal comes back. The mix is
+            // smoothed too. One engine each, so the load does not change.
             if (! fDelay.idle())
             {
-                delayLive = true;
+                if (! delayLive)
+                {
+                    delayLive = true;
+                    curDiv = pd.delayDiv;
+                    gDelay = 1.0f;
+                    mixDelay = pd.delayMix;
+                    duckDelay = false;
+                }
                 tcfx::DelayEngine::Params dp;
-                dp.timeL = dp.timeR = tcfx::divisionSeconds (pd.delayDiv, bpm);
                 dp.feedback = std::max (0.0f, std::min (0.95f, pd.delayFeedback));
                 dp.mode = tcfx::Stereo;
                 dp.lpHz = 1500.0f * std::pow (8.0f, std::max (0.0f, std::min (1.0f, pd.delayTone)));
                 dp.hpHz = 120.0f;
+                dp.timeL = dp.timeR = tcfx::divisionSeconds (curDiv, bpm);
                 delay.setParams (dp);
+                if (pd.delayDiv != curDiv)
+                    duckDelay = true;
                 for (int i = 0; i < n; ++i)
                 {
-                    const float a = fDelay.next();
+                    if (duckDelay)
+                    {
+                        gDelay -= fxStep;
+                        if (gDelay <= 0.0f)
+                        {
+                            gDelay = 0.0f;
+                            duckDelay = false;
+                            curDiv = pd.delayDiv;
+                            delay.reset();
+                            dp.timeL = dp.timeR = tcfx::divisionSeconds (curDiv, bpm);
+                            delay.setParams (dp);
+                        }
+                    }
+                    else
+                        gDelay = std::min (1.0f, gDelay + fxStep);
+                    mixDelay += mixCoef * (pd.delayMix - mixDelay);
+                    const float a = fDelay.next() * gDelay * mixDelay;
                     float wl, wr;
                     delay.process (l[i], r[i], wl, wr);
-                    l[i] += a * pd.delayMix * wl;
-                    r[i] += a * pd.delayMix * wr;
+                    l[i] += a * wl;
+                    r[i] += a * wr;
                 }
             }
             else if (delayLive)
@@ -309,15 +272,39 @@ namespace tcboard
 
             if (! fReverb.idle())
             {
-                reverbLive = true;
-                reverb.setParams (pd.reverbType, 0.0f, std::max (0.3f, pd.reverbDecay), std::max (0.0f, std::min (1.0f, pd.reverbTone)));
+                if (! reverbLive)
+                {
+                    reverbLive = true;
+                    curRev = pd.reverbType;
+                    gReverb = 1.0f;
+                    mixReverb = pd.reverbMix;
+                    duckReverb = false;
+                }
+                reverb.setParams (curRev, 0.0f, std::max (0.3f, pd.reverbDecay), std::max (0.0f, std::min (1.0f, pd.reverbTone)));
+                if (pd.reverbType != curRev)
+                    duckReverb = true;
                 for (int i = 0; i < n; ++i)
                 {
-                    const float a = fReverb.next();
+                    if (duckReverb)
+                    {
+                        gReverb -= fxStep;
+                        if (gReverb <= 0.0f)
+                        {
+                            gReverb = 0.0f;
+                            duckReverb = false;
+                            curRev = pd.reverbType;
+                            reverb.reset();
+                            reverb.setParams (curRev, 0.0f, std::max (0.3f, pd.reverbDecay), std::max (0.0f, std::min (1.0f, pd.reverbTone)));
+                        }
+                    }
+                    else
+                        gReverb = std::min (1.0f, gReverb + fxStep);
+                    mixReverb += mixCoef * (pd.reverbMix - mixReverb);
+                    const float a = fReverb.next() * gReverb * mixReverb;
                     float wl, wr;
                     reverb.process (l[i], r[i], wl, wr);
-                    l[i] += a * pd.reverbMix * wl;
-                    r[i] += a * pd.reverbMix * wr;
+                    l[i] += a * wl;
+                    r[i] += a * wr;
                 }
             }
             else if (reverbLive)
@@ -325,8 +312,6 @@ namespace tcboard
                 reverb.reset();
                 reverbLive = false;
             }
-
-            playTails (l, r, n);   // after the live effects, so the old tail does not feed the new delay or reverb
         }
 
         double sr = 48000.0;
@@ -335,13 +320,13 @@ namespace tcboard
         tcfx::Compressor comp;
         tcfx::Eq8 eq;
         tcfx::Chorus chorus;
-        tcfx::DelayEngine delay, tailDelay;
-        tcrev::Core reverb, tailReverb;
+        tcfx::DelayEngine delay;
+        tcrev::Core reverb;
         Fader fDrive, fComp, fEq, fChorus, fDelay, fReverb;
         tcamp::Params lastAmp;
-        bool haveAmp = false, delayLive = false, reverbLive = false, haveLast = false, tailDelayOn = false, tailReverbOn = false;
-        float tailDelayGain = 0.0f, tailReverbGain = 0.0f, tailDelayMix = 0.0f, tailReverbMix = 0.0f;
-        Pedals lastPd;
+        bool haveAmp = false, delayLive = false, reverbLive = false, duckDelay = false, duckReverb = false;
+        int curDiv = 5, curRev = 0;
+        float gDelay = 1.0f, gReverb = 1.0f, mixDelay = 0.0f, mixReverb = 0.0f, fxStep = 0.001f, mixCoef = 0.001f;
         std::vector<float> scratch;
     };
 }
