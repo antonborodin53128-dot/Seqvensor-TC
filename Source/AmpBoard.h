@@ -33,6 +33,8 @@ namespace tcboard
         float delayFeedback = 0.35f, delayMix = 0.3f, delayTone = 0.6f;      // 0..0.95, 0..1, 0..1
         int reverbType = 0;                                                  // 0 Hall, 1 Plate, 2 Room
         float reverbDecay = 2.2f, reverbMix = 0.25f, reverbTone = 0.5f;      // s, 0..1, 0..1
+        bool gateOn = false;                                                 // smart noise gate (not part of a scene)
+        float gateThrDb = -55.0f;
     };
 
     // linear fade of a switch
@@ -75,7 +77,20 @@ namespace tcboard
             }
             fDelay.step = fReverb.step = (float) (1.0 / (0.080 * sr));   // delay / reverb leave slowly: the tail fades instead of being cut
             haveAmp = false;
+            fGate.prepare (sr);
+            fGate.a = 0.0f;
+            gateEnv = 0.0f;
+            gateGain = 1.0f;
+            gateOpen = false;
+            gateHold = 0;
+            gateRel = (float) std::exp (-1.0 / (0.030 * sr));
+            gateAtk = (float) (1.0 - std::exp (-1.0 / (0.0003 * sr)));
+            gateFall = (float) (1.0 - std::exp (-1.0 / (0.060 * sr)));
+            gateHoldLen = (int) (0.040 * sr);
         }
+
+        // 0 = the gate is closed (noise muted) .. 1 = open; for the editor's LED
+        float getGateGain() const { return gateShown; }
 
         void resetAmp()
         {
@@ -182,6 +197,42 @@ namespace tcboard
                         l[i] = 0.5f * (l[i] + r[i]);
             }
 
+            // ---- smart gate (like a Decimator): it listens to the clean signal in front of the pre-amp, where the guitar
+            // has almost no hiss, and mutes after the pre-amp, where the gain has made the noise loud. Zero latency.
+            fGate.target = pd.gateOn;
+            const bool gateActive = ! fGate.idle();
+            if (gateActive)
+            {
+                gateBuf.resize ((size_t) n);
+                const float thr = std::pow (10.0f, pd.gateThrDb / 20.0f);
+                const float thrClose = thr * 0.6f;   // about 4 dB of hysteresis: no chatter around the threshold
+                for (int i = 0; i < n; ++i)
+                {
+                    const float x = std::max (std::abs (l[i]), std::abs (r[i]));
+                    gateEnv = std::max (x, gateEnv * gateRel);
+                    if (gateEnv > thr)
+                    {
+                        gateOpen = true;
+                        gateHold = gateHoldLen;
+                    }
+                    else if (gateHold > 0)
+                        --gateHold;
+                    else if (gateEnv < thrClose)
+                        gateOpen = false;
+                    const float target = gateOpen ? 1.0f : 0.0f;
+                    gateGain += (target - gateGain) * (target > gateGain ? gateAtk : gateFall);
+                    const float a = fGate.next();
+                    gateBuf[(size_t) i] = 1.0f - a * (1.0f - gateGain);
+                }
+                gateShown = gateGain;
+            }
+            else
+            {
+                gateShown = 1.0f;
+                gateOpen = true;
+                gateGain = 1.0f;
+            }
+
             // ---- pre-amp
             for (int i = 0; i < n; ++i)
                 l[i] = amp[0].preamp (l[i]);
@@ -190,6 +241,15 @@ namespace tcboard
                     r[i] = amp[1].preamp (r[i]);
             else
                 std::copy (l, l + n, r);
+
+            if (gateActive)
+            {
+                for (int i = 0; i < n; ++i)
+                {
+                    l[i] *= gateBuf[(size_t) i];
+                    r[i] *= gateBuf[(size_t) i];
+                }
+            }
 
             if (pd.loop)
             {
@@ -206,6 +266,12 @@ namespace tcboard
                 for (int i = 0; i < n; ++i)
                     r[i] = amp[1].power (r[i]);
         }
+
+        Fader fGate;
+        std::vector<float> gateBuf;
+        float gateEnv = 0.0f, gateGain = 1.0f, gateShown = 1.0f, gateRel = 0.999f, gateAtk = 0.1f, gateFall = 0.001f;
+        bool gateOpen = false;
+        int gateHold = 0, gateHoldLen = 1920;
 
     private:
         void timeEffects (float* l, float* r, int n, const Pedals& pd, double bpm)

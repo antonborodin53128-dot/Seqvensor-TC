@@ -2415,6 +2415,11 @@ namespace
             juce::AudioProcessor::addParameter (sceneP);
             sceneParamCount = getParameters().size();   // everything added so far, except the last two, belongs to a scene
 
+            // smart noise gate: belongs to the guitar, not to a scene
+            gateOn = new juce::AudioParameterBool (juce::ParameterID { "gto", 1 }, "Gate on", false);
+            juce::AudioProcessor::addParameter (gateOn);
+            gateThr = addLinear ("gtt", "Gate threshold", -80.0f, -20.0f, -55.0f);
+
             smP = { input, gain, bass, mid, treble, presence, master, driveAmt, driveTone, driveLevel, compSens, compLevel,
                     eqBand[0], eqBand[1], eqBand[2], eqBand[3], eqBand[4], eqBand[5], eqBand[6], eqBand[7],
                     chorusRate, chorusDepth, chorusMix, delayFb, delayMix, delayTone, reverbDecay, reverbMix, reverbTone };
@@ -2422,7 +2427,7 @@ namespace
             for (auto* p : getParameters())
                 if (auto* rp = dynamic_cast<juce::RangedAudioParameter*> (p))
                 {
-                    if (rp == guitarist || rp == sceneP)
+                    if (rp == guitarist || rp == sceneP || rp == gateOn || rp == gateThr)
                     {
                         sceneIndex.push_back (-1);
                         continue;
@@ -2596,6 +2601,8 @@ namespace
             pd.delayFeedback = sm[23] * 0.01f; pd.delayMix = sm[24] * 0.01f; pd.delayTone = sm[25] * 0.01f;
             pd.reverbType = reverbType->getIndex();
             pd.reverbDecay = sm[26]; pd.reverbMix = sm[27] * 0.01f; pd.reverbTone = sm[28] * 0.01f;
+            pd.gateOn = gateOn->get();
+            pd.gateThrDb = gateThr->get();
 
             board.process (buf.getWritePointer (0), nch > 1 ? buf.getWritePointer (1) : nullptr, n, pd, bpm);
 
@@ -2625,7 +2632,9 @@ namespace
 
         juce::AudioParameterChoice *model, *cab, *delayDiv, *reverbType, *guitarist;
         juce::AudioParameterInt* sceneP;
-        juce::AudioParameterBool *driveOn, *compOn, *eqOn, *chorusOn, *delayOn, *reverbOn, *loopP;
+        juce::AudioParameterBool *driveOn, *compOn, *eqOn, *chorusOn, *delayOn, *reverbOn, *loopP, *gateOn;
+        juce::AudioParameterFloat* gateThr;
+        float getGateGain() const { return board.getGateGain(); }
         juce::AudioParameterFloat *input, *gain, *bass, *mid, *treble, *presence, *master;
         juce::AudioParameterFloat *driveAmt, *driveTone, *driveLevel, *compSens, *compLevel, *eqBand[8];
         juce::AudioParameterFloat *chorusRate, *chorusDepth, *chorusMix, *delayFb, *delayMix, *delayTone;
@@ -2782,6 +2791,25 @@ namespace
                 cabBtn[i].onClick = [this, i] { setChoice (*plug.cab, i); };
                 addAndMakeVisible (cabBtn[i]);
             }
+            styleButton (gateBtn);
+            gateBtn.setClickingTogglesState (true);
+            gateBtn.setButtonText ("NOISE GATE");
+            gateBtn.setTooltip ("Smart noise gate: listens to the clean guitar in front of the amp and mutes the hiss of the gain when you stop playing. "
+                                "Set the threshold just above the noise of your guitar (strings muted). Zero latency. Not part of a scene.");
+            gateBtnA = std::make_unique<juce::ButtonParameterAttachment> (*plug.gateOn, gateBtn);
+            addAndMakeVisible (gateBtn);
+            gateThrS.setSliderStyle (juce::Slider::LinearHorizontal);
+            gateThrS.setTextBoxStyle (juce::Slider::TextBoxRight, false, 62, 20);
+            gateThrS.setColour (juce::Slider::thumbColourId, accent);
+            gateThrS.setColour (juce::Slider::trackColourId, accent.withAlpha (0.5f));
+            gateThrS.setColour (juce::Slider::textBoxTextColourId, text_);
+            gateThrS.setColour (juce::Slider::textBoxOutlineColourId, juce::Colours::transparentBlack);
+            gateThrS.setTooltip ("Gate threshold");
+            addAndMakeVisible (gateThrS);
+            gateThrA = std::make_unique<juce::SliderParameterAttachment> (*plug.gateThr, gateThrS);
+            gateThrS.textFromValueFunction = [] (double v) { return juce::String ((int) std::round (v)) + " dB"; };
+            gateThrS.updateText();
+
             styleButton (loopBtn);
             loopBtn.onClick = [this] { plug.loopP->beginChangeGesture(); *plug.loopP = ! plug.loopP->get(); plug.loopP->endChangeGesture(); };
             loopBtn.setTooltip ("Where chorus, delay and reverb sit: in front of the amp, or in its effects loop (after the pre-amp, before the power amp). "
@@ -2862,6 +2890,15 @@ namespace
             g.setFont (juce::FontOptions (22.0f, juce::Font::bold));
             g.drawText ("AMP", 24, 14, 80, 34, juce::Justification::centredLeft);
 
+            // gate LED: green = open (playing), red = closed (noise muted), dark = gate off
+            {
+                const float cx = (float) getWidth() - 24.0f - 8.0f, cy = 32.0f;
+                const bool on = plug.gateOn->get();
+                const float gg = plug.getGateGain();
+                g.setColour (! on ? juce::Colour (0xff3a4152) : gg > 0.5f ? juce::Colour (0xff34c759) : juce::Colour (0xffff3b30));
+                g.fillEllipse (cx - 6.0f, cy - 6.0f, 12.0f, 12.0f);
+            }
+
             g.setColour (muted);
             g.setFont (juce::FontOptions (11.0f, juce::Font::bold));
             g.drawText ("CABINET", cabBtn[0].getX(), cabBtn[0].getY() - 13, 70, 12, juce::Justification::centredLeft);
@@ -2898,6 +2935,8 @@ namespace
             if (ampKnobs.size() < 7)   // setSize() in the constructor calls this before the knobs exist
                 return;
             guitarBtn.setBounds (112, 16, 200, 32);
+            gateBtn.setBounds (984, 16, 112, 32);
+            gateThrS.setBounds (1100, 16, getWidth() - 24 - 1100 - 18, 32);
             for (int i = 0; i < AmpPlugin::kScenes; ++i)
                 sceneBtn[i].setBounds (336 + i * 158, 14, 150, 36);
 
@@ -3090,7 +3129,10 @@ namespace
 
         AmpPlugin& plug;
         SceneButton sceneBtn[AmpPlugin::kScenes];
-        juce::TextButton guitarBtn, modelBtn[6], cabBtn[4], loopBtn;
+        juce::TextButton guitarBtn, modelBtn[6], cabBtn[4], loopBtn, gateBtn;
+        juce::Slider gateThrS;
+        std::unique_ptr<juce::ButtonParameterAttachment> gateBtnA;
+        std::unique_ptr<juce::SliderParameterAttachment> gateThrA;
         std::vector<std::unique_ptr<Knob>> knobs;
         std::vector<Knob*> ampKnobs;
         Pedal pedals[6];
