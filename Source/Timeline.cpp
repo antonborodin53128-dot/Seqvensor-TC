@@ -242,7 +242,7 @@ void LaneComponent::mouseDown (const juce::MouseEvent& e)
         if (plainPress)
         {
             dragClip = clip;
-            dragClipStart = clip->start.load();
+            dragClipStart = clip->visibleStart();   // the visible beginning snaps to the grid
         }
     }
     else

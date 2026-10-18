@@ -933,7 +933,7 @@ void MainComponent::showClipMenu (const std::shared_ptr<Track>& track, const std
                                                              {
                                                                  if (safe == nullptr || fc.getResult() == juce::File())
                                                                      return;
-                                                                 const double start = clip->start.load();
+                                                                 const double start = clip->visibleStart();
                                                                  const bool loop = clip->loop.load();
                                                                  const bool follow = clip->followTempo.load();
                                                                  const double stretched = clip->stretchedToBpm.load();
@@ -959,7 +959,7 @@ void MainComponent::showClipMenu (const std::shared_ptr<Track>& track, const std
                                                              });
                                  break;
                              }
-                             case 3: for (auto& c : group) c->start.store (0.0); eng.clipsChanged(); break;
+                             case 3: for (auto& c : group) c->start.store (c->start.load() - c->visibleStart()); eng.clipsChanged(); break;   // the visible part begins on bar 1
                              case 4: safe->timelineView.snap = ! safe->timelineView.snap; break;
                              case 5:
                              {
@@ -2815,9 +2815,9 @@ void MainComponent::dragSelectedClips (const std::shared_ptr<Clip>& primary, dou
         return;
 
     // the group may not go earlier than the count-in bar
-    double minStart = 1.0e18;
+    double minStart = 1.0e18;   // of the visible parts (a clip trimmed at its start begins later than its `start`)
     for (auto& o : dragOrigins)
-        minStart = juce::jmin (minStart, o.second);
+        minStart = juce::jmin (minStart, o.second + (o.first->loop.load() ? 0.0 : o.first->trimIn.load() * o.first->lengthSeconds()));
     delta = juce::jmax (delta, -4.0 * engine.getBeatSeconds() - minStart);
 
     for (auto& o : dragOrigins)
