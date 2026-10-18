@@ -419,9 +419,13 @@ void Track::renderClips (int n, const ChunkClock& clock)
         const double fin = loop ? 0.0 : juce::jlimit (0.0, 1.0, c->trimIn.load());
         const double fout = loop ? 1.0 : juce::jlimit (fin, 1.0, 1.0 - c->trimOut.load());
         const double vs = start + fin * len, ve = start + fout * len;   // the visible (played) part on the timeline
+        // a trimmed edge is played 1.5 ms further with a 3 ms linear fade centred on it: the two halves of a cut clip
+        // overlap and add up to exactly the uncut sound, a trimmed edge simply fades
+        const double halfFade = 0.0015;
+        const double vsPlay = fin > 0.0 ? vs - halfFade : vs, vePlay = fout < 1.0 ? ve + halfFade : ve;
 
-        const int i0 = juce::jmax (0, (int) std::ceil ((vs - t0) * sampleRate));
-        const int i1 = loop ? n : juce::jmin (n, (int) std::ceil ((ve - t0) * sampleRate));
+        const int i0 = juce::jmax (0, (int) std::ceil ((vsPlay - t0) * sampleRate));
+        const int i1 = loop ? n : juce::jmin (n, (int) std::ceil ((vePlay - t0) * sampleRate));
         if (i0 >= i1 || len <= 0.0)
         {
             if (c->live != nullptr)
@@ -449,9 +453,9 @@ void Track::renderClips (int n, const ChunkClock& clock)
                 const double tl = t0 + (double) i / sampleRate;
                 float g = 1.0f;
                 if (fin > 0.0)
-                    g *= (float) juce::jlimit (0.0, 1.0, (tl - vs) / fade);
+                    g *= (float) juce::jlimit (0.0, 1.0, (tl - (vs - halfFade)) / fade);
                 if (fout < 1.0)
-                    g *= (float) juce::jlimit (0.0, 1.0, (ve - tl) / fade);
+                    g *= (float) juce::jlimit (0.0, 1.0, ((ve + halfFade) - tl) / fade);
                 l[i] += outL[i] * g;
                 r[i] += outR[i] * g;
             }
