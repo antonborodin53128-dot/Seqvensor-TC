@@ -2234,7 +2234,7 @@ namespace
     public:
         explicit OverdriveEditor (OverdrivePlugin& p) : juce::AudioProcessorEditor (p), plug (p)
         {
-            setSize (340, 400);
+            setSize (340, 480);
             addKnob (drS, drL, "DRIVE", *p.drive, drA);
             addKnob (toS, toL, "TONE", *p.tone, toA);
             drS.textFromValueFunction = [] (double v) { return juce::String ((int) std::round (v / 10.0)); };
@@ -2269,6 +2269,38 @@ namespace
             g.drawText ("808", juce::Rectangle<int> (0, 292, getWidth(), 40), juce::Justification::centred);
             g.setFont (juce::FontOptions (15.0f, juce::Font::bold));
             g.drawText ("OVERDRIVE", juce::Rectangle<int> (0, 326, getWidth(), 20), juce::Justification::centred);
+
+            // LED and foot switch (the pedal's own switch: a short cross-fade, never clicks)
+            const bool o = plug.on->get();
+            g.setColour (o ? juce::Colour (0xffff3b30) : juce::Colour (0xff4a2a2a));
+            g.fillEllipse (getWidth() * 0.5f - 7.0f, 368.0f, 14.0f, 14.0f);
+            if (o)
+            {
+                g.setColour (juce::Colour (0x40ff3b30));
+                g.fillEllipse (getWidth() * 0.5f - 14.0f, 361.0f, 28.0f, 28.0f);
+            }
+            auto fs = footSwitch().toFloat();
+            juce::ColourGradient metal (juce::Colour (0xffe6e9ea), fs.getX(), fs.getY(), juce::Colour (0xff8d9496), fs.getRight(), fs.getBottom(), false);
+            g.setGradientFill (metal);
+            g.fillEllipse (fs);
+            g.setColour (juce::Colour (0xff3b4244));
+            g.drawEllipse (fs, 2.5f);
+            g.setColour (juce::Colour (0xff6b7476));
+            g.drawEllipse (fs.reduced (14.0f), 1.5f);
+            g.setColour (juce::Colour (0xffd7e8d7));
+            g.setFont (juce::FontOptions (11.0f, juce::Font::bold));
+            g.drawText (o ? "ON  -  click to bypass" : "BYPASSED  -  click to turn on", juce::Rectangle<int> (0, 452, getWidth(), 14), juce::Justification::centred);
+        }
+
+        void mouseDown (const juce::MouseEvent& e) override
+        {
+            if (footSwitch().toFloat().contains (e.position))
+            {
+                plug.on->beginChangeGesture();
+                *plug.on = ! plug.on->get();
+                plug.on->endChangeGesture();
+                repaint();
+            }
         }
 
         void resized() override
@@ -2285,6 +2317,7 @@ namespace
         }
 
     private:
+        juce::Rectangle<int> footSwitch() const { return juce::Rectangle<int> (getWidth() / 2 - 40, 388, 80, 60); }
 
         void addKnob (juce::Slider& s, juce::Label& l, const juce::String& text, juce::RangedAudioParameter& prm, std::unique_ptr<juce::SliderParameterAttachment>& att)
         {
