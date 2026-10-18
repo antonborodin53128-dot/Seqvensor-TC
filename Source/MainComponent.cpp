@@ -356,6 +356,10 @@ MainComponent::MainComponent()
     statusLabel.setColour (juce::Label::textColourId, juce::Colours::lightgrey);
     statusLabel.setFont (juce::FontOptions (12.0f));
     addAndMakeVisible (statusLabel);
+    lockButton.setTooltip ("Замок: защита от случайных нажатий. Пока он закрыт, на таймлайне и дорожках ничего не меняется, "_ru
+                           "работают только плейлист и транспорт."_ru);
+    lockButton.onClick = [this] { setLocked (lockButton.getToggleState()); };
+    addAndMakeVisible (lockButton);
 
     emptyHint.setText ("Добавьте дорожку, затем перетащите на неё аудиофайл (или правая кнопка по дорожке)."_ru, juce::dontSendNotification);
     emptyHint.setJustificationType (juce::Justification::centred);
@@ -499,7 +503,8 @@ void MainComponent::layoutTimelineParts()
     const int laneW = juce::jmax (100, visibleW - TrackComponent::headerWidth);
     const int top = viewport.getY() - rulerH;
 
-    statusLabel.setBounds (viewport.getX() + 10, top, TrackComponent::headerWidth - 20, rulerH);
+    lockButton.setBounds (viewport.getX() + 8, top + 2, 30, rulerH - 4);
+    statusLabel.setBounds (viewport.getX() + 46, top, TrackComponent::headerWidth - 56, rulerH);
     ruler.setBounds (laneX, top, laneW, rulerH);
     scroller.setBounds (laneX, top - scrollerH, laneW, scrollerH);
     playhead.setBounds (laneX, top, laneW, rulerH + viewport.getHeight());
@@ -588,12 +593,20 @@ void MainComponent::rebuildTracks()
     lane.laneMenu = [this] (std::shared_ptr<Track> t, double time, juce::Point<int> p) { showLaneMenu (t, time, p); raiseMenus(); };
     lane.filesDropped = [this] (std::shared_ptr<Track> t, const juce::StringArray& f, double time) { addAudioFiles (t, f, time); };
     lane.changed = [this] { repaintTimeline(); };
+    lane.cutClip = [this] (std::shared_ptr<Track> t, std::shared_ptr<Clip> c, double time)
+    {
+        if (auto right = engine.splitClip (t, c, time))
+            timelineView.selected = { right->id };
+        repaintTimeline();
+    };
+    lane.trimmed = [this] { engine.clipsChanged(); repaintTimeline(); };
 
     for (auto& t : engine.getTracks())
     {
         auto* tc = new TrackComponent (engine, t, timelineView, cb, lane);
         trackComponents.add (tc);
         trackList.addAndMakeVisible (tc);
+        tc->setLocked (timelineView.locked);
     }
     layoutTracks();
     timelineDirty = true;
@@ -790,6 +803,8 @@ void MainComponent::addAudioFiles (const std::shared_ptr<Track>& track, const ju
 
 bool MainComponent::isInterestedInFileDrag (const juce::StringArray& files)
 {
+    if (timelineView.locked)
+        return false;
     for (auto& f : files)
         if (LaneComponent::isAudioFile (f))
             return true;
@@ -2872,11 +2887,15 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
     if (key == juce::KeyPress ('a', juce::ModifierKeys::ctrlModifier, 0)
         || key == juce::KeyPress ('a', juce::ModifierKeys::commandModifier, 0))
     {
+        if (timelineView.locked)
+            return true;
         selectAllClips();
         return true;
     }
     if (key == juce::KeyPress::deleteKey || key == juce::KeyPress::backspaceKey)
     {
+        if (timelineView.locked)
+            return true;
         deleteSelectedClips();
         return true;
     }
@@ -3365,4 +3384,19 @@ void MainComponent::saveSelectionToFile (PlayerBar::Tab tab)
         exportPlaylist (id >= 0 && id < playlistRows.size() ? playlistRows[id] : juce::String());
     else
         exportScene (id >= 0 && id < playlist.items.size() ? playlist.items[id] : juce::String());
+}
+
+
+// the padlock over the track controls
+void MainComponent::setLocked (bool locked)
+{
+    timelineView.locked = locked;
+    lockButton.setToggleState (locked, juce::dontSendNotification);
+    if (locked)
+        timelineView.selected.clear();
+    for (auto* t : trackComponents)
+        t->setLocked (locked);
+    addTrackButton.setEnabled (! locked);
+    say (locked ? "Замок закрыт: таймлайн и дорожки защищены от изменений"_ru : "Замок открыт"_ru);
+    repaintTimeline();
 }

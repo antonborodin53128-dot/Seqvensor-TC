@@ -122,6 +122,8 @@ public:
     std::function<void()> onAnalysisDone;               // after any clip got its tempo / key
     void removeClip (const std::shared_ptr<Track>& track, int clipId);
     void clipsChanged();                                // recomputes the end of the song
+    // cuts a clip in two at `time` (timeline seconds); returns the new right part or null
+    std::shared_ptr<Clip> splitClip (const std::shared_ptr<Track>& track, const std::shared_ptr<Clip>& clip, double time);
     // Time-stretch the audio of a clip to a project tempo (pitch unchanged), in the background. The newest request wins.
     void stretchClip (const std::shared_ptr<Track>& track, const std::shared_ptr<Clip>& clip, double targetBpm,
                       std::function<void()> done = {});

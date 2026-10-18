@@ -796,6 +796,34 @@ void Engine::applyAnalysis (ClipData& d, const FileAnalysis& a)
     std::copy (a.hist, a.hist + 12, d.keyHist);
 }
 
+std::shared_ptr<Clip> Engine::splitClip (const std::shared_ptr<Track>& track, const std::shared_ptr<Clip>& clip, double time)
+{
+    if (track == nullptr || clip == nullptr || clip->loop.load())
+        return nullptr;
+    const double len = clip->lengthSeconds();
+    if (len <= 0.0)
+        return nullptr;
+    const double frac = (time - clip->start.load()) / len;
+    const double fin = clip->trimIn.load(), fout = 1.0 - clip->trimOut.load();
+    const double minFrac = 0.01 / len;   // never leave a part shorter than 10 ms
+    if (frac <= fin + minFrac || frac >= fout - minFrac)
+        return nullptr;
+
+    auto right = track->addClip (clip->data, clip->start.load(), takeClipId(), nullptr);
+    right->original = clip->original;
+    right->followTempo = clip->followTempo.load();
+    right->manualBpm = clip->manualBpm.load();
+    right->stretchedToBpm = clip->stretchedToBpm.load();
+    right->speed = clip->speed.load();
+    right->shift = clip->shift.load();
+    right->trimIn = frac;
+    right->trimOut = clip->trimOut.load();
+    clip->trimOut = 1.0 - frac;
+    ensureLive (track, right);
+    clipsChanged();
+    return right;
+}
+
 void Engine::addClipFromFile (const std::shared_ptr<Track>& track, const juce::File& file, double startSeconds,
                               std::function<void (std::shared_ptr<Clip>, const juce::String&)> done,
                               std::function<void (std::shared_ptr<Clip>)> analysed)
@@ -1132,6 +1160,10 @@ namespace
                 ce->setAttribute ("follow", c->followTempo.load());
                 ce->setAttribute ("stretchBpm", c->stretchedToBpm.load());
                 ce->setAttribute ("manualBpm", c->manualBpm.load());
+                if (c->trimIn.load() > 0.0)
+                    ce->setAttribute ("trimIn", c->trimIn.load());
+                if (c->trimOut.load() > 0.0)
+                    ce->setAttribute ("trimOut", c->trimOut.load());
             }
 
             for (int i = 0; i < Track::numSlots; ++i)
@@ -1252,12 +1284,14 @@ void Engine::fillSequence (const std::shared_ptr<Sequence>& seq)
             addClipFromFile (track, f, ce->getDoubleAttribute ("start", 0.0),
                              [this, track, finished, loop = ce->getBoolAttribute ("loop", false),
                               follow = ce->getBoolAttribute ("follow", false), stretchBpm = ce->getDoubleAttribute ("stretchBpm", 0.0),
-                              seqBpm = seq->bpm]
+                              seqBpm = seq->bpm, tin = ce->getDoubleAttribute ("trimIn", 0.0), tout = ce->getDoubleAttribute ("trimOut", 0.0)]
                              (std::shared_ptr<Clip> clip, const juce::String&)
                              {
                                  if (clip != nullptr)
                                  {
                                      clip->loop = loop;
+                                     clip->trimIn = tin;
+                                     clip->trimOut = tout;
                                      clip->followTempo = follow;
                                      clip->updateSpeed (seqBpm);
                                  }

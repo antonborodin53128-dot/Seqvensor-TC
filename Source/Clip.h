@@ -99,5 +99,10 @@ struct Clip
         return d != nullptr ? d->lengthSeconds() / speed.load() : 0.0;
     }
 
-    double end() const { return start.load() + lengthSeconds(); }
+    // trimming (non-destructive): fractions of the whole clip cut off at the beginning / the end. The audio does not move:
+    // `start` is where the whole file would begin, the visible part begins at start + trimIn * length.
+    std::atomic<double> trimIn { 0.0 }, trimOut { 0.0 };
+    bool isTrimmed() const { return ! loop.load() && (trimIn.load() > 0.0 || trimOut.load() > 0.0); }
+    double visibleStart() const { return loop.load() ? start.load() : start.load() + trimIn.load() * lengthSeconds(); }
+    double end() const { return start.load() + (loop.load() ? 1.0 : 1.0 - trimOut.load()) * lengthSeconds(); }
 };

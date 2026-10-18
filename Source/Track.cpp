@@ -296,7 +296,7 @@ double Track::getEarliestStart() const
 {
     double first = 0.0;
     for (auto& c : clips)
-        first = juce::jmin (first, c->start.load());
+        first = juce::jmin (first, c->visibleStart());
     return first;
 }
 
@@ -309,6 +309,7 @@ void Track::prepare (double newSampleRate, int maxBlockSize, juce::AudioPlayHead
 
     stereoBuf.setSize (2, maxBlock, false, true, false);
     busOut.setSize (2, maxBlock, false, true, false);
+    clipScratch.setSize (2, maxBlock, false, true, false);
     clickBuf.setSize (2, maxBlock, false, true, false);
     pluginBuf.setSize (16, maxBlock, false, true, false);
     midi.ensureSize (2048);
@@ -415,9 +416,12 @@ void Track::renderClips (int n, const ChunkClock& clock)
         const double len = d.lengthSeconds() / sp;
         const bool loop = c->loop.load();
         const double t0 = clock.startSeconds;
+        const double fin = loop ? 0.0 : juce::jlimit (0.0, 1.0, c->trimIn.load());
+        const double fout = loop ? 1.0 : juce::jlimit (fin, 1.0, 1.0 - c->trimOut.load());
+        const double vs = start + fin * len, ve = start + fout * len;   // the visible (played) part on the timeline
 
-        const int i0 = juce::jmax (0, (int) std::ceil ((start - t0) * sampleRate));
-        const int i1 = loop ? n : juce::jmin (n, (int) std::ceil ((start + len - t0) * sampleRate));
+        const int i0 = juce::jmax (0, (int) std::ceil ((vs - t0) * sampleRate));
+        const int i1 = loop ? n : juce::jmin (n, (int) std::ceil ((ve - t0) * sampleRate));
         if (i0 >= i1 || len <= 0.0)
         {
             if (c->live != nullptr)
@@ -425,10 +429,39 @@ void Track::renderClips (int n, const ChunkClock& clock)
             continue;
         }
 
+        // a trimmed edge gets a 3 ms fade, so a cut never clicks; the clip is rendered into a scratch buffer first
+        const bool edges = fin > 0.0 || fout < 1.0;
+        float* outL = l;
+        float* outR = r;
+        if (edges)
+        {
+            clipScratch.clear (0, n);
+            outL = clipScratch.getWritePointer (0);
+            outR = clipScratch.getWritePointer (1);
+        }
+        auto addEdges = [&]
+        {
+            if (! edges)
+                return;
+            const double fade = 0.003;
+            for (int i = i0; i < i1; ++i)
+            {
+                const double tl = t0 + (double) i / sampleRate;
+                float g = 1.0f;
+                if (fin > 0.0)
+                    g *= (float) juce::jlimit (0.0, 1.0, (tl - vs) / fade);
+                if (fout < 1.0)
+                    g *= (float) juce::jlimit (0.0, 1.0, (ve - tl) / fade);
+                l[i] += outL[i] * g;
+                r[i] += outR[i] * g;
+            }
+        };
+
         if (useLive)
         {
             const double posStart = (t0 + (double) i0 / sampleRate - start) * rho * sampleRate;   // file samples
-            c->live->render (l + i0, r + i0, i1 - i0, posStart, rho, loop, semis);
+            c->live->render (outL + i0, outR + i0, i1 - i0, posStart, rho, loop, semis);
+            addEdges();
             continue;
         }
         if (c->live != nullptr)
@@ -450,18 +483,19 @@ void Track::renderClips (int n, const ChunkClock& clock)
             {
                 if (ratio == 1.0)
                 {
-                    l[i] += L[idx];
-                    r[i] += R[idx];
+                    outL[i] += L[idx];
+                    outR[i] += R[idx];
                 }
                 else
                 {
                     const float f = (float) (pos - idx);
-                    l[i] += cubicSample (L, idx, f, d.numSamples);
-                    r[i] += cubicSample (R, idx, f, d.numSamples);
+                    outL[i] += cubicSample (L, idx, f, d.numSamples);
+                    outR[i] += cubicSample (R, idx, f, d.numSamples);
                 }
             }
             pos += ratio;
         }
+        addEdges();
     }
 }
 

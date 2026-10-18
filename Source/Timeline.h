@@ -12,6 +12,7 @@ struct TimelineView
     double clock = 0.0;             // song position in seconds (0 = bar 1, beat 1; < 0 = count-in)
     bool snap = true;               // clips snap to 1/16 of a beat unless Alt is held
     std::set<int> selected;         // ids of the selected clips (all lanes)
+    bool locked = false;            // the lock: nothing on the timeline / the tracks can be changed
 
     // Everything is pixel-locked: the scroll position is a whole number of pixels, so grid lines and waveform
     // columns keep exactly the same pixels while they slide (no shimmer / blur).
@@ -62,6 +63,8 @@ public:
         std::function<void (std::shared_ptr<Track>, double time, juce::Point<int> screenPos)> laneMenu;
         std::function<void (std::shared_ptr<Track>, const juce::StringArray& files, double time)> filesDropped;
         std::function<void()> changed;   // clips moved: repaint everything
+        std::function<void (std::shared_ptr<Track>, std::shared_ptr<Clip>, double time)> cutClip;   // Alt + click
+        std::function<void()> trimmed;                                                              // an edge was dragged
     };
 
     LaneComponent (Engine& e, std::shared_ptr<Track> t, TimelineView& v, Callbacks c)
@@ -71,6 +74,9 @@ public:
     void mouseDown (const juce::MouseEvent&) override;
     void mouseDrag (const juce::MouseEvent&) override;
     void mouseUp (const juce::MouseEvent&) override;
+    void mouseMove (const juce::MouseEvent&) override;
+    void mouseExit (const juce::MouseEvent&) override;
+    void modifierKeysChanged (const juce::ModifierKeys&) override { repaint(); }
     void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails& w) override { if (cb.zoom) cb.zoom (w.deltaY); }
 
     bool isInterestedInFileDrag (const juce::StringArray& files) override;
@@ -85,6 +91,8 @@ public:
 
 private:
     std::shared_ptr<Clip> clipAt (float x) const;
+    // a clip edge under x (within a few pixels): side -1 = start, +1 = end
+    std::shared_ptr<Clip> edgeAt (float x, int& side) const;
     double snapTime (double t, bool allowSnap) const;
 
     Engine& engine;
@@ -95,6 +103,9 @@ private:
     std::shared_ptr<Clip> dragClip;
     double dragClipStart = 0.0;
     bool didDrag = false, pressedOnSelected = false, plainPress = false, marqueeing = false, dropHighlight = false;
+    std::shared_ptr<Clip> trimClip;
+    int trimSide = 0;
+    float hoverX = -1.0f;
 };
 
 // Fixed playhead line over the ruler and all lanes + "bar | beat" readout.

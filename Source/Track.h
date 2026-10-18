@@ -143,6 +143,7 @@ private:
     int maxBlock = 512;
     juce::AudioBuffer<float> stereoBuf;
     juce::AudioBuffer<float> busOut;
+    juce::AudioBuffer<float> clipScratch;
     juce::AudioBuffer<float> clickBuf;
     juce::AudioBuffer<float> pluginBuf;
     juce::MidiBuffer midi;

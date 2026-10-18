@@ -212,6 +212,45 @@ private:
     bool hot = false, started = false;
 };
 
+// Padlock: locked = nothing on the timeline and the tracks can be changed (protection against stray clicks).
+class LockButton : public juce::Button
+{
+public:
+    LockButton() : juce::Button ("lock") { setClickingTogglesState (true); }
+
+    void paintButton (juce::Graphics& g, bool over, bool) override
+    {
+        const bool locked = getToggleState();
+        auto r = getLocalBounds().toFloat().reduced (1.0f);
+        g.setColour (locked ? Pal::orange.withAlpha (0.9f) : (over ? Pal::surfaceHi : Pal::surface));
+        g.fillRoundedRectangle (r, Pal::radius);
+        g.setColour (Pal::hairline);
+        g.drawRoundedRectangle (r, Pal::radius, 1.0f);
+
+        const auto c = r.getCentre();
+        const float s = juce::jmin (r.getWidth(), r.getHeight()) * 0.22f;
+        g.setColour (locked ? juce::Colours::black : Pal::text);
+        // body
+        g.fillRoundedRectangle (juce::Rectangle<float> (s * 2.6f, s * 2.0f).withCentre ({ c.x, c.y + s * 0.7f }), 1.5f);
+        // shackle: closed when locked, lifted and open when not
+        juce::Path p;
+        const float top = locked ? c.y - s * 1.5f : c.y - s * 2.1f;
+        p.startNewSubPath (c.x - s * 0.85f, c.y - s * 0.3f);
+        p.lineTo (c.x - s * 0.85f, top + s * 0.8f);
+        p.quadraticTo (c.x - s * 0.85f, top, c.x, top);
+        p.quadraticTo (c.x + s * 0.85f, top, c.x + s * 0.85f, top + s * 0.8f);
+        p.lineTo (c.x + s * 0.85f, locked ? c.y - s * 0.3f : top + s * 1.1f);
+        g.strokePath (p, juce::PathStrokeType (1.8f));
+    }
+};
+
+// Transparent cover over the controls of a track while the lock is on: it swallows every click.
+class LockShield : public juce::Component
+{
+public:
+    void mouseDown (const juce::MouseEvent&) override {}
+};
+
 // Vertical stereo level meter.
 class LevelMeter : public juce::Component
 {
@@ -430,6 +469,7 @@ public:
     void updateLive();   // meters (timer)
     void repaintLane() { lane.repaint(); }
     void endDragVisual() { if (getAlpha() < 1.0f) setAlpha (1.0f); }
+    void setLocked (bool l) { shield.setVisible (l); if (l) shield.toFront (false); }
     LaneComponent& getLane() { return lane; }
 
     std::shared_ptr<Track> getTrack() const { return track; }
@@ -464,6 +504,7 @@ private:
     LevelMeter meter;
 
     LaneComponent lane;
+    LockShield shield;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (TrackComponent)
 };

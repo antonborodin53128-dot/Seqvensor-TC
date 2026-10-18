@@ -177,6 +177,8 @@ private:
     // tracks
     juce::Viewport viewport;
     TrackListArea trackList;
+    LockButton lockButton;
+    void setLocked (bool locked);
     struct DropLine : public juce::Component
     {
         DropLine() { setInterceptsMouseClicks (false, false); }

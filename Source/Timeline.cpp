@@ -93,6 +93,8 @@ bool LaneComponent::isAudioFile (const juce::String& path)
 
 bool LaneComponent::isInterestedInFileDrag (const juce::StringArray& files)
 {
+    if (view.locked)
+        return false;
     for (auto& f : files)
         if (isAudioFile (f))
             return true;
@@ -133,10 +135,36 @@ std::shared_ptr<Clip> LaneComponent::clipAt (float x) const
     for (size_t i = clips.size(); i-- > 0;)
     {
         const auto& c = clips[i];
-        const float x0 = view.timeToX (c->start.load(), w);
+        const float x0 = view.timeToX (c->visibleStart(), w);
         const float x1 = c->loop.load() ? w : view.timeToX (c->end(), w);
         if (x >= x0 && x <= x1)
             return c;
+    }
+    return nullptr;
+}
+
+std::shared_ptr<Clip> LaneComponent::edgeAt (float x, int& side) const
+{
+    const float w = (float) getWidth();
+    const auto& clips = track->getClips();
+    for (size_t i = clips.size(); i-- > 0;)
+    {
+        const auto& c = clips[i];
+        if (c->loop.load())
+            continue;
+        const float x0 = view.timeToX (c->visibleStart(), w);
+        const float x1 = view.timeToX (c->end(), w);
+        const float grab = juce::jmin (6.0f, (x1 - x0) * 0.25f);
+        if (std::abs (x - x0) <= grab)
+        {
+            side = -1;
+            return c;
+        }
+        if (std::abs (x - x1) <= grab)
+        {
+            side = 1;
+            return c;
+        }
     }
     return nullptr;
 }
@@ -150,7 +178,7 @@ void LaneComponent::collectClipsInScreenRect (juce::Rectangle<int> screenRect, s
 
     for (auto& c : track->getClips())
     {
-        const float x0 = view.timeToX (c->start.load(), w);
+        const float x0 = view.timeToX (c->visibleStart(), w);
         const float x1 = c->loop.load() ? w : view.timeToX (c->end(), w);
         if (x1 >= (float) local.getX() && x0 <= (float) local.getRight())
             ids.insert (c->id);
@@ -159,6 +187,9 @@ void LaneComponent::collectClipsInScreenRect (juce::Rectangle<int> screenRect, s
 
 void LaneComponent::mouseDown (const juce::MouseEvent& e)
 {
+    trimClip = nullptr;
+    if (view.locked)
+        return;   // the lock: nothing can be changed here
     dragClip = nullptr;
     didDrag = false;
     marqueeing = false;
@@ -168,6 +199,26 @@ void LaneComponent::mouseDown (const juce::MouseEvent& e)
         cb.focus();
 
     auto clip = clipAt ((float) e.x);
+
+    // Alt + click: cut the clip in two at that place
+    if (e.mods.isAltDown() && ! e.mods.isPopupMenu() && clip != nullptr && ! clip->loop.load())
+    {
+        if (cb.cutClip)
+            cb.cutClip (track, clip, snapTime (view.xToTime ((float) e.x, (float) getWidth()), view.snap));
+        return;
+    }
+
+    // an edge of a clip: trim it (or bring a trimmed part back)
+    if (! e.mods.isPopupMenu())
+    {
+        int side = 0;
+        if (auto c = edgeAt ((float) e.x, side))
+        {
+            trimClip = c;
+            trimSide = side;
+            return;
+        }
+    }
 
     if (e.mods.isPopupMenu())
     {
@@ -204,6 +255,24 @@ void LaneComponent::mouseDown (const juce::MouseEvent& e)
 
 void LaneComponent::mouseDrag (const juce::MouseEvent& e)
 {
+    if (view.locked)
+        return;
+    if (trimClip != nullptr)
+    {
+        const double len = trimClip->lengthSeconds();
+        if (len <= 0.0)
+            return;
+        const double t = snapTime (view.xToTime ((float) e.x, (float) getWidth()), view.snap && ! e.mods.isAltDown());
+        const double frac = (t - trimClip->start.load()) / len;
+        const double minFrac = juce::jmin (0.5, 0.02 / len);   // at least 20 ms stay
+        if (trimSide < 0)
+            trimClip->trimIn = juce::jlimit (0.0, 1.0 - trimClip->trimOut.load() - minFrac, frac);
+        else
+            trimClip->trimOut = juce::jlimit (0.0, 1.0 - trimClip->trimIn.load() - minFrac, 1.0 - frac);
+        if (cb.changed)
+            cb.changed();
+        return;
+    }
     if (e.getDistanceFromDragStart() < 3 && ! didDrag)
         return;
     didDrag = true;
@@ -224,8 +293,32 @@ void LaneComponent::mouseDrag (const juce::MouseEvent& e)
     }
 }
 
+void LaneComponent::mouseMove (const juce::MouseEvent& e)
+{
+    hoverX = (float) e.x;
+    int side = 0;
+    const bool edge = ! view.locked && edgeAt ((float) e.x, side) != nullptr;
+    setMouseCursor (edge ? juce::MouseCursor::LeftRightResizeCursor : juce::MouseCursor::NormalCursor);
+    if (juce::ModifierKeys::currentModifiers.isAltDown())
+        repaint();
+}
+
+void LaneComponent::mouseExit (const juce::MouseEvent&)
+{
+    hoverX = -1.0f;
+    setMouseCursor (juce::MouseCursor::NormalCursor);
+    repaint();
+}
+
 void LaneComponent::mouseUp (const juce::MouseEvent&)
 {
+    if (trimClip != nullptr)
+    {
+        trimClip = nullptr;
+        if (cb.trimmed)
+            cb.trimmed();
+        return;
+    }
     if (marqueeing && cb.marquee)
         cb.marquee ({}, true);
 
@@ -253,11 +346,12 @@ void LaneComponent::paint (juce::Graphics& g)
         const double len = c->lengthSeconds();   // on the timeline (a following clip is stretched with the tempo)
         const double speed = c->follows() ? c->speed.load() : 1.0;
         const double tLeft = view.xToTime (0.0f, w), tRight = view.xToTime (w, w);
-        const double end = c->loop.load() ? juce::jmax (tRight, start + len) : start + len;
-        if (end < tLeft || start > tRight)
+        const double vStart = c->visibleStart();
+        const double end = c->loop.load() ? juce::jmax (tRight, start + len) : c->end();
+        if (end < tLeft || vStart > tRight)
             continue;
 
-        const int x0 = (int) std::lround (view.timeToX (start, w));
+        const int x0 = (int) std::lround (view.timeToX (vStart, w));
         const int x1 = (int) std::lround (view.timeToX (end, w));
         const int cx0 = juce::jmax (0, x0), cx1 = juce::jmin (bounds.getWidth(), x1);
         if (cx1 <= cx0)
@@ -315,6 +409,16 @@ void LaneComponent::paint (juce::Graphics& g)
         g.drawText (c->data->name + (c->loop.load() ? "  (повтор)"_ru : juce::String()),
                     juce::jmax (x0, 0) + 10, 7, 400, 16, juce::Justification::left, false);
     }
+
+    // Alt held over a clip: where the cut would go
+    if (! view.locked && hoverX >= 0.0f && juce::ModifierKeys::currentModifiers.isAltDown())
+        if (auto c = clipAt (hoverX))
+            if (! c->loop.load())
+            {
+                const float cx = view.timeToX (snapTime (view.xToTime (hoverX, w), view.snap), w);
+                g.setColour (juce::Colours::white.withAlpha (0.85f));
+                g.drawVerticalLine ((int) std::lround (cx), 4.0f, (float) getHeight() - 4.0f);
+            }
 
     if (track->loadingClips.load() > 0)
     {
@@ -458,7 +562,7 @@ void TimelineScroller::paint (juce::Graphics& g)
         for (size_t i = 0; i < tracks.size(); ++i)
             for (auto& c : tracks[i]->getClips())
             {
-                const double s = c->start.load();
+                const double s = c->visibleStart();
                 const double e = c->loop.load() ? rangeEnd() : c->end();
                 const float x0 = timeToX (s), x1 = juce::jmax (x0 + 1.0f, timeToX (e));
                 g.setColour (Pal::clip.withAlpha (0.55f));

@@ -142,6 +142,7 @@ TrackComponent::TrackComponent (Engine& engineToUse, std::shared_ptr<Track> trac
     addAndMakeVisible (meter);
 
     addAndMakeVisible (lane);
+    addChildComponent (shield);
 
     refreshAll();
 }
@@ -225,6 +226,7 @@ void TrackComponent::resized()
 {
     auto area = getLocalBounds();
     lane.setBounds (area.withTrimmedLeft (headerWidth));
+    shield.setBounds (0, 0, headerWidth, getHeight());
 
     auto h = juce::Rectangle<int> (0, 0, headerWidth - 4, getHeight()).reduced (10, 8);
 
