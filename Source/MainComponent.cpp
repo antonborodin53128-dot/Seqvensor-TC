@@ -1680,13 +1680,6 @@ void MainComponent::showKeyMenu()
     raiseMenus();
 }
 
-void MainComponent::setPinned (bool shouldPin)
-{
-    pinned = shouldPin;
-    if (auto* top = getTopLevelComponent())
-        top->setAlwaysOnTop (pinned);
-}
-
 void MainComponent::tapTempo()
 {
     const auto now = juce::Time::getMillisecondCounter();
@@ -1791,8 +1784,6 @@ void MainComponent::updateTimeline()
     }
 }
 
-// Menus popping up and being dismissed by a click elsewhere can make Windows drop the "topmost" state of the
-// window, which then sinks behind other programs. Check the real state and restore it.
 // A menu opened by the click that dismissed another menu can end up under the window Windows raises at that
 // moment. Bring every other (popup) window of the program in front of the main one shortly afterwards.
 void MainComponent::raiseMenus()
@@ -1811,34 +1802,28 @@ void MainComponent::raiseMenus()
     });
 }
 
-void MainComponent::keepOnTop()
+// TC never stays above other programs: if anything (an old setting, a plugin, a driver panel) made the main window
+// "topmost", that state is removed again.
+void MainComponent::keepNormalWindow()
 {
-    if (! pinned)
-        return;
     auto* top = getTopLevelComponent();
     if (top == nullptr)
         return;
-    auto* peer = top->getPeer();
-    if (peer == nullptr)
-        return;
-
+    if (top->isAlwaysOnTop())
+        top->setAlwaysOnTop (false);
    #if JUCE_WINDOWS
-    const auto hwnd = (HWND) peer->getNativeHandle();
-    const bool topmost = (GetWindowLongPtr (hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0;
-    if (! topmost)
+    if (auto* peer = top->getPeer())
     {
-        engine.logLine ("window lost topmost: restoring");
-        SetWindowPos (hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        const auto hwnd = (HWND) peer->getNativeHandle();
+        if ((GetWindowLongPtr (hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0)
+            SetWindowPos (hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     }
-   #else
-    if (! top->isAlwaysOnTop())
-        top->setAlwaysOnTop (true);
    #endif
 }
 
 void MainComponent::timerCallback()
 {
-    keepOnTop();
+    keepNormalWindow();
     syncLyrics();
     for (auto* t : trackComponents)
         t->updateLive();

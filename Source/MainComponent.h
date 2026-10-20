@@ -124,9 +124,8 @@ private:
     void deleteSelectedClips();
     void addTrack();
     void tapTempo();
-    void keepOnTop();
+    void keepNormalWindow();
     void raiseMenus();
-    void setPinned (bool pinned);
 
     void rebuildTracks();
     int trackRowForDrag (const juce::String& description, juce::Point<int> pos, int& from) const;
@@ -193,7 +192,6 @@ private:
     std::unique_ptr<juce::FileChooser> chooser;
     std::unique_ptr<juce::PropertiesFile> pluginScanProps;
     juce::Array<juce::int64> tapTimes;
-    bool pinned = false;
     int autosaveCounter = 0;
     int slowCounter = 0;
     double lastScroll = -1.0e18, lastSpan = 0.0, lastBpm = 0.0;
