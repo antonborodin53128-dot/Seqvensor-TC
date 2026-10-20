@@ -29,6 +29,9 @@ KeyHist computeKeyHist (const std::vector<float>& mono, double sampleRate);
 // The histogram does not have to be normalised.
 KeyGuess guessKey (const float* hist);
 
+// How well one given key fits the histogram (the correlation guessKey uses).
+double keyScore (const float* hist, int tonic, bool minor);
+
 juce::String keyName (int tonic, bool minor);            // "Am", "C", "F#m"
 juce::String keyNameFull (int tonic, bool minor);        // "A минор", "C мажор"
 

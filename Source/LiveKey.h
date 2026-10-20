@@ -50,6 +50,15 @@ private:
     std::atomic<long long> lastSignal { -1 };           // position (samples written) where the input was last above the noise floor
     std::atomic<long long> resetAt { 0 };               // samples before this position are not analysed
 
+    // analysis thread only: the notes of the whole song so far (since the last reset), slowly forgetting the oldest part,
+    // and the key on screen, which changes only when another key wins clearly and twice in a row
+    float acc[12] = {};
+    long long analysedTo = 0, seenReset = -1;
+    double accSeconds = 0.0;
+    KeyGuess shown;
+    int pendTonic = -1, pendCount = 0;
+    bool pendMinor = false;
+
     mutable juce::CriticalSection stateLock;
     State state;
 };

@@ -107,11 +107,25 @@ void LiveKeyAnalyzer::run()
         const double sr = rate.load();
         const long long cap = (long long) ring.size();
         const long long w = written.load (std::memory_order_acquire);
-        long long from = std::max (w - (long long) (sr * 30.0), resetAt.load());
+        const long long rs = resetAt.load();
+        long long from = std::max (w - (long long) (sr * 30.0), rs);
         from = std::max (from, w - cap + (long long) sr);   // never read what the writer is about to overwrite
         const long long count = w - from;
         if ((double) count < sr * 6.0)
             continue;   // too little music for a verdict
+
+        // a new song (reset, new channel, new device): the collected notes and the key on screen are dropped
+        if (rs != seenReset || analysedTo > w)
+        {
+            seenReset = rs;
+            analysedTo = rs;
+            std::fill (std::begin (acc), std::end (acc), 0.0f);
+            accSeconds = 0.0;
+            shown = KeyGuess();
+            pendTonic = -1;
+            pendCount = 0;
+        }
+        analysedTo = std::max (analysedTo, from);   // what fell out of the ring before it was analysed is skipped
 
         chunk.resize ((size_t) count);
         {
@@ -130,16 +144,71 @@ void LiveKeyAnalyzer::run()
         State s;
         s.active = true;
         s.level = rms;
-        s.seconds = (double) count / sr;
 
+        // The key is judged from the whole song, not from the last half minute: only the audio that is new since the
+        // last run goes through the network, and its notes are added to the song's histogram (the oldest part fades
+        // with a half-life of three minutes, so a real key change still gets through).
         if (wantKey.load())
         {
-            const KeyHist h = computeKeyHist (chunk, sr);
-            if (h.valid)
+            const long long newCount = w - analysedTo;
+            if ((double) newCount >= sr * 3.0)
             {
-                s.key = guessKey (h.v);
-                s.valid = s.key.tonic >= 0 && s.key.corr >= 0.4;
+                std::vector<float> fresh (chunk.end() - (long) newCount, chunk.end());
+                const KeyHist h = computeKeyHist (fresh, sr);
+                const double secs = (double) newCount / sr;
+                analysedTo = w;
+                if (h.valid)
+                {
+                    const float keep = (float) std::pow (0.5, secs / 180.0);
+                    for (int i = 0; i < 12; ++i)
+                        acc[i] = acc[i] * keep + h.v[i];
+                    accSeconds += secs;
+                }
             }
+
+            if (accSeconds >= 8.0)
+            {
+                const KeyGuess cand = guessKey (acc);
+                if (cand.tonic >= 0 && cand.corr >= 0.4)
+                {
+                    if (shown.tonic < 0)
+                    {
+                        shown = cand;
+                    }
+                    else if (cand.tonic == shown.tonic && cand.minor == shown.minor)
+                    {
+                        shown = cand;
+                        pendCount = 0;
+                    }
+                    else
+                    {
+                        // another key: it must fit clearly better than the one on screen, twice in a row (in the first
+                        // half minute a smaller lead is enough, so that an early wrong guess is corrected quickly)
+                        const double gap = cand.corr - keyScore (acc, shown.tonic, shown.minor);
+                        if (gap >= (accSeconds < 30.0 ? 0.02 : 0.04))
+                        {
+                            if (cand.tonic == pendTonic && cand.minor == pendMinor)
+                                ++pendCount;
+                            else
+                            {
+                                pendTonic = cand.tonic;
+                                pendMinor = cand.minor;
+                                pendCount = 1;
+                            }
+                            if (pendCount >= 2)
+                            {
+                                shown = cand;
+                                pendCount = 0;
+                                    }
+                        }
+                        else
+                            pendCount = 0;
+                    }
+                }
+            }
+            s.key = shown;
+            s.valid = shown.tonic >= 0;
+            s.seconds = accSeconds;
         }
 
         TempoResult tempo;

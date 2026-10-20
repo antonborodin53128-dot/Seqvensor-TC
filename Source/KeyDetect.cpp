@@ -277,6 +277,14 @@ KeyGuess guessKey (const float* hist)
     return g;
 }
 
+double keyScore (const float* hist, int tonic, bool minor)
+{
+    double x[12];
+    for (int i = 0; i < 12; ++i)
+        x[i] = hist[i];
+    return tonic < 0 ? -2.0 : correlate (x, minor ? minorProfile : majorProfile, tonic);
+}
+
 juce::String keyName (int tonic, bool minor)
 {
     static const char* names[12] = { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
