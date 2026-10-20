@@ -6,6 +6,7 @@
 #include "KeyDetect.h"
 #include "Builtin.h"
 #include "Text.h"
+#include "Realtime.h"
 
 Engine::Engine()
 {
@@ -28,6 +29,8 @@ juce::File Engine::getDataDirectory() const
 
 void Engine::initialise()
 {
+    tcrt::boostProcess();
+
     // saved plugin list
     auto listFile = getDataDirectory().getChildFile ("plugins.xml");
     if (auto xml = juce::XmlDocument::parse (listFile))
@@ -484,6 +487,7 @@ void Engine::audioDeviceIOCallbackWithContext (const float* const* inputChannelD
                                                const juce::AudioIODeviceCallbackContext&)
 {
     juce::ScopedNoDenormals noDenormals;
+    tcrt::boostAudioThread();
     callbackCount.fetch_add (1);
     const juce::AudioProcessLoadMeasurer::ScopedTimer timer (loadMeasure, numSamples);
 
