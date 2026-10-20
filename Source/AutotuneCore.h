@@ -185,9 +185,17 @@ namespace tctune
 
         float read (int ch, const Head& h) const
         {
-            const float pos = (float) (wpos - 1) - h.d;
-            const int i0 = (int) std::floor (pos);
-            const float f = pos - (float) i0;
+            // the write position is a growing integer: it must not go through float (above 2^24 samples, ~6 min at 48 kHz,
+            // float steps by 2, then 4 ... samples, the read head jumps in blocks and a mirror of the voice around fs/4 appears)
+            const float di = std::floor (h.d);
+            const float fd = h.d - di;
+            long long i0 = wpos - 1 - (long long) di;
+            float f = 0.0f;
+            if (fd > 0.0f)
+            {
+                --i0;
+                f = 1.0f - fd;
+            }
             const auto& b = ring[ch];
             const float y0 = b[(size_t) ((i0 - 1) & ringMask)], y1 = b[(size_t) (i0 & ringMask)],
                         y2 = b[(size_t) ((i0 + 1) & ringMask)], y3 = b[(size_t) ((i0 + 2) & ringMask)];
