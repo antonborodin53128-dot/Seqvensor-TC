@@ -50,6 +50,20 @@ if(WIN32)
     configure_file(Resources/embedded.rc.in ${CMAKE_BINARY_DIR}/embedded.rc @ONLY)
 endif()
 
+# Steinberg ASIO SDK 2.3.4 (GPLv3 / proprietary dual licence): only its headers are needed, so that TC can open ASIO drivers
+# (Behringer WING, RME, Focusrite, MOTU ... with all their channels, not only one stereo pair as through Windows Audio).
+if(WIN32)
+    FetchContent_Declare(asiosdk
+        URL https://download.steinberg.net/sdk_downloads/ASIO-SDK_2.3.4_2025-10-15.zip
+        URL_HASH SHA256=d5ebf0c20dd2c5f43771fd0c1418f4b361bf52434ee670097cfa6b3a335e2eca
+        SOURCE_SUBDIR no-cmake-here)
+    FetchContent_MakeAvailable(asiosdk)
+    file(GLOB_RECURSE ASIO_DRV_HEADER "${asiosdk_SOURCE_DIR}/*iasiodrv.h")
+    list(GET ASIO_DRV_HEADER 0 ASIO_DRV_HEADER)
+    get_filename_component(ASIO_INCLUDE_DIR "${ASIO_DRV_HEADER}" DIRECTORY)
+    message(STATUS "ASIO SDK headers: ${ASIO_INCLUDE_DIR}")
+endif()
+
 juce_add_gui_app(TC
     PRODUCT_NAME "TC"
     COMPANY_NAME "TC"
@@ -77,6 +91,7 @@ if(WIN32)
     target_include_directories(TC PRIVATE ${onnxruntime_SOURCE_DIR}/include)
     target_link_libraries(TC PRIVATE ${onnxruntime_SOURCE_DIR}/lib/onnxruntime.lib delayimp)
     target_link_options(TC PRIVATE /DELAYLOAD:onnxruntime.dll)
+    target_include_directories(TC PRIVATE ${ASIO_INCLUDE_DIR})
 endif()
 
 target_compile_definitions(TC PRIVATE
@@ -90,7 +105,7 @@ target_compile_definitions(TC PRIVATE
     JUCE_PLUGINHOST_LADSPA=0
     JUCE_WASAPI=1
     JUCE_DIRECTSOUND=1
-    JUCE_ASIO=0
+    JUCE_ASIO=$<IF:$<PLATFORM_ID:Windows>,1,0>
     JUCE_MODAL_LOOPS_PERMITTED=1
     JUCE_STRICT_REFCOUNTEDPOINTER=1)
 
