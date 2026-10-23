@@ -604,7 +604,8 @@ void Track::processChunk (const float* const* inputs, int numInputs,
         if (rl.isLocked() && recWriter != nullptr)
         {
             const float* chans[2] = { l, r };
-            recWriter->write (chans, n);   // a mono file takes only the first channel
+            if (! recWriter->write (chans, n))   // a mono file takes only the first channel
+                recDrops.fetch_add (1);          // the disk did not keep up for 10 s: this block is lost
         }
     }
 
@@ -819,8 +820,12 @@ bool Track::startRecording (const juce::File& file, double sr, juce::TimeSliceTh
 
     {
         const juce::ScopedLock sl (recLock);
-        recWriter.reset (new juce::AudioFormatWriter::ThreadedWriter (writer.release(), thread, 65536));
+        // 10 s of buffer: a disk that stalls (antivirus, a sleeping USB drive) does not cut holes into the take;
+        // the header is rewritten every 5 s, so a crash or a power cut leaves a file that opens with all its audio
+        recWriter.reset (new juce::AudioFormatWriter::ThreadedWriter (writer.release(), thread, juce::jmax (65536, (int) (sr * 10.0))));
+        recWriter->setFlushInterval ((int) (sr * 5.0));
     }
+    recDrops.store (0);
     recActive.store (true);
     return true;
 }

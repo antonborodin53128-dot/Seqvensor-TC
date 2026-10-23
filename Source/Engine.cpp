@@ -1504,6 +1504,7 @@ bool Engine::startRecording (juce::String& message)
 
     recordThread.startThread();
     int started = 0, armed = 0;
+    double bytesPerSecond = 0.0;
     juce::StringArray noInput;
     for (auto& t : getTracks())
     {
@@ -1519,7 +1520,10 @@ bool Engine::startRecording (juce::String& message)
             file = folder.getChildFile (base + " " + juce::String (i) + ".wav");
 
         if (t->startRecording (file, currentSampleRate, recordThread))
+        {
             ++started;
+            bytesPerSecond += currentSampleRate * 3.0 * t->getRecordChannels();   // 24 bit
+        }
     }
 
     if (started == 0)
@@ -1529,10 +1533,19 @@ bool Engine::startRecording (juce::String& message)
                              : "Не удалось создать файлы записи"_ru;
         return false;
     }
+    recordBytesPerSecond.store (bytesPerSecond);
     recording.store (true);
     recordStartMs.store (juce::Time::getMillisecondCounterHiRes());
     message = "Запись: дорожек "_ru + juce::String (started);
     return true;
+}
+
+int Engine::getRecordDrops() const
+{
+    int n = 0;
+    for (auto& t : getTracks())
+        n += t->getRecordDrops();
+    return n;
 }
 
 void Engine::stopRecording()

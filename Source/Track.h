@@ -113,6 +113,8 @@ public:
     bool startRecording (const juce::File& file, double sampleRate, juce::TimeSliceThread& thread);
     void stopRecording();
     bool isRecording() const { return recActive.load(); }
+    int getRecordDrops() const { return recDrops.load(); }   // blocks lost because the disk was too slow
+    int getRecordChannels() const { return recChannels; }
 
     // Used by the engine to keep the audio thread out of chain edits.
     juce::CriticalSection chainLock;
@@ -133,6 +135,7 @@ private:
     std::unique_ptr<juce::AudioFormatWriter::ThreadedWriter> recWriter;
     juce::CriticalSection recLock;
     std::atomic<bool> recActive { false };
+    std::atomic<int> recDrops { 0 };
     int clickPos = -1;
     bool clickAccent = false;
     const std::atomic<double>* bpmSource = nullptr;

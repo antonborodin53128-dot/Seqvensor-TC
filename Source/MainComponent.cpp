@@ -1733,10 +1733,34 @@ void MainComponent::updateTimeline()
             const double t = engine.getRecordedSeconds();
             recordButton.setSpin ((float) std::fmod (t * 5.0, 6.2831853));
             const int s = (int) t;
-            recTimeLabel.setText (juce::String::formatted ("%02d:%02d", s / 60, s % 60), juce::dontSendNotification);
+            recTimeLabel.setText (s >= 3600 ? juce::String::formatted ("%d:%02d:%02d", s / 3600, (s / 60) % 60, s % 60)
+                                            : juce::String::formatted ("%02d:%02d", s / 60, s % 60), juce::dontSendNotification);
+
+            // once a second: lost blocks and the room left on the disk
+            if (s != recCheckSecond)
+            {
+                recCheckSecond = s;
+                juce::StringArray warn;
+                const int drops = engine.getRecordDrops();
+                if (drops > 0)
+                    warn.add ("Запись: диск не успевает, пропусков "_ru + juce::String (drops));
+                const double bps = engine.getRecordBytesPerSecond();
+                const auto free = engine.getRecordFolder().getBytesFreeOnVolume();
+                if (bps > 0.0 && free > 0)
+                {
+                    const int minutes = (int) ((double) free / bps / 60.0);
+                    if (minutes < 30)
+                        warn.add ("Места на диске для записи: ~"_ru + juce::String (minutes) + " мин"_ru);
+                }
+                if (warn.size() > 0)
+                    say (warn.joinIntoString (" · "));
+                recTimeLabel.setColour (juce::Label::textColourId, warn.size() > 0 ? Pal::accent : Pal::red);
+            }
         }
         else if (recTimeLabel.getText().isNotEmpty())
         {
+            recCheckSecond = -1;
+            recTimeLabel.setColour (juce::Label::textColourId, Pal::red);
             recTimeLabel.setText ({}, juce::dontSendNotification);
             recordButton.setActive (false);
         }
