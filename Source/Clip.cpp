@@ -1,5 +1,9 @@
 #include "Clip.h"
 #include "Text.h"
+#include "Realtime.h"
+
+#include <limits>
+#include <new>
 
 std::shared_ptr<ClipData> ClipData::open (const juce::File& file, juce::String& error,
                                           std::unique_ptr<juce::AudioFormatReader>& readerOut)
@@ -16,9 +20,25 @@ std::shared_ptr<ClipData> ClipData::open (const juce::File& file, juce::String& 
 
     const juce::int64 total = readerOut->lengthInSamples;
     const int channels = (int) juce::jlimit<juce::uint32> (1, 2, readerOut->numChannels);
-    if (total <= 0 || total * channels * 4 > 1600000000LL)
+    if (total <= 0)
     {
-        error = total <= 0 ? "Файл пуст"_ru : "Файл слишком большой"_ru;
+        error = "Файл пуст"_ru;
+        readerOut.reset();
+        return nullptr;
+    }
+
+    // The whole file is decoded into memory (instant seeks, no disk on stage). The limit is half of the memory that is
+    // free right now (at least 1.6 GB), and 2^31 samples (12 h at 48 kHz) per file.
+    const juce::int64 need = total * channels * (juce::int64) sizeof (float);
+    const juce::int64 avail = tcrt::availableMemoryBytes();
+    const juce::int64 limit = juce::jmax ((juce::int64) 1600000000LL, avail / 2);
+    if (need > limit || total >= (juce::int64) std::numeric_limits<int>::max() - 1)
+    {
+        const double gb = 1024.0 * 1024.0 * 1024.0;
+        error = total >= (juce::int64) std::numeric_limits<int>::max() - 1
+                  ? "Файл длиннее 12 часов"_ru
+                  : "Файлу нужно "_ru + juce::String ((double) need / gb, 1) + " ГБ памяти, свободно "_ru
+                        + juce::String ((double) avail / gb, 1) + " ГБ. Закройте другие программы или разрежьте файл."_ru;
         readerOut.reset();
         return nullptr;
     }
@@ -28,9 +48,18 @@ std::shared_ptr<ClipData> ClipData::open (const juce::File& file, juce::String& 
     d->name = file.getFileNameWithoutExtension();
     d->sampleRate = readerOut->sampleRate;
     d->numSamples = (int) total;
-    d->audio.setSize (channels, d->numSamples);
-    d->audio.clear();
-    d->peaks.assign ((size_t) ((d->numSamples + peakBlock - 1) / peakBlock) * 2, 0.0f);
+    try
+    {
+        d->audio.setSize (channels, d->numSamples);
+        d->audio.clear();
+        d->peaks.assign ((size_t) ((d->numSamples + peakBlock - 1) / peakBlock) * 2, 0.0f);
+    }
+    catch (const std::bad_alloc&)
+    {
+        error = "Не хватает памяти для файла"_ru;
+        readerOut.reset();
+        return nullptr;
+    }
     d->decoded.store (0);
     return d;
 }

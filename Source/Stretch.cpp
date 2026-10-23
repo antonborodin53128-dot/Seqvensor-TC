@@ -3,6 +3,7 @@
 #include "signalsmith-stretch.h"
 
 #include <cmath>
+#include <new>
 
 std::shared_ptr<ClipData> stretchClipData (const ClipData& source, double timeRatio,
                                            const std::function<bool()>& cancelled)
@@ -24,8 +25,15 @@ std::shared_ptr<ClipData> stretchClipData (const ClipData& source, double timeRa
     result->fileBpm = source.fileBpm;
     result->sampleRate = source.sampleRate;
     result->numSamples = outLength;
-    result->audio.setSize (channels, outLength);
-    result->audio.clear();
+    try
+    {
+        result->audio.setSize (channels, outLength);
+        result->audio.clear();
+    }
+    catch (const std::bad_alloc&)
+    {
+        return nullptr;   // not enough memory for the stretched copy: the clip keeps playing unstretched
+    }
 
     // the processing time starts at the first sample: hand over the first inLatency samples as pre-roll
     std::vector<std::vector<float>> lead ((size_t) channels, std::vector<float> ((size_t) inLatency, 0.0f));

@@ -63,7 +63,17 @@ void tcrt::boostAudioThread()
     }
 }
 
+std::int64_t tcrt::availableMemoryBytes()
+{
+    MEMORYSTATUSEX m {};
+    m.dwLength = sizeof (m);
+    if (GlobalMemoryStatusEx (&m))
+        return (std::int64_t) m.ullAvailPhys;
+    return 4LL * 1024 * 1024 * 1024;
+}
+
 #else
+std::int64_t tcrt::availableMemoryBytes() { return 4LL * 1024 * 1024 * 1024; }
 void tcrt::boostProcess() {}
 void tcrt::boostAudioThread() {}
 #endif

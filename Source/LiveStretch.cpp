@@ -1,4 +1,5 @@
 #include "LiveStretch.h"
+#include <new>
 
 #include "signalsmith-stretch.h"
 
@@ -131,9 +132,17 @@ LiveStretch::LiveStretch (std::shared_ptr<const ClipData> original, double devic
     {
         const double ratio = original->sampleRate / deviceRate;
         const int outLen = (int) std::ceil ((double) original->numSamples / ratio);
-        m.resampled.setSize (m.channels, outLen + 8);
-        m.resampled.clear();
-        std::vector<float> padded ((size_t) original->numSamples + 128, 0.0f);
+        std::vector<float> padded;
+        try
+        {
+            m.resampled.setSize (m.channels, outLen + 8);
+            m.resampled.clear();
+            padded.assign ((size_t) original->numSamples + 128, 0.0f);
+        }
+        catch (const std::bad_alloc&)
+        {
+            return;   // not enough memory for the copy at the device rate: the clip stays silent instead of crashing
+        }
         for (int c = 0; c < m.channels; ++c)
         {
             std::copy (original->audio.getReadPointer (c), original->audio.getReadPointer (c) + original->numSamples, padded.begin());
