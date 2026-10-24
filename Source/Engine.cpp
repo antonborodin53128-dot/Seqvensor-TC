@@ -44,6 +44,8 @@ void Engine::initialise()
 
     // saved audio setup
     std::unique_ptr<juce::XmlElement> audioState = juce::XmlDocument::parse (getDataDirectory().getChildFile ("audio.xml"));
+    if (audioState != nullptr)
+        preferredSetup = std::make_unique<juce::XmlElement> (*audioState);
     auto error = deviceManager.initialise (64, 64, audioState.get(), true);
     if (error.isNotEmpty() || deviceManager.getCurrentAudioDevice() == nullptr)
     {
@@ -54,6 +56,10 @@ void Engine::initialise()
             error = deviceManager.initialise (0, 2, nullptr, true);
     }
     audioInitError = error;
+    onFallback = preferredSetup != nullptr && ! deviceMatchesPreferred();   // the saved device is not there (any more)
+    if (preferredSetup == nullptr)
+        saveChosenSetup();
+    ignoreChangesUntilMs = (juce::int64) juce::Time::getMillisecondCounterHiRes() + 2000;
 
     {   // "keyMode tempoMode left right": how key and tempo are found, and the input channel for the live mode
         const auto parts = juce::StringArray::fromTokens (getDataDirectory().getChildFile ("analysis.txt").loadFileAsString().trim(), " ", "");
@@ -107,7 +113,10 @@ void Engine::shutdown()
 
     saveActiveSequence();
 
-    if (auto xml = deviceManager.createStateXml())
+    // while a fallback runs the saved setup stays the one the user chose
+    if (onFallback && preferredSetup != nullptr)
+        preferredSetup->writeTo (getDataDirectory().getChildFile ("audio.xml"));
+    else if (auto xml = deviceManager.createStateXml())
         xml->writeTo (getDataDirectory().getChildFile ("audio.xml"));
 
     deviceManager.removeAudioCallback (this);
@@ -394,6 +403,131 @@ juce::String Engine::describeState() const
       << " paused=" << (int) paused.load() << " songEnd=" << songEnd.load() << " bpm=" << getBpm()
       << " stopReason=" << stopReason.load() << " stopClock=" << stopClock.load() << " tracks=" << (int) tracks.size() << " engineRunning=" << (int) running;
     return d;
+}
+
+// ---------------------------------------------------------------- device watch
+
+bool Engine::deviceMatchesPreferred() const
+{
+    auto* dev = deviceManager.getCurrentAudioDevice();
+    if (preferredSetup == nullptr)
+        return true;
+    if (dev == nullptr)
+        return false;
+    const auto wantType = preferredSetup->getStringAttribute ("deviceType");
+    if (wantType.isNotEmpty() && wantType != dev->getTypeName())
+        return false;
+    juce::AudioDeviceManager::AudioDeviceSetup setup;
+    deviceManager.getAudioDeviceSetup (setup);
+    const auto wantOut = preferredSetup->getStringAttribute ("audioOutputDeviceName");
+    const auto wantIn = preferredSetup->getStringAttribute ("audioInputDeviceName");
+    return (wantOut.isEmpty() || wantOut == setup.outputDeviceName) && (wantIn.isEmpty() || wantIn == setup.inputDeviceName);
+}
+
+bool Engine::preferredDevicePresent()
+{
+    if (preferredSetup == nullptr)
+        return false;
+    const auto typeName = preferredSetup->getStringAttribute ("deviceType");
+    const auto wantOut = preferredSetup->getStringAttribute ("audioOutputDeviceName");
+    const auto wantIn = preferredSetup->getStringAttribute ("audioInputDeviceName");
+    for (auto* type : deviceManager.getAvailableDeviceTypes())
+    {
+        if (type->getTypeName() != typeName)
+            continue;
+        type->scanForDevices();
+        const auto outs = type->getDeviceNames (false), ins = type->getDeviceNames (true);
+        return (wantOut.isEmpty() || outs.contains (wantOut)) && (wantIn.isEmpty() || ins.contains (wantIn));
+    }
+    return false;
+}
+
+void Engine::saveChosenSetup()
+{
+    if (auto xml = deviceManager.createStateXml())
+    {
+        preferredSetup = std::make_unique<juce::XmlElement> (*xml);
+        preferredSetup->writeTo (getDataDirectory().getChildFile ("audio.xml"));
+    }
+}
+
+void Engine::audioSetupChangedByUser()
+{
+    // changes we made ourselves (fallback / coming back) are reported a moment later: they are not the user's choice
+    if ((juce::int64) juce::Time::getMillisecondCounterHiRes() < ignoreChangesUntilMs)
+        return;
+    auto* dev = deviceManager.getCurrentAudioDevice();
+    if (dev == nullptr || ! dev->isOpen())
+        return;   // a device that just went away is handled by checkAudioDevice()
+    onFallback = false;
+    lostChecks = 0;
+    saveChosenSetup();
+}
+
+void Engine::fallBackToDefault()
+{
+    if (recording.load())
+        stopRecording();
+    if (preferredSetup == nullptr)
+        if (auto xml = deviceManager.createStateXml())
+            preferredSetup = std::make_unique<juce::XmlElement> (*xml);
+
+    ignoreChangesUntilMs = (juce::int64) juce::Time::getMillisecondCounterHiRes() + 2500;
+    auto error = deviceManager.initialise (2, 2, nullptr, true);   // the system default devices
+    if (deviceManager.getCurrentAudioDevice() == nullptr)
+        error = deviceManager.initialise (0, 2, nullptr, true);
+    audioInitError = error;
+    onFallback = true;
+    lostChecks = 0;
+    juce::String name = "-";
+    if (auto* d = deviceManager.getCurrentAudioDevice())
+        name = d->getName();
+    logLine ("audio device lost: switched to " + name);
+    if (onAudioNotice)
+        onAudioNotice ("Устройство звука отключено, включено стандартное: "_ru + name);
+}
+
+void Engine::checkAudioDevice()
+{
+    const auto now = (juce::int64) juce::Time::getMillisecondCounterHiRes();
+    if (now < ignoreChangesUntilMs)
+        return;
+
+    auto* dev = deviceManager.getCurrentAudioDevice();
+    const bool alive = dev != nullptr && dev->isOpen() && dev->isPlaying();
+
+    if (! onFallback)
+    {
+        // the chosen device stopped delivering (unplugged): two checks in a row (a driver restart takes a moment)
+        lostChecks = alive ? 0 : lostChecks + 1;
+        if (lostChecks >= 3)
+            fallBackToDefault();
+        return;
+    }
+
+    // a fallback is running: is the chosen device back? (not while playing or recording)
+    if (now - lastBackCheckMs < 3000 || isPlaying() || recording.load())
+        return;
+    lastBackCheckMs = now;
+    if (! preferredDevicePresent())
+        return;
+
+    ignoreChangesUntilMs = now + 2500;
+    const auto error = deviceManager.initialise (64, 64, preferredSetup.get(), true);
+    if (error.isEmpty() && deviceManager.getCurrentAudioDevice() != nullptr && deviceMatchesPreferred())
+    {
+        onFallback = false;
+        lostChecks = 0;
+        audioInitError = {};
+        logLine ("audio device is back: " + deviceManager.getCurrentAudioDevice()->getName());
+        if (onAudioNotice)
+            onAudioNotice ("Устройство звука снова подключено: "_ru + deviceManager.getCurrentAudioDevice()->getName());
+    }
+    else
+    {
+        fallBackToDefault();   // it showed up but did not open: back to the default one
+        onFallback = true;
+    }
 }
 
 bool Engine::isAudioAlive() const

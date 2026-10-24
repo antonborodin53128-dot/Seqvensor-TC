@@ -262,6 +262,7 @@ MainComponent::MainComponent()
 
     engine.initialise();
     engine.onTracksChanged = [this] { rebuildTracks(); };
+    engine.onAudioNotice = [safe = juce::Component::SafePointer<MainComponent> (this)] (const juce::String& m) { if (safe != nullptr) safe->say (m); };
     engine.deviceManager.addChangeListener (this);
     engine.knownPlugins.addChangeListener (this);
 
@@ -423,6 +424,7 @@ MainComponent::MainComponent()
 MainComponent::~MainComponent()
 {
     stopTimer();
+    engine.onAudioNotice = nullptr;
     engine.deviceManager.removeChangeListener (this);
     engine.knownPlugins.removeChangeListener (this);
     engine.onTracksChanged = nullptr;
@@ -1706,6 +1708,11 @@ void MainComponent::tapTempo()
 
 void MainComponent::changeListenerCallback (juce::ChangeBroadcaster* source)
 {
+    if (source == &engine.deviceManager)
+    {
+        engine.audioSetupChangedByUser();
+        return;
+    }
     if (source == &engine.knownPlugins)
     {
         // the built-in effects cannot be removed from the list ("Remove" / "Clear list" in the scanner dialog)
@@ -1848,6 +1855,11 @@ void MainComponent::keepNormalWindow()
 void MainComponent::timerCallback()
 {
     keepNormalWindow();
+    if (++deviceWatchTick >= 15)   // twice a second
+    {
+        deviceWatchTick = 0;
+        engine.checkAudioDevice();
+    }
     syncLyrics();
     for (auto* t : trackComponents)
         t->updateLive();

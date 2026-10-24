@@ -173,6 +173,7 @@ private:
     IconButton recordButton { IconButton::Icon::Record };
     juce::Label recTimeLabel;
     int recCheckSecond = -1;
+    int deviceWatchTick = 0;
 
     // tracks
     juce::Viewport viewport;

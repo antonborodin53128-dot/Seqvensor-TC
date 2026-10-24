@@ -64,6 +64,16 @@ public:
     void shutdown();
 
     juce::AudioDeviceManager deviceManager;
+private:
+    std::unique_ptr<juce::XmlElement> preferredSetup;   // the setup chosen by the user (may differ from the open one while a fallback runs)
+    bool onFallback = false;
+    int lostChecks = 0;
+    juce::int64 lastBackCheckMs = 0, ignoreChangesUntilMs = 0;
+    bool deviceMatchesPreferred() const;
+    bool preferredDevicePresent();
+    void fallBackToDefault();
+    void saveChosenSetup();
+public:
     juce::AudioPluginFormatManager pluginFormats;
     juce::KnownPluginList knownPlugins;
     TcPlayHead playHead;
@@ -113,6 +123,13 @@ public:
     bool isAudioAlive() const;                          // audio device open and delivering blocks
     juce::int64 getCallbackCount() const { return callbackCount.load(); }
     juce::String audioInitError;
+
+    // Audio device watch (message thread, call about twice a second). When the chosen device disappears (USB mixer unplugged,
+    // Bluetooth headphones off) the program switches to the system default by itself; when the chosen device is back and
+    // nothing is playing or recorded, it switches back. The choice made in the audio dialog is remembered in preferred-audio.xml.
+    void checkAudioDevice();
+    void audioSetupChangedByUser();                     // the device manager reported a change
+    std::function<void (const juce::String&)> onAudioNotice;
     double getBeatSeconds() const { return 60.0 / getBpm(); }
 
     // Audio clips (message thread). The file is decoded on a background thread.
