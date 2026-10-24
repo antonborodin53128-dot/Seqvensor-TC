@@ -60,6 +60,7 @@ void Engine::initialise()
     if (preferredSetup == nullptr)
         saveChosenSetup();
     ignoreChangesUntilMs = (juce::int64) juce::Time::getMillisecondCounterHiRes() + 2000;
+    lastSignature = deviceSignature();
 
     {   // "keyMode tempoMode left right": how key and tempo are found, and the input channel for the live mode
         const auto parts = juce::StringArray::fromTokens (getDataDirectory().getChildFile ("analysis.txt").loadFileAsString().trim(), " ", "");
@@ -451,6 +452,72 @@ void Engine::saveChosenSetup()
     }
 }
 
+juce::String Engine::deviceSignature() const
+{
+    auto* dev = deviceManager.getCurrentAudioDevice();
+    if (dev == nullptr)
+        return {};
+    juce::AudioDeviceManager::AudioDeviceSetup setup;
+    deviceManager.getAudioDeviceSetup (setup);
+    return dev->getTypeName() + "|" + setup.outputDeviceName + "|" + setup.inputDeviceName;
+}
+
+// ASIO drivers are listed whether the card is plugged in or not (they come from the registry). A card counts as connected when
+// the same name also shows up among the Windows audio devices ("WING-USB ASIO Driver" <-> "OUT 1-2 (BEHRINGER WING-USB)").
+juce::StringArray Engine::findConnectedAsioCards()
+{
+    juce::StringArray found;
+    juce::AudioIODeviceType* asio = nullptr;
+    juce::AudioIODeviceType* wasapi = nullptr;
+    for (auto* t : deviceManager.getAvailableDeviceTypes())
+    {
+        if (t->getTypeName() == "ASIO")
+            asio = t;
+        else if (t->getTypeName() == "Windows Audio" && wasapi == nullptr)
+            wasapi = t;
+    }
+    if (asio == nullptr || wasapi == nullptr)
+        return found;
+
+    wasapi->scanForDevices();
+    juce::String windowsNames;
+    for (bool input : { false, true })
+        for (auto& n : wasapi->getDeviceNames (input))
+            windowsNames += n.toLowerCase() + "\n";
+
+    static const char* generic[] = { "fl studio", "asio4all", "asio directx", "asio multimedia", "generic low latency", "voicemeeter",
+                                     "flexasio", "vb-audio", "virtual", "reaper", "steinberg", "jack", "dante" };
+    for (auto& driver : asio->getDeviceNames (false))
+    {
+        const auto lower = driver.toLowerCase();
+        bool skip = false;
+        for (auto* g : generic)
+            skip = skip || lower.contains (g);
+        if (skip)
+            continue;
+        auto token = lower.replace ("asio", " ").replace ("driver", " ").replace ("(", " ").replace (")", " ").trim();
+        while (token.contains ("  "))
+            token = token.replace ("  ", " ");
+        if (token.length() >= 3 && windowsNames.contains (token))
+            found.add (driver);
+    }
+    return found;
+}
+
+bool Engine::switchToAsioCard (const juce::String& driver)
+{
+    ignoreChangesUntilMs = (juce::int64) juce::Time::getMillisecondCounterHiRes() + 2500;
+    deviceManager.setCurrentAudioDeviceType ("ASIO", true);
+    juce::AudioDeviceManager::AudioDeviceSetup setup;
+    deviceManager.getAudioDeviceSetup (setup);
+    setup.outputDeviceName = driver;
+    setup.inputDeviceName = driver;
+    setup.useDefaultInputChannels = setup.useDefaultOutputChannels = true;
+    const auto error = deviceManager.setAudioDeviceSetup (setup, true);
+    auto* dev = deviceManager.getCurrentAudioDevice();
+    return error.isEmpty() && dev != nullptr && dev->isOpen() && dev->getTypeName() == "ASIO";
+}
+
 void Engine::audioSetupChangedByUser()
 {
     // changes we made ourselves (fallback / coming back) are reported a moment later: they are not the user's choice
@@ -459,6 +526,10 @@ void Engine::audioSetupChangedByUser()
     auto* dev = deviceManager.getCurrentAudioDevice();
     if (dev == nullptr || ! dev->isOpen())
         return;   // a device that just went away is handled by checkAudioDevice()
+    const auto sig = deviceSignature();
+    if (sig == lastSignature)
+        return;   // the same device: a rescan of the device list, not a choice of the user
+    lastSignature = sig;
     onFallback = false;
     lostChecks = 0;
     saveChosenSetup();
@@ -479,6 +550,7 @@ void Engine::fallBackToDefault()
     audioInitError = error;
     onFallback = true;
     lostChecks = 0;
+    lastSignature = deviceSignature();
     juce::String name = "-";
     if (auto* d = deviceManager.getCurrentAudioDevice())
         name = d->getName();
@@ -495,6 +567,59 @@ void Engine::checkAudioDevice()
 
     auto* dev = deviceManager.getCurrentAudioDevice();
     const bool alive = dev != nullptr && dev->isOpen() && dev->isPlaying();
+
+    // An ASIO card that gets plugged in is taken at once (unless something is playing or recording): the program watches which
+    // cards are connected and acts when a new one shows up. Cards that were already there at the start are not forced on the user.
+    if (alive && dev->getTypeName() != "ASIO" && ! isPlaying() && ! recording.load() && now - lastAsioScanMs >= 3000)
+    {
+        lastAsioScanMs = now;
+        const auto cards = findConnectedAsioCards();
+        if (! asioBaselineDone)
+        {
+            asioBaselineDone = true;
+            asioCardsPresent = cards;
+        }
+        else
+        {
+            for (auto& c : cards)
+                if (! asioCardsPresent.contains (c))
+                {
+                    asioCardsPresent = cards;
+                    // the card the user chose before (with the channels and buffer he set): the "device is back" code below restores it
+                    if (onFallback && preferredSetup != nullptr && preferredSetup->getStringAttribute ("deviceType") == "ASIO"
+                        && preferredSetup->getStringAttribute ("audioOutputDeviceName") == c)
+                        break;
+                    if (switchToAsioCard (c))
+                    {
+                        onFallback = false;
+                        lostChecks = 0;
+                        audioInitError = {};
+                        saveChosenSetup();
+                        lastSignature = deviceSignature();
+                        logLine ("ASIO card connected: " + c);
+                        if (onAudioNotice)
+                            onAudioNotice ("Подключена звуковая карта, включён ASIO: "_ru + c);
+                    }
+                    else
+                    {
+                        // it did not open: back to what worked
+                        ignoreChangesUntilMs = now + 2500;
+                        deviceManager.initialise (2, 2, nullptr, true);
+                        lastSignature = deviceSignature();
+                        if (onAudioNotice)
+                            onAudioNotice ("Звуковая карта подключена, но ASIO не открылся: "_ru + c);
+                    }
+                    return;
+                }
+            asioCardsPresent = cards;
+        }
+    }
+    else if (alive && dev->getTypeName() == "ASIO" && now - lastAsioScanMs >= 3000 && ! isPlaying())
+    {
+        lastAsioScanMs = now;
+        asioCardsPresent = findConnectedAsioCards();   // stays up to date, so that a card that is unplugged and plugged in again is "new"
+        asioBaselineDone = true;
+    }
 
     if (! onFallback)
     {
@@ -519,6 +644,7 @@ void Engine::checkAudioDevice()
         onFallback = false;
         lostChecks = 0;
         audioInitError = {};
+        lastSignature = deviceSignature();
         logLine ("audio device is back: " + deviceManager.getCurrentAudioDevice()->getName());
         if (onAudioNotice)
             onAudioNotice ("Устройство звука снова подключено: "_ru + deviceManager.getCurrentAudioDevice()->getName());

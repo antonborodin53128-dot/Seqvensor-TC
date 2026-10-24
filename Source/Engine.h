@@ -69,6 +69,13 @@ private:
     bool onFallback = false;
     int lostChecks = 0;
     juce::int64 lastBackCheckMs = 0, ignoreChangesUntilMs = 0;
+    juce::String deviceSignature() const;                // type | output | input of the open device
+    juce::String lastSignature;
+    juce::StringArray asioCardsPresent;                  // ASIO cards that were present at the last look
+    bool asioBaselineDone = false;
+    juce::int64 lastAsioScanMs = 0;
+    bool switchToAsioCard (const juce::String& driver);
+    juce::StringArray findConnectedAsioCards();
     bool deviceMatchesPreferred() const;
     bool preferredDevicePresent();
     void fallBackToDefault();
